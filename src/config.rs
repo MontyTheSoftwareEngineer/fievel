@@ -44,12 +44,12 @@ pub struct Speeds {
 impl Default for Speeds {
     fn default() -> Self {
         Self {
-            normal: 800.0,
-            slow: 200.0,
-            fast: 1600.0,
-            scroll: 8.0,
-            scroll_slow: 2.0,
-            scroll_fast: 16.0,
+            normal: 300.0,
+            slow: 100.0,
+            fast: 900.0,
+            scroll: 6.0,
+            scroll_slow: 1.5,
+            scroll_fast: 24.0,
         }
     }
 }
@@ -257,12 +257,14 @@ mod tests {
         assert_eq!(config.mode, Mode::Hold);
         assert!(config.notify);
         assert_eq!(config.keys.named(), Keys::default().named());
-        assert_eq!(config.speeds.normal, 800.0);
-        assert_eq!(config.speeds.slow, 200.0);
-        assert_eq!(config.speeds.fast, 1600.0);
-        assert_eq!(config.speeds.scroll, 8.0);
-        assert_eq!(config.speeds.scroll_slow, 2.0);
-        assert_eq!(config.speeds.scroll_fast, 16.0);
+        for speeds in [config.speeds, Speeds::default(), Config::parse("").unwrap().speeds] {
+            assert_eq!(speeds.normal, 300.0);
+            assert_eq!(speeds.slow, 100.0);
+            assert_eq!(speeds.fast, 900.0);
+            assert_eq!(speeds.scroll, 6.0);
+            assert_eq!(speeds.scroll_slow, 1.5);
+            assert_eq!(speeds.scroll_fast, 24.0);
+        }
     }
 
     #[test]
@@ -294,7 +296,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.speeds.normal, 900.0);
-        assert_eq!(config.speeds.fast, 1600.0);
+        assert_eq!(config.speeds.fast, 900.0);
         assert_eq!(config.keys.free_mouse, vec![K::KEY_F4]);
         assert_eq!(config.keys.left, K::KEY_Q);
         assert_eq!(config.keys.scroll_up, K::KEY_COMMA);

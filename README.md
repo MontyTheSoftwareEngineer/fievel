@@ -93,12 +93,12 @@ mode = "hold" # "hold" (default) or "toggle"
 notify = true # Persistent, faint Free Mouse Mode indicator
 
 [speeds]
-normal = 800
-slow = 200
-fast = 1600
-scroll = 8
-scroll_slow = 2
-scroll_fast = 16
+normal = 300
+slow = 100
+fast = 900
+scroll = 6
+scroll_slow = 1.5
+scroll_fast = 24
 
 [keys]
 free_mouse = "f3" # Also accepts chords such as "leftalt + space"
@@ -149,9 +149,19 @@ Space must remain held to keep the mode active. In toggle mode, release the chor
 and then use Space normally for clicking.
 
 `speeds.scroll`, `speeds.scroll_slow`, and `speeds.scroll_fast` set normal, slow,
-and fast scrolling in notches per second (defaults: 8, 2, and 16). Speed changes
+and fast scrolling in notches per second (defaults: 6, 1.5, and 24). Speed changes
 apply immediately to held scrolling, with slow taking priority over fast.
 The initial one-notch response on a scroll press is unchanged.
+
+Default pointer speeds are 300 / 100 / 900 input units per second for normal /
+slow / fast. These and the scroll defaults match the steady-state rates of a
+Mouseless configuration with `base_move_speed = 5`, `move_speed_multiplier = 3`,
+`base_wheel_speed = 0.1`, and `wheel_speed_multiplier = 4`: its movement loop
+converts base speeds with a factor of 60 per second, multiplying for fast and
+dividing for slow. Fievel keeps instantaneous speed changes and normalized
+diagonals rather than Mouseless's easing; desktop scaling and acceleration can
+still make the on-screen feel differ. Existing explicit speed settings override
+these defaults.
 
 Restart the application to apply edits. Inspect the effective configuration
 without grabbing a keyboard:

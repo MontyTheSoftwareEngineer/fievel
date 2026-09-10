@@ -329,11 +329,11 @@ mod tests {
         e.key(K::KEY_F3, 0);
         e.key(K::KEY_L, 1);
         for (key, value, distance) in [
-            (K::KEY_L, 2, 8),
-            (K::KEY_S, 1, 16),
-            (K::KEY_A, 1, 2),
-            (K::KEY_A, 0, 16),
-            (K::KEY_S, 0, 8),
+            (K::KEY_L, 2, 3),
+            (K::KEY_S, 1, 9),
+            (K::KEY_A, 1, 1),
+            (K::KEY_A, 0, 9),
+            (K::KEY_S, 0, 3),
         ] {
             assert!(e.key(key, value).keyboard.is_empty());
             assert_eq!(e.advance(Duration::from_millis(10)).mouse[0].value(), distance);
@@ -652,8 +652,8 @@ mod tests {
         assert_eq!(output.keyboard.len(), 4);
         assert!(output.mouse.is_empty());
         assert!(e.active());
-        assert_eq!(e.speed(), 800.0);
-        assert_eq!(e.scroll_speed(), 8.0);
+        assert_eq!(e.speed(), 300.0);
+        assert_eq!(e.scroll_speed(), 6.0);
         assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
         e.release_all();
         assert!(e.activation_keys.is_empty());
@@ -672,17 +672,17 @@ mod tests {
                 vec![(EventType::RELATIVE.0, R::REL_X.0, distance)]
             );
         };
-        step(K::KEY_F3, 2, 8);
-        step(K::KEY_S, 1, 16);
-        step(K::KEY_S, 2, 16);
-        step(K::KEY_S, 0, 8);
-        step(K::KEY_A, 1, 2);
-        step(K::KEY_A, 2, 2);
-        step(K::KEY_S, 1, 2);
-        step(K::KEY_S, 0, 2);
-        step(K::KEY_S, 1, 2);
-        step(K::KEY_A, 0, 16);
-        step(K::KEY_S, 0, 8);
+        step(K::KEY_F3, 2, 3);
+        step(K::KEY_S, 1, 9);
+        step(K::KEY_S, 2, 9);
+        step(K::KEY_S, 0, 3);
+        step(K::KEY_A, 1, 1);
+        step(K::KEY_A, 2, 1);
+        step(K::KEY_S, 1, 1);
+        step(K::KEY_S, 0, 1);
+        step(K::KEY_S, 1, 1);
+        step(K::KEY_A, 0, 9);
+        step(K::KEY_S, 0, 3);
     }
 
     #[test]
@@ -697,26 +697,24 @@ mod tests {
             e.key(K::KEY_L, 1);
             assert_eq!(
                 e.advance(Duration::from_millis(10)).mouse[0].value(),
-                if key == K::KEY_A { 2 } else { 16 }
+                if key == K::KEY_A { 1 } else { 9 }
             );
             e.key(K::KEY_F3, 0);
-            assert_eq!(e.speed(), 800.0);
+            assert_eq!(e.speed(), 300.0);
             assert!(e.advance(Duration::from_millis(10)).mouse.is_empty());
             assert!(e.key(key, 2).keyboard.is_empty());
             assert!(e.key(key, 0).keyboard.is_empty());
             assert_eq!(e.key(key, 1).keyboard.len(), 1);
             e.key(key, 0);
             e.key(K::KEY_F3, 1);
-            assert_eq!(e.speed(), 800.0);
+            assert_eq!(e.speed(), 300.0);
         }
     }
 
     #[test]
     fn speed_modes_preserve_diagonal_normalization_and_modify_scroll_rate() {
-        for (key, expected, scroll) in [(K::KEY_S, 1131, 16), (K::KEY_A, 141, 2)] {
-            let mut config = Config::default();
-            config.speeds.scroll = 10.0;
-            let mut e = Engine::new(config);
+        for (key, expected, scroll) in [(K::KEY_S, 636, 24.0), (K::KEY_A, 70, 1.5)] {
+            let mut e = Engine::new(Config::default());
             e.key(K::KEY_F3, 1);
             e.key(key, 1);
             e.key(K::KEY_L, 1);
@@ -735,7 +733,36 @@ mod tests {
                 }
             }
             assert_eq!(totals[..2], [expected, expected]);
-            assert!((scroll - 1..=scroll).contains(&totals[2]));
+            assert!((scroll - 1.0..=scroll).contains(&f64::from(totals[2])));
+        }
+    }
+
+    #[test]
+    fn default_scroll_modes_match_mouseless_steady_state_rates() {
+        for (modifier, rate) in [(None, 6.0), (Some(K::KEY_A), 1.5), (Some(K::KEY_S), 24.0)] {
+            let mut e = Engine::new(Config::default());
+            e.key(K::KEY_F3, 1);
+            if let Some(key) = modifier {
+                e.key(key, 1);
+            }
+            for key in [K::KEY_DOT, K::KEY_COMMA] {
+                assert_eq!(e.key(key, 1).mouse[0].value(), 1);
+            }
+            assert_eq!(e.scroll_speed(), rate);
+            let mut totals = [0; 2];
+            for _ in 0..1000 {
+                for event in e.advance(Duration::from_millis(4)).mouse {
+                    let axis = match R(event.code()) {
+                        R::REL_HWHEEL => 0,
+                        R::REL_WHEEL => 1,
+                        _ => panic!("unexpected axis"),
+                    };
+                    totals[axis] += event.value();
+                }
+            }
+            for total in totals {
+                assert!((f64::from(total) - rate * 4.0).abs() <= 1.0);
+            }
         }
     }
 

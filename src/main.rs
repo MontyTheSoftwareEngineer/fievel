@@ -381,8 +381,8 @@ mod tests {
         let path = concat!(env!("CARGO_MANIFEST_DIR"), "/fievel.config");
         let args = Args::try_parse_from(["fievel", "--config", path]).unwrap();
         let (_, config) = load_config(&args).unwrap();
-        assert_eq!(config.speeds.normal, 800.0);
-        assert_eq!(config.speeds.scroll, 8.0);
+        assert_eq!(config.speeds.normal, 300.0);
+        assert_eq!(config.speeds.scroll, 6.0);
         let args = Args::try_parse_from([
             "fievel", "--config", path, "--speed", "1200", "--scroll-speed", "12",
         ])
@@ -390,10 +390,10 @@ mod tests {
         let (_, config) = load_config(&args).unwrap();
         assert_eq!(config.speeds.normal, 1200.0);
         assert_eq!(config.speeds.scroll, 12.0);
-        assert_eq!(config.speeds.slow, 200.0);
-        assert_eq!(config.speeds.fast, 1600.0);
-        assert_eq!(config.speeds.scroll_slow, 2.0);
-        assert_eq!(config.speeds.scroll_fast, 16.0);
+        assert_eq!(config.speeds.slow, 100.0);
+        assert_eq!(config.speeds.fast, 900.0);
+        assert_eq!(config.speeds.scroll_slow, 1.5);
+        assert_eq!(config.speeds.scroll_fast, 24.0);
     }
 
     #[test]
