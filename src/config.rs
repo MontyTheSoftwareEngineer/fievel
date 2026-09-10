@@ -8,6 +8,7 @@ pub struct Config {
     pub mode: Mode,
     pub notify: bool,
     pub speeds: Speeds,
+    pub easing: Easing,
     pub keys: Keys,
 }
 
@@ -17,6 +18,7 @@ impl Default for Config {
             mode: Mode::default(),
             notify: true,
             speeds: Speeds::default(),
+            easing: Easing::default(),
             keys: Keys::default(),
         }
     }
@@ -50,6 +52,22 @@ impl Default for Speeds {
             scroll: 6.0,
             scroll_slow: 1.5,
             scroll_fast: 24.0,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Easing {
+    pub movement: f64,
+    pub scroll: f64,
+}
+
+impl Default for Easing {
+    fn default() -> Self {
+        Self {
+            movement: 0.2,
+            scroll: 0.3,
         }
     }
 }
@@ -215,6 +233,14 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), String> {
         for (name, value) in [
+            ("movement", self.easing.movement),
+            ("scroll", self.easing.scroll),
+        ] {
+            if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+                return Err(format!("easing.{name}: must be finite and between 0 and 1"));
+            }
+        }
+        for (name, value) in [
             ("normal", self.speeds.normal),
             ("slow", self.speeds.slow),
             ("fast", self.speeds.fast),
@@ -257,6 +283,8 @@ mod tests {
         assert_eq!(config.mode, Mode::Hold);
         assert!(config.notify);
         assert_eq!(config.keys.named(), Keys::default().named());
+        assert_eq!(config.easing.movement, 0.2);
+        assert_eq!(config.easing.scroll, 0.3);
         for speeds in [config.speeds, Speeds::default(), Config::parse("").unwrap().speeds] {
             assert_eq!(speeds.normal, 300.0);
             assert_eq!(speeds.slow, 100.0);
@@ -265,6 +293,25 @@ mod tests {
             assert_eq!(speeds.scroll_slow, 1.5);
             assert_eq!(speeds.scroll_fast, 24.0);
         }
+    }
+
+    #[test]
+    fn easing_defaults_overrides_and_validation() {
+        let default = Config::parse("").unwrap();
+        assert_eq!(default.easing.movement, 0.2);
+        assert_eq!(default.easing.scroll, 0.3);
+        let config = Config::parse("[easing]\nmovement = 0").unwrap();
+        assert_eq!(config.easing.movement, 0.0);
+        assert_eq!(config.easing.scroll, 0.3);
+        let config = Config::parse("[easing]\nmovement = 1\nscroll = 0.5").unwrap();
+        assert_eq!(config.easing.movement, 1.0);
+        assert_eq!(config.easing.scroll, 0.5);
+        for field in ["movement", "scroll"] {
+            for value in ["-0.1", "1.01", "nan", "inf", "-inf", "'0.2'", "true"] {
+                assert!(Config::parse(&format!("[easing]\n{field} = {value}")).is_err());
+            }
+        }
+        assert!(Config::parse("[easing]\nmovment = 0.2").is_err());
     }
 
     #[test]

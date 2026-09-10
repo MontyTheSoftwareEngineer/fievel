@@ -19,13 +19,16 @@ Mouse Mode is active (Wayland/Hyprland/Sway; see [Mode indicator](#mode-indicato
 | S | Hold for fast movement and scrolling; release for normal speed |
 | A | Hold for slow movement and scrolling; release for normal speed |
 
-Movement is constant-speed, independent of keyboard repeat, with normalized
-diagonals (not faster than horizontal/vertical movement). Opposite directions
-cancel. Scrolling sends one notch immediately, then repeats at a constant rate
-while held. Leaving Free Mouse Mode stops movement/scrolling and releases both mouse buttons,
+Movement and scrolling ease toward their configured speeds, independently of
+keyboard repeat. Movement has normalized diagonal target speeds (not faster
+than horizontal/vertical movement). Opposite directions cancel the target
+velocity. Releasing direction keys gently slows movement/scrolling to a stop;
+changing directions produces smooth turns. Scrolling still sends one notch
+immediately on a direction press, then eases toward its repeat rate.
+Leaving Free Mouse Mode immediately stops movement/scrolling and releases both mouse buttons,
 even if Space or I is still held. F3 itself never reaches applications.
 Other keys work normally, including modifiers and Ctrl+C.
-Speed changes are immediate, not accelerated ramps. Slow takes priority if A
+Speed changes also ease toward the new target. Slow takes priority if A
 and S are both held; releasing A while S remains held returns to fast speed.
 These modifiers affect both pointer movement and scrolling, with separately
 configurable rates. Outside Free Mouse
@@ -100,6 +103,10 @@ scroll = 6
 scroll_slow = 1.5
 scroll_fast = 24
 
+[easing]
+movement = 0.2
+scroll = 0.3
+
 [keys]
 free_mouse = "f3" # Also accepts chords such as "leftalt + space"
 left = "h"
@@ -122,6 +129,7 @@ or unreadable file stops startup before any input device is grabbed.
 Unknown settings, unknown key names, duplicate control bindings, repeated keys
 within an activation chord, and nonpositive,
 nonfinite, or greater-than-100000 speeds are rejected.
+Easing values must be finite numbers between 0 and 1.
 The old `keys.exit` setting has been removed; delete it from existing configs.
 
 Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
@@ -131,7 +139,8 @@ a single distinct key or a `+`-separated chord such as `"leftalt + space"` or
 `"leftctrl+leftalt+f3"`. All chord keys must be held together, in either press
 order; extra held keys do not prevent activation. If keyd already remaps D+F
 to F3, leave `free_mouse = "f3"`.
-The top-level `mode` and `notify` settings must appear before `[speeds]` and `[keys]`.
+The top-level `mode` and `notify` settings must appear before any table
+(`[speeds]`, `[easing]`, or `[keys]`).
 `"hold"` activates mouse mode only while every activation key is down; releasing
 any chord member leaves the mode. `"toggle"` switches it on/off each time the
 whole chord becomes held; releases and keyboard autorepeat do not toggle it.
@@ -150,7 +159,7 @@ and then use Space normally for clicking.
 
 `speeds.scroll`, `speeds.scroll_slow`, and `speeds.scroll_fast` set normal, slow,
 and fast scrolling in notches per second (defaults: 6, 1.5, and 24). Speed changes
-apply immediately to held scrolling, with slow taking priority over fast.
+update the target rate of held scrolling, with slow taking priority over fast.
 The initial one-notch response on a scroll press is unchanged.
 
 Default pointer speeds are 300 / 100 / 900 input units per second for normal /
@@ -158,10 +167,24 @@ slow / fast. These and the scroll defaults match the steady-state rates of a
 Mouseless configuration with `base_move_speed = 5`, `move_speed_multiplier = 3`,
 `base_wheel_speed = 0.1`, and `wheel_speed_multiplier = 4`: its movement loop
 converts base speeds with a factor of 60 per second, multiplying for fast and
-dividing for slow. Fievel keeps instantaneous speed changes and normalized
-diagonals rather than Mouseless's easing; desktop scaling and acceleration can
-still make the on-screen feel differ. Existing explicit speed settings override
-these defaults.
+dividing for slow. Fievel keeps normalized diagonals; desktop scaling and
+acceleration can still make the on-screen feel differ. Existing explicit speed
+settings override these defaults.
+
+`easing.movement` and `easing.scroll` control acceleration, deceleration after
+direction-key release, and transitions between normal/slow/fast speeds.
+Defaults are 0.2 and 0.3, matching the easing factors in that Mouseless config.
+Each is the fraction of the gap to the target velocity closed per 1/60 second,
+adjusted for elapsed time so it does not depend on keyboard repeat or tick rate.
+Smaller positive values give gentler, longer transitions; values nearer 1 feel
+sharper. Set either value to **0** to disable its easing (1 is also instantaneous).
+Setting both to 0 restores the previous immediate start/stop behavior.
+
+At the defaults, movement closes about 95% of the velocity gap in 224 ms and
+scrolling in 140 ms. Scroll output is still whole notches, not pixel-smooth
+scrolling; the initial notch stays immediate, and a short scroll tail can continue
+after releasing a direction. Mouse-button releases, leaving mouse mode, and
+shutdown are always immediate, with no residual movement on reactivation.
 
 Restart the application to apply edits. Inspect the effective configuration
 without grabbing a keyboard:
@@ -219,9 +242,10 @@ is created. `--list` and `--check-config` never initialize the indicator either.
 
 ## Disable desktop pointer acceleration
 
-The application never adds acceleration, but a compositor/X server can still
-accelerate relative uinput events. **Set a flat acceleration profile for
-`fievel pointer` to get constant on-screen speed.** Set a fixed sensitivity
+Fievel's easing controls velocity over time; compositor/X server pointer
+acceleration is separate and can further alter relative uinput events.
+**Set a flat acceleration profile for `fievel pointer` to get predictable
+on-screen speeds and easing.** Set a fixed sensitivity
 to taste. Display scaling can also change the input-unit-to-pixel ratio.
 
 For Sway, add this to your Sway config and reload:

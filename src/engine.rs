@@ -21,6 +21,8 @@ pub struct Engine {
     buttons: BTreeSet<K>,
     motion: [f64; 2],
     scroll: [f64; 2],
+    velocity: [f64; 2],
+    scroll_velocity: [f64; 2],
     config: Config,
 }
 
@@ -35,6 +37,8 @@ impl Engine {
             buttons: BTreeSet::new(),
             motion: [0.0; 2],
             scroll: [0.0; 2],
+            velocity: [0.0; 2],
+            scroll_velocity: [0.0; 2],
             config,
         }
     }
@@ -181,13 +185,18 @@ impl Engine {
             }
         }
 
-        if self.motion_direction() != old_motion {
+        if !self.active() {
+            self.reset_motion();
+        }
+        if instant(self.config.easing.movement) && self.motion_direction() != old_motion {
             self.motion = [0.0; 2];
         }
         let scroll = self.scroll_direction();
         for axis in 0..2 {
             if scroll[axis] != old_scroll[axis] {
-                self.scroll[axis] = 0.0;
+                if instant(self.config.easing.scroll) {
+                    self.scroll[axis] = 0.0;
+                }
                 if scroll[axis] != 0 {
                     out.mouse.push(relative_event(
                         [R::REL_HWHEEL, R::REL_WHEEL][axis],
@@ -203,29 +212,47 @@ impl Engine {
         let mut out = Output::default();
         // Do not jump across the screen after a suspended or stalled process.
         let seconds = elapsed.min(Duration::from_millis(50)).as_secs_f64();
+        if !self.active() || seconds == 0.0 {
+            return out;
+        }
         let direction = self.motion_direction();
         let length = f64::from(direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
-        if length > 0.0 {
-            for (axis, direction) in direction.into_iter().enumerate() {
-                self.motion[axis] += f64::from(direction) / length * self.speed() * seconds;
-                let amount = self.motion[axis].trunc() as i32;
-                self.motion[axis] -= f64::from(amount);
-                if amount != 0 {
-                    out.mouse
-                        .push(relative_event([R::REL_X, R::REL_Y][axis], amount));
-                }
+        for (axis, direction) in direction.into_iter().enumerate() {
+            let target = f64::from(direction) / length.max(1.0) * self.speed();
+            let amount = advance_axis(
+                &mut self.motion[axis],
+                &mut self.velocity[axis],
+                target,
+                self.config.easing.movement,
+                seconds,
+            );
+            if amount != 0 {
+                out.mouse
+                    .push(relative_event([R::REL_X, R::REL_Y][axis], amount));
             }
         }
         for (axis, direction) in self.scroll_direction().into_iter().enumerate() {
-            self.scroll[axis] += f64::from(direction) * self.scroll_speed() * seconds;
-            let amount = self.scroll[axis].trunc() as i32;
-            self.scroll[axis] -= f64::from(amount);
+            let target = f64::from(direction) * self.scroll_speed();
+            let amount = advance_axis(
+                &mut self.scroll[axis],
+                &mut self.scroll_velocity[axis],
+                target,
+                self.config.easing.scroll,
+                seconds,
+            );
             if amount != 0 {
                 out.mouse
                     .push(relative_event([R::REL_HWHEEL, R::REL_WHEEL][axis], amount));
             }
         }
         out
+    }
+
+    fn reset_motion(&mut self) {
+        self.motion = [0.0; 2];
+        self.scroll = [0.0; 2];
+        self.velocity = [0.0; 2];
+        self.scroll_velocity = [0.0; 2];
     }
 
     pub fn release_all(&mut self) -> Output {
@@ -242,10 +269,51 @@ impl Engine {
         self.suppressed.clear();
         self.activation_keys.clear();
         self.toggled = false;
-        self.motion = [0.0; 2];
-        self.scroll = [0.0; 2];
+        self.reset_motion();
         out
     }
+}
+
+fn instant(easing: f64) -> bool {
+    easing == 0.0 || easing == 1.0
+}
+
+fn advance_axis(
+    remainder: &mut f64,
+    velocity: &mut f64,
+    target: f64,
+    easing: f64,
+    seconds: f64,
+) -> i32 {
+    if instant(easing) {
+        *velocity = target;
+        *remainder += target * seconds;
+    } else {
+        // Easing is the fraction of the velocity gap closed per 1/60 second.
+        // Integrate the exponential exactly so distance does not depend on tick size.
+        let rate = -60.0 * (-easing).ln_1p();
+        let exponent = rate * seconds;
+        let alpha = -(-exponent).exp_m1();
+        // Avoid cancellation (or underflow) for very small positive easing factors.
+        let accelerated_time = if exponent < 1e-4 {
+            seconds * exponent * (0.5 - exponent / 6.0 + exponent * exponent / 24.0)
+        } else {
+            seconds - alpha / rate
+        };
+        let gap = target - *velocity;
+        *remainder += *velocity * seconds + gap * accelerated_time;
+        *velocity += gap * alpha;
+        // Stop once the remaining coast would be less than 0.001 input units.
+        if target == 0.0 && velocity.abs() < rate * 0.001 {
+            *velocity = 0.0;
+        }
+    }
+    let amount = remainder.trunc() as i32;
+    *remainder -= f64::from(amount);
+    if target == 0.0 && *velocity == 0.0 {
+        *remainder = 0.0;
+    }
+    amount
 }
 
 fn key_event(key: K, value: i32) -> InputEvent {
@@ -268,16 +336,280 @@ mod tests {
     }
 
     fn engine() -> Engine {
-        let mut config = Config::default();
+        let mut config = instant_config();
         config.speeds.normal = 1000.0;
         config.speeds.scroll = 10.0;
         Engine::new(config)
     }
 
     fn toggle_engine() -> Engine {
-        let mut config = Config::default();
+        let mut config = instant_config();
         config.mode = Mode::Toggle;
         Engine::new(config)
+    }
+
+    fn instant_config() -> Config {
+        let mut config = Config::default();
+        config.easing.movement = 0.0;
+        config.easing.scroll = 0.0;
+        config
+    }
+
+    fn advance_ticks(e: &mut Engine, ticks: usize, millis: u64) -> [i32; 4] {
+        let mut total = [0; 4];
+        for _ in 0..ticks {
+            for event in e.advance(Duration::from_millis(millis)).mouse {
+                let axis = match R(event.code()) {
+                    R::REL_X => 0,
+                    R::REL_Y => 1,
+                    R::REL_HWHEEL => 2,
+                    R::REL_WHEEL => 3,
+                    _ => panic!("unexpected axis"),
+                };
+                total[axis] += event.value();
+            }
+        }
+        total
+    }
+
+    #[test]
+    fn eased_motion_accelerates_and_coasts_to_a_complete_stop_in_all_directions() {
+        for (key, axis, sign) in [
+            (K::KEY_H, 0, -1.0),
+            (K::KEY_L, 0, 1.0),
+            (K::KEY_K, 1, -1.0),
+            (K::KEY_J, 1, 1.0),
+        ] {
+            let mut e = Engine::new(Config::default());
+            e.key(K::KEY_F3, 1);
+            e.key(key, 1);
+            assert_eq!(e.velocity, [0.0; 2]);
+            advance_ticks(&mut e, 1, 4);
+            assert!(e.velocity[axis] * sign > 0.0);
+            assert!(e.velocity[axis] * sign < 300.0);
+            advance_ticks(&mut e, 125, 4);
+            assert!((e.velocity[axis] - sign * 300.0).abs() < 1.0);
+            let prior = e.velocity;
+            e.key(key, 0);
+            assert_eq!(e.velocity, prior);
+            let coast = advance_ticks(&mut e, 1, 50);
+            assert!(f64::from(coast[axis]) * sign > 0.0);
+            assert!(e.velocity[axis].abs() < prior[axis].abs());
+            advance_ticks(&mut e, 500, 4);
+            assert_eq!(e.velocity, [0.0; 2]);
+            assert_eq!(e.motion, [0.0; 2]);
+            assert_eq!(advance_ticks(&mut e, 100, 4), [0; 4]);
+        }
+    }
+
+    #[test]
+    fn direction_changes_curve_and_opposites_decelerate_without_diagonal_speed_boost() {
+        let mut e = Engine::new(Config::default());
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        advance_ticks(&mut e, 125, 4);
+        e.key(K::KEY_L, 0);
+        e.key(K::KEY_J, 1);
+        let turn = advance_ticks(&mut e, 1, 50);
+        assert!(turn[0] > 0 && turn[1] > 0);
+        assert!(e.velocity[0] > 0.0 && e.velocity[1] > 0.0);
+        e.key(K::KEY_L, 1);
+        for _ in 0..125 {
+            advance_ticks(&mut e, 1, 4);
+            assert!(e.velocity[0].hypot(e.velocity[1]) <= 300.0 + 1e-9);
+        }
+        assert!((e.velocity[0] - 300.0 / 2.0_f64.sqrt()).abs() < 1.0);
+        e.key(K::KEY_H, 1);
+        e.key(K::KEY_K, 1);
+        assert_eq!(e.motion_direction(), [0; 2]);
+        assert!(advance_ticks(&mut e, 1, 50)[0] > 0);
+        advance_ticks(&mut e, 500, 4);
+        assert_eq!(e.velocity, [0.0; 2]);
+        e.key(K::KEY_L, 0);
+        e.key(K::KEY_J, 0);
+        let reverse = advance_ticks(&mut e, 10, 4);
+        assert!(reverse[0] < 0 && reverse[1] < 0);
+    }
+
+    #[test]
+    fn easing_applies_to_speed_modes_with_slow_priority() {
+        let mut e = Engine::new(Config::default());
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        e.key(K::KEY_COMMA, 1);
+        advance_ticks(&mut e, 125, 4);
+        for (key, value, target, scroll_target) in [
+            (K::KEY_S, 1, 900.0, 24.0),
+            (K::KEY_A, 1, 100.0, 1.5),
+            (K::KEY_A, 0, 900.0, 24.0),
+            (K::KEY_S, 0, 300.0, 6.0),
+        ] {
+            let before = [e.velocity[0], e.scroll_velocity[1]];
+            e.key(key, value);
+            assert_eq!([e.velocity[0], e.scroll_velocity[1]], before);
+            assert_eq!(e.speed(), target);
+            assert_eq!(e.scroll_speed(), scroll_target);
+            advance_ticks(&mut e, 1, 4);
+            for (old, current, target) in [
+                (before[0], e.velocity[0], target),
+                (before[1], e.scroll_velocity[1], scroll_target),
+            ] {
+                assert!(current > old.min(target) && current < old.max(target));
+            }
+            advance_ticks(&mut e, 250, 4);
+            assert!((e.velocity[0] - target).abs() < 0.01);
+            assert!((e.scroll_velocity[1] - scroll_target).abs() < 0.01);
+        }
+    }
+
+    #[test]
+    fn scroll_eases_on_both_axes_retaining_tap_response_and_fractional_coasting() {
+        for (horizontal, vertical, sign) in [
+            (K::KEY_N, K::KEY_M, -1),
+            (K::KEY_DOT, K::KEY_COMMA, 1),
+        ] {
+            let mut e = Engine::new(Config::default());
+            e.key(K::KEY_F3, 1);
+            e.key(K::KEY_S, 1);
+            for key in [horizontal, vertical] {
+                assert_eq!(e.key(key, 1).mouse[0].value(), sign);
+                assert!(e.key(key, 2).mouse.is_empty());
+            }
+            assert_eq!(e.scroll_velocity, [0.0; 2]);
+            advance_ticks(&mut e, 1, 4);
+            assert!(e.scroll_velocity[0].abs() > 0.0);
+            assert!(e.scroll_velocity[0].abs() < 24.0);
+            advance_ticks(&mut e, 125, 4);
+            let fraction = e.scroll;
+            for key in [horizontal, vertical] {
+                assert!(e.key(key, 0).mouse.is_empty());
+            }
+            assert_eq!(e.scroll, fraction);
+            let tail = advance_ticks(&mut e, 500, 4);
+            assert!(tail[2] * sign > 0 && tail[3] * sign > 0);
+            assert_eq!(e.scroll_velocity, [0.0; 2]);
+            assert_eq!(e.scroll, [0.0; 2]);
+            assert_eq!(advance_ticks(&mut e, 100, 4), [0; 4]);
+        }
+    }
+
+    #[test]
+    fn mode_exit_and_cleanup_discard_all_eased_velocity_and_remainders() {
+        for text in ["", "mode = 'toggle'", "[keys]\nfree_mouse = 'leftalt+f3'"] {
+            for cleanup in [false, true] {
+                let config = Config::parse(text).unwrap();
+                let mut e = Engine::new(config);
+                e.key(K::KEY_LEFTALT, 1);
+                e.key(K::KEY_F3, 1);
+                if e.config.mode == Mode::Toggle {
+                    e.key(K::KEY_F3, 0);
+                }
+                for key in [K::KEY_L, K::KEY_M, K::KEY_SPACE] {
+                    e.key(key, 1);
+                }
+                advance_ticks(&mut e, 40, 4);
+                assert!(e.velocity[0] > 0.0 && e.scroll_velocity[1] < 0.0);
+                assert_eq!(
+                    events(&e.key(K::KEY_SPACE, 0).mouse),
+                    vec![(EventType::KEY.0, K::BTN_LEFT.0, 0)]
+                );
+                if cleanup {
+                    e.release_all();
+                } else if e.config.mode == Mode::Toggle {
+                    e.key(K::KEY_F3, 1);
+                } else if e.config.keys.free_mouse.len() > 1 {
+                    e.key(K::KEY_LEFTALT, 0);
+                } else {
+                    e.key(K::KEY_F3, 0);
+                }
+                assert!(!e.active());
+                assert_eq!(e.velocity, [0.0; 2]);
+                assert_eq!(e.scroll_velocity, [0.0; 2]);
+                assert_eq!(e.motion, [0.0; 2]);
+                assert_eq!(e.scroll, [0.0; 2]);
+                assert_eq!(advance_ticks(&mut e, 50, 4), [0; 4]);
+                for key in [K::KEY_L, K::KEY_M, K::KEY_F3, K::KEY_LEFTALT] {
+                    e.key(key, 0);
+                }
+                e.key(K::KEY_LEFTALT, 1);
+                e.key(K::KEY_F3, 1);
+                assert!(e.active());
+                assert_eq!(advance_ticks(&mut e, 50, 4), [0; 4]);
+            }
+        }
+    }
+
+    #[test]
+    fn easing_is_time_based_and_stalls_are_capped() {
+        fn moving_engine() -> Engine {
+            let mut e = Engine::new(Config::default());
+            e.key(K::KEY_F3, 1);
+            e.key(K::KEY_L, 1);
+            e.key(K::KEY_J, 1);
+            e.key(K::KEY_COMMA, 1);
+            e
+        }
+        let mut fine = moving_engine();
+        let mut coarse = moving_engine();
+        let fine_total = advance_ticks(&mut fine, 250, 4);
+        let coarse_total = advance_ticks(&mut coarse, 20, 50);
+        for axis in 0..4 {
+            assert!((fine_total[axis] - coarse_total[axis]).abs() <= 1);
+        }
+        for axis in 0..2 {
+            assert!((fine.velocity[axis] - coarse.velocity[axis]).abs() < 1e-9);
+            assert!((fine.scroll_velocity[axis] - coarse.scroll_velocity[axis]).abs() < 1e-9);
+        }
+        let mut stalled = moving_engine();
+        let mut capped = moving_engine();
+        assert_eq!(advance_ticks(&mut stalled, 1, 5000), advance_ticks(&mut capped, 1, 50));
+        assert_eq!(stalled.velocity, capped.velocity);
+        assert_eq!(stalled.scroll_velocity, capped.scroll_velocity);
+        let before = stalled.velocity;
+        assert!(stalled.advance(Duration::ZERO).mouse.is_empty());
+        assert_eq!(stalled.velocity, before);
+    }
+
+    #[test]
+    fn easing_can_be_disabled_independently_and_one_is_instantaneous() {
+        for (movement, scroll) in [(0.0, 0.3), (0.2, 0.0), (1.0, 1.0)] {
+            let mut config = Config::default();
+            config.easing.movement = movement;
+            config.easing.scroll = scroll;
+            let mut e = Engine::new(config);
+            e.key(K::KEY_F3, 1);
+            e.key(K::KEY_L, 1);
+            e.key(K::KEY_COMMA, 1);
+            advance_ticks(&mut e, 1, 50);
+            assert_eq!(e.velocity[0] == 300.0, instant(movement));
+            assert_eq!(e.scroll_velocity[1] == 6.0, instant(scroll));
+            e.key(K::KEY_L, 0);
+            e.key(K::KEY_COMMA, 0);
+            advance_ticks(&mut e, 1, 50);
+            assert_eq!(e.velocity[0] == 0.0, instant(movement));
+            assert_eq!(e.scroll_velocity[1] == 0.0, instant(scroll));
+        }
+    }
+
+    #[test]
+    fn easing_factors_match_sixty_hertz_response_and_handle_tiny_values() {
+        for easing in [0.2, 0.3] {
+            let mut velocity = 0.0;
+            let mut remainder = 0.0;
+            advance_axis(&mut remainder, &mut velocity, 300.0, easing, 1.0 / 60.0);
+            assert!((velocity - 300.0 * easing).abs() < 1e-9);
+        }
+        for easing in [f64::from_bits(1), 1e-300, 1e-16, 1e-8] {
+            let mut velocity = 0.0;
+            let mut remainder = 0.0;
+            for _ in 0..250 {
+                assert_eq!(advance_axis(&mut remainder, &mut velocity, 300.0, easing, 0.004), 0);
+                assert!(velocity.is_finite() && velocity >= 0.0);
+                assert!(remainder.is_finite() && remainder >= 0.0);
+            }
+            assert!(velocity < 0.001);
+            assert!(remainder < 0.001);
+        }
     }
 
     #[test]
@@ -434,7 +766,7 @@ mod tests {
 
     #[test]
     fn fractional_motion_is_preserved_between_ticks() {
-        let mut config = Config::default();
+        let mut config = instant_config();
         config.speeds.normal = 10.0;
         let mut e = Engine::new(config);
         e.key(K::KEY_F3, 1);
@@ -662,7 +994,7 @@ mod tests {
 
     #[test]
     fn held_speed_keys_switch_immediately_and_slow_wins() {
-        let mut e = Engine::new(Config::default());
+        let mut e = Engine::new(instant_config());
         e.key(K::KEY_F3, 1);
         e.key(K::KEY_L, 1);
         let mut step = |key, value, distance| {
@@ -688,7 +1020,7 @@ mod tests {
     #[test]
     fn speed_keys_transfer_on_entry_and_stay_suppressed_until_released() {
         for key in [K::KEY_A, K::KEY_S] {
-            let mut e = Engine::new(Config::default());
+            let mut e = Engine::new(instant_config());
             assert_eq!(e.key(key, 1).keyboard.len(), 1);
             assert_eq!(
                 events(&e.key(K::KEY_F3, 1).keyboard),
@@ -714,7 +1046,7 @@ mod tests {
     #[test]
     fn speed_modes_preserve_diagonal_normalization_and_modify_scroll_rate() {
         for (key, expected, scroll) in [(K::KEY_S, 636, 24.0), (K::KEY_A, 70, 1.5)] {
-            let mut e = Engine::new(Config::default());
+            let mut e = Engine::new(instant_config());
             e.key(K::KEY_F3, 1);
             e.key(key, 1);
             e.key(K::KEY_L, 1);
@@ -740,7 +1072,7 @@ mod tests {
     #[test]
     fn default_scroll_modes_match_mouseless_steady_state_rates() {
         for (modifier, rate) in [(None, 6.0), (Some(K::KEY_A), 1.5), (Some(K::KEY_S), 24.0)] {
-            let mut e = Engine::new(Config::default());
+            let mut e = Engine::new(instant_config());
             e.key(K::KEY_F3, 1);
             if let Some(key) = modifier {
                 e.key(key, 1);
@@ -770,7 +1102,7 @@ mod tests {
     fn configured_scroll_speeds_switch_immediately_with_slow_priority_on_both_axes() {
         for mode in ["hold", "toggle"] {
             let config = Config::parse(&format!(
-                "mode = '{mode}'\n[speeds]\nscroll = 40\nscroll_slow = 20\nscroll_fast = 80"
+                "mode = '{mode}'\n[easing]\nscroll = 0\n[speeds]\nscroll = 40\nscroll_slow = 20\nscroll_fast = 80"
             )).unwrap();
             let mut e = Engine::new(config);
             e.key(K::KEY_F3, 1);
@@ -806,7 +1138,7 @@ mod tests {
 
     #[test]
     fn scroll_speed_changes_preserve_fractional_progress_without_extra_notches() {
-        let config = Config::parse("[speeds]\nscroll = 10\nscroll_slow = 5\nscroll_fast = 20").unwrap();
+        let config = Config::parse("[easing]\nscroll = 0\n[speeds]\nscroll = 10\nscroll_slow = 5\nscroll_fast = 20").unwrap();
         let mut e = Engine::new(config);
         e.key(K::KEY_F3, 1);
         e.key(K::KEY_COMMA, 1);
@@ -824,6 +1156,9 @@ mod tests {
     fn all_configured_bindings_replace_defaults() {
         let config = Config::parse(
             r#"
+            [easing]
+            movement = 0
+            scroll = 0
             [speeds]
             normal = 1000
             slow = 100
