@@ -5,9 +5,12 @@ uinput devices: `fievel keyboard` for normal typing, and
 `fievel pointer` for mouse events. Works below X11/Wayland and is visible
 to tools such as `keyd monitor`. No keystrokes are recorded or sent anywhere.
 
-Hold **F3** to enter **Free Mouse Mode**. Release F3 to leave it.
+By default, hold **F3** to enter **Free Mouse Mode** and release F3 to leave it.
+With `mode = "toggle"`, press F3 once to enter and again to leave.
+By default, a faint **fievel** rectangle remains at the bottom-left while Free
+Mouse Mode is active (Wayland/Hyprland/Sway; see [Mode indicator](#mode-indicator)).
 
-| Key while F3 is held | Action |
+| Key while Free Mouse Mode is active | Action |
 | --- | --- |
 | H / J / K / L | Move left / down / up / right |
 | Space | Left button down on press, up on release (supports dragging) |
@@ -20,7 +23,7 @@ Hold **F3** to enter **Free Mouse Mode**. Release F3 to leave it.
 Movement is constant-speed, independent of keyboard repeat, with normalized
 diagonals (not faster than horizontal/vertical movement). Opposite directions
 cancel. Scrolling sends one notch immediately, then repeats at a constant rate
-while held. Releasing F3 stops movement/scrolling and releases both mouse buttons,
+while held. Leaving Free Mouse Mode stops movement/scrolling and releases both mouse buttons,
 even if Space or I is still held. F3 itself never reaches applications.
 Other keys work normally, including modifiers and Ctrl+C.
 Speed changes are immediate, not accelerated ramps. Slow takes priority if A
@@ -64,7 +67,7 @@ scroll rate in notches per second. Slow/fast speeds remain as configured. The up
 is 4 ms; fractional motion is retained between updates. A scheduling stall or
 suspend is capped at 50 ms of movement to avoid large catch-up jumps.
 
-Use **F3+Escape**, Ctrl+C, or SIGTERM to stop. Ctrl+Z also exits rather than
+Use **Escape while Free Mouse Mode is active**, Ctrl+C, or SIGTERM to stop. Ctrl+Z also exits rather than
 suspending with the keyboard still grabbed. On a normal exit, handled signal, or input
 read error, held virtual keys/buttons are released and the keyboard is ungrabbed.
 Unplugging the keyboard exits with an error; restart after reconnecting it.
@@ -84,6 +87,9 @@ The format is TOML. A complete example is included as `fievel.config`
 in this project:
 
 ```toml
+mode = "hold" # "hold" (default) or "toggle"
+notify = true # Persistent, faint Free Mouse Mode indicator
+
 [speeds]
 normal = 800
 slow = 200
@@ -117,7 +123,12 @@ Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
 are accepted. Each action must use a distinct key. Chords still belong in keyd:
 for your D+F -> F3 remap, leave `free_mouse = "f3"`.
-The exit action is held together with the configured Free Mouse Mode key.
+The top-level `mode` and `notify` settings must appear before `[speeds]` and `[keys]`.
+`"hold"` activates mouse mode only while the configured key is down.
+`"toggle"` switches it on/off on each new press; releasing the key or keyboard
+autorepeat does not change it. Slow/fast and mouse-button bindings still use
+hold behavior in either mode. The exit key quits while mouse mode is active,
+including when the activation key has been released in toggle mode.
 
 Restart the application to apply edits. Inspect the effective configuration
 without grabbing a keyboard:
@@ -132,6 +143,46 @@ sudo, pass your own config explicitly so it does not look in root's home:
 ```sh
 sudo ./target/release/fievel --config "$HOME/.config/fievel/fievel.config"
 ```
+
+## Mode indicator
+
+`notify = true` (the default) enables a persistent graphical indicator, **not**
+a desktop notification. While Free Mouse Mode is active, an 88×30 logical-pixel
+rectangle labeled `fievel` appears 12 logical pixels from the bottom-left edge.
+The background is approximately 8% opaque white; the small bitmap lettering is
+35% opaque white. It is click-through, never requests keyboard focus, reserves
+no desktop space, and uses the overlay layer so it can appear above fullscreen
+windows. The compositor chooses the output on each activation (normally the
+currently focused monitor); the indicator does not follow the pointer between
+monitors while active. Desktop effects may alter its appearance.
+
+It stays visible for the entire hold or toggled-on interval, with no timer.
+Leaving the mode destroys the surface immediately via a worker wakeup (subject
+to compositor scheduling), including when exiting with Escape. Normal shutdown,
+handled signals, and input errors also remove it. Display work runs on a separate
+thread, never in the input polling loop.
+
+The indicator requires a Wayland compositor implementing `zwlr_layer_shell_v1`,
+such as Hyprland or Sway, and access to the current user's Wayland socket through
+`WAYLAND_DISPLAY` and `XDG_RUNTIME_DIR`. It is built into the binary: no notification
+daemon, GUI toolkit, font installation, or external overlay helper is needed.
+There is no X11 or non-layer-shell desktop fallback. Display startup/protocol
+failures print a warning and disable the indicator for that run, **without
+disabling keyboard/mouse control**; restart after fixing the display environment.
+Unresponsive Wayland setup is limited to three seconds in the worker.
+
+Prefer running as the logged-in desktop user with appropriate device permissions.
+If using sudo, explicitly retain the display environment as well as selecting
+your own configuration:
+
+```sh
+sudo --preserve-env=WAYLAND_DISPLAY,XDG_RUNTIME_DIR ./target/release/fievel \
+  --config "$HOME/.config/fievel/fievel.config"
+```
+
+Socket access still depends on local permissions and sudo policy. Set the
+top-level `notify = false` for headless operation: no display connection or worker
+is created. `--list` and `--check-config` never initialize the indicator either.
 
 ## Disable desktop pointer acceleration
 
@@ -182,9 +233,11 @@ selects **keyd's virtual keyboard output**, leaving the physical keyboard owned
 by keyd. The pipeline is physical keyboard -> keyd -> fievel -> desktop.
 You can also explicitly select keyd's output using `--device`.
 
-For example, if keyd maps the D+F chord to F3, holding that chord activates
-Free Mouse Mode, and keyd's F3 release exits it. Hifam-mouse sees the remapped F3,
-not the original D and F. The mapping must hold F3 down, not emit only a tap.
+For example, if keyd maps the D+F chord to F3, Fievel sees the remapped F3,
+not the original D and F. With `mode = "hold"`, hold the chord to activate
+Free Mouse Mode; keyd's F3 release exits it, so the mapping must hold F3 down.
+With `mode = "toggle"`, each new chord press switches Free Mouse Mode on/off;
+a mapping that emits an F3 tap also works.
 The other mouse controls likewise operate on keycodes emitted by keyd.
 
 Prevent keyd from processing fievel's outputs again: for each keyd
@@ -212,6 +265,13 @@ cargo test
 ```
 
 The state-machine tests do not require root, input devices, or a desktop.
+An optional display-only smoke test briefly shows/hides the real indicator twice,
+without opening or grabbing any input device:
+
+```sh
+cargo test wayland_indicator_lifecycle -- --ignored
+```
+
 An optional kernel round-trip test creates temporary virtual devices and grabs
 their outputs before emitting anything, isolating its events from the desktop:
 

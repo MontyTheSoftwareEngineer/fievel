@@ -2,11 +2,32 @@ use evdev::KeyCode as K;
 use serde::{Deserialize, Deserializer};
 use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
 
-#[derive(Clone, Debug, Default, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub mode: Mode,
+    pub notify: bool,
     pub speeds: Speeds,
     pub keys: Keys,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            mode: Mode::default(),
+            notify: true,
+            speeds: Speeds::default(),
+            keys: Keys::default(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    #[default]
+    Hold,
+    Toggle,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -198,11 +219,35 @@ mod tests {
     #[test]
     fn example_matches_defaults() {
         let config = Config::parse(include_str!("../fievel.config")).unwrap();
+        assert_eq!(config.mode, Mode::Hold);
+        assert!(config.notify);
         assert_eq!(config.keys.named(), Keys::default().named());
         assert_eq!(config.speeds.normal, 800.0);
         assert_eq!(config.speeds.slow, 200.0);
         assert_eq!(config.speeds.fast, 1600.0);
         assert_eq!(config.speeds.scroll, 8.0);
+    }
+
+    #[test]
+    fn activation_mode_defaults_to_hold_and_accepts_only_hold_or_toggle() {
+        assert_eq!(Config::parse("").unwrap().mode, Mode::Hold);
+        assert_eq!(Config::parse("mode = 'hold'").unwrap().mode, Mode::Hold);
+        assert_eq!(Config::parse("mode = 'toggle'").unwrap().mode, Mode::Toggle);
+        for text in ["mode = 'tap'", "mode = true", "mode = 1"] {
+            assert!(Config::parse(text).is_err());
+        }
+    }
+
+    #[test]
+    fn indicator_defaults_on_and_accepts_only_booleans() {
+        assert!(Config::default().notify);
+        assert!(Config::parse("").unwrap().notify);
+        assert!(Config::parse("mode = 'toggle'").unwrap().notify);
+        assert!(Config::parse("notify = true").unwrap().notify);
+        assert!(!Config::parse("notify = false").unwrap().notify);
+        for text in ["notify = 'true'", "notify = 1", "notify = []"] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
     }
 
     #[test]

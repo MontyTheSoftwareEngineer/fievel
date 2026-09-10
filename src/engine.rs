@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use KeyCode as K;
 use RelativeAxisCode as R;
-use crate::config::Config;
+use crate::config::{Config, Mode};
 
 #[derive(Default)]
 pub struct Output {
@@ -13,6 +13,7 @@ pub struct Output {
 }
 
 pub struct Engine {
+    toggled: bool,
     held: BTreeSet<K>,
     forwarded: BTreeSet<K>,
     suppressed: BTreeSet<K>,
@@ -25,6 +26,7 @@ pub struct Engine {
 impl Engine {
     pub fn new(config: Config) -> Self {
         Self {
+            toggled: false,
             held: BTreeSet::new(),
             forwarded: BTreeSet::new(),
             suppressed: BTreeSet::new(),
@@ -36,7 +38,10 @@ impl Engine {
     }
 
     pub fn active(&self) -> bool {
-        self.held.contains(&self.config.keys.free_mouse)
+        match self.config.mode {
+            Mode::Hold => self.held.contains(&self.config.keys.free_mouse),
+            Mode::Toggle => self.toggled,
+        }
     }
 
     pub fn emergency_exit(&self) -> bool {
@@ -87,7 +92,10 @@ impl Engine {
                 self.held.remove(&key);
             }
             1 => {
-                self.held.insert(key);
+                let new_press = self.held.insert(key);
+                if new_press && key == self.config.keys.free_mouse && self.config.mode == Mode::Toggle {
+                    self.toggled = !self.toggled;
+                }
             }
             _ => {}
         }
@@ -197,6 +205,7 @@ impl Engine {
         self.buttons.clear();
         self.held.clear();
         self.suppressed.clear();
+        self.toggled = false;
         self.motion = [0.0; 2];
         self.scroll = [0.0; 2];
         out
@@ -227,6 +236,95 @@ mod tests {
         config.speeds.normal = 1000.0;
         config.speeds.scroll = 10.0;
         Engine::new(config)
+    }
+
+    fn toggle_engine() -> Engine {
+        let mut config = Config::default();
+        config.mode = Mode::Toggle;
+        Engine::new(config)
+    }
+
+    #[test]
+    fn toggle_changes_only_on_new_presses_not_releases_or_repeats() {
+        let mut e = toggle_engine();
+        assert!(!e.active());
+        for value in [1, 1, 2, 0, 0, 2] {
+            assert!(e.key(K::KEY_F3, value).keyboard.is_empty());
+            assert!(e.active());
+        }
+        for value in [1, 1, 2, 0] {
+            assert!(e.key(K::KEY_F3, value).keyboard.is_empty());
+            assert!(!e.active());
+        }
+        e.key(K::KEY_F3, 1);
+        assert!(e.active());
+    }
+
+    #[test]
+    fn toggle_off_releases_buttons_stops_motion_and_suppresses_held_controls() {
+        let mut e = toggle_engine();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_F3, 0);
+        for key in [K::KEY_L, K::KEY_SPACE, K::KEY_I, K::KEY_M, K::KEY_S] {
+            assert!(e.key(key, 1).keyboard.is_empty());
+        }
+        assert!(!e.advance(Duration::from_millis(10)).mouse.is_empty());
+        let output = e.key(K::KEY_F3, 1);
+        assert_eq!(
+            events(&output.mouse),
+            vec![
+                (EventType::KEY.0, K::BTN_LEFT.0, 0),
+                (EventType::KEY.0, K::BTN_RIGHT.0, 0),
+            ]
+        );
+        assert!(!e.active());
+        assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
+        for key in [K::KEY_L, K::KEY_SPACE, K::KEY_I, K::KEY_M, K::KEY_S] {
+            assert!(e.key(key, 2).keyboard.is_empty());
+            assert!(e.key(key, 0).keyboard.is_empty());
+            assert_eq!(e.key(key, 1).keyboard.len(), 1);
+        }
+    }
+
+    #[test]
+    fn toggle_mode_supports_speed_modifiers_exit_and_cleanup() {
+        let mut e = toggle_engine();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_F3, 0);
+        e.key(K::KEY_L, 1);
+        for (key, value, distance) in [
+            (K::KEY_L, 2, 8),
+            (K::KEY_S, 1, 16),
+            (K::KEY_A, 1, 2),
+            (K::KEY_A, 0, 16),
+            (K::KEY_S, 0, 8),
+        ] {
+            assert!(e.key(key, value).keyboard.is_empty());
+            assert_eq!(e.advance(Duration::from_millis(10)).mouse[0].value(), distance);
+        }
+        assert!(e.key(K::KEY_ESC, 1).keyboard.is_empty());
+        assert!(e.emergency_exit());
+        e.release_all();
+        assert!(!e.active());
+        assert!(!e.emergency_exit());
+        assert!(e.advance(Duration::from_millis(10)).mouse.is_empty());
+    }
+
+    #[test]
+    fn configured_toggle_key_transfers_preheld_controls() {
+        let config = Config::parse("mode = 'toggle'\n[keys]\nfree_mouse = 'f4'").unwrap();
+        let mut e = Engine::new(config);
+        assert_eq!(e.key(K::KEY_F3, 1).keyboard.len(), 1);
+        assert!(!e.active());
+        e.key(K::KEY_SPACE, 1);
+        let output = e.key(K::KEY_F4, 1);
+        assert_eq!(events(&output.keyboard), vec![(EventType::KEY.0, K::KEY_SPACE.0, 0)]);
+        assert_eq!(events(&output.mouse), vec![(EventType::KEY.0, K::BTN_LEFT.0, 1)]);
+        e.key(K::KEY_F4, 0);
+        assert!(e.active());
+        assert_eq!(events(&e.key(K::KEY_SPACE, 0).mouse), vec![(EventType::KEY.0, K::BTN_LEFT.0, 0)]);
+        e.key(K::KEY_F4, 1);
+        assert!(!e.active());
     }
 
     #[test]

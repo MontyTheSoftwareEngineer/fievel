@@ -11,6 +11,9 @@ evdev = "0.13.2"
 signal-hook = "0.3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+rustix = { version = "1", features = ["event", "fs"] }
 
 [profile.release]
 lto = true

@@ -1,9 +1,11 @@
 mod config;
 mod engine;
+mod indicator;
 
 use clap::Parser;
 use config::Config;
 use engine::{Engine, Output};
+use indicator::Indicator;
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
     RelativeAxisCode,
@@ -219,6 +221,7 @@ fn event_loop(
     outputs: &mut Outputs,
     engine: &mut Engine,
     stop: &AtomicBool,
+    indicator: &mut Indicator,
 ) -> io::Result<()> {
     let mut last = Instant::now();
     while !stop.load(Ordering::Relaxed) {
@@ -231,6 +234,7 @@ fn event_loop(
                 for event in events {
                     if event.event_type() == EventType::KEY {
                         outputs.emit(engine.key(KeyCode(event.code()), event.value()))?;
+                        indicator.set_active(engine.active() && !engine.emergency_exit());
                         if engine.emergency_exit() {
                             return Ok(());
                         }
@@ -287,6 +291,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let mut outputs = Outputs::new(&input)
         .map_err(|error| format!("Cannot create uinput devices: {error}. Check /dev/uinput access"))?;
+    let mut indicator = Indicator::new(config.notify);
     // Give udev/compositors a chance to discover the outputs before grabbing input.
     thread::sleep(Duration::from_millis(500));
     if stop.load(Ordering::Relaxed) {
@@ -300,10 +305,13 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         )
     })?;
     eprintln!(
-        "Reading {} ({}). Hold {:?} for Free Mouse Mode; {:?}+{:?} or Ctrl+C exits.",
+        "Reading {} ({}). {} {:?} for Free Mouse Mode; {:?} while active or Ctrl+C exits.",
         path.display(),
         input.name().unwrap_or("unnamed"),
-        config.keys.free_mouse,
+        match config.mode {
+            config::Mode::Hold => "Hold",
+            config::Mode::Toggle => "Press to toggle",
+        },
         config.keys.free_mouse,
         config.keys.exit,
     );
@@ -312,12 +320,14 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let result = (|| -> io::Result<()> {
         for key in input.get_key_state()?.iter() {
             outputs.emit(engine.key(key, 1))?;
+            indicator.set_active(engine.active() && !engine.emergency_exit());
         }
         if engine.emergency_exit() {
             return Ok(());
         }
-        event_loop(&mut input, &mut outputs, &mut engine, &stop)
+        event_loop(&mut input, &mut outputs, &mut engine, &stop, &mut indicator)
     })();
+    indicator.set_active(false);
     let release = outputs.emit(engine.release_all());
     let ungrab = input.ungrab();
     if let Err(error) = release {
