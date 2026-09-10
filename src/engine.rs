@@ -6,6 +6,8 @@ use KeyCode as K;
 use RelativeAxisCode as R;
 use crate::config::{Config, Mode};
 
+const WHEEL_UNITS_PER_NOTCH: i32 = 120;
+
 #[derive(Default)]
 pub struct Output {
     pub keyboard: Vec<InputEvent>,
@@ -23,6 +25,7 @@ pub struct Engine {
     scroll: [f64; 2],
     velocity: [f64; 2],
     scroll_velocity: [f64; 2],
+    legacy_scroll: [i32; 2],
     config: Config,
 }
 
@@ -39,6 +42,7 @@ impl Engine {
             scroll: [0.0; 2],
             velocity: [0.0; 2],
             scroll_velocity: [0.0; 2],
+            legacy_scroll: [0; 2],
             config,
         }
     }
@@ -197,11 +201,8 @@ impl Engine {
                 if instant(self.config.easing.scroll) {
                     self.scroll[axis] = 0.0;
                 }
-                if scroll[axis] != 0 {
-                    out.mouse.push(relative_event(
-                        [R::REL_HWHEEL, R::REL_WHEEL][axis],
-                        scroll[axis],
-                    ));
+                if instant(self.config.easing.scroll) && scroll[axis] != 0 {
+                    self.emit_scroll(axis, scroll[axis] * WHEEL_UNITS_PER_NOTCH, &mut out);
                 }
             }
         }
@@ -225,6 +226,7 @@ impl Engine {
                 target,
                 self.config.easing.movement,
                 seconds,
+                1.0,
             );
             if amount != 0 {
                 out.mouse
@@ -233,19 +235,39 @@ impl Engine {
         }
         for (axis, direction) in self.scroll_direction().into_iter().enumerate() {
             let target = f64::from(direction) * self.scroll_speed();
+            let stepped = instant(self.config.easing.scroll);
             let amount = advance_axis(
                 &mut self.scroll[axis],
                 &mut self.scroll_velocity[axis],
                 target,
                 self.config.easing.scroll,
                 seconds,
+                if stepped { 1.0 } else { 1.0 / f64::from(WHEEL_UNITS_PER_NOTCH) },
             );
             if amount != 0 {
-                out.mouse
-                    .push(relative_event([R::REL_HWHEEL, R::REL_WHEEL][axis], amount));
+                self.emit_scroll(
+                    axis,
+                    if stepped { amount * WHEEL_UNITS_PER_NOTCH } else { amount },
+                    &mut out,
+                );
             }
         }
         out
+    }
+
+    fn emit_scroll(&mut self, axis: usize, amount: i32, out: &mut Output) {
+        // Linux high-resolution wheels use 120 units per notch. Emit legacy
+        // notches from the same stream so older consumers keep the same distance.
+        self.legacy_scroll[axis] += amount;
+        let notches = self.legacy_scroll[axis] / WHEEL_UNITS_PER_NOTCH;
+        self.legacy_scroll[axis] %= WHEEL_UNITS_PER_NOTCH;
+        if notches != 0 {
+            out.mouse.push(relative_event([R::REL_HWHEEL, R::REL_WHEEL][axis], notches));
+        }
+        out.mouse.push(relative_event(
+            [R::REL_HWHEEL_HI_RES, R::REL_WHEEL_HI_RES][axis],
+            amount,
+        ));
     }
 
     fn reset_motion(&mut self) {
@@ -253,6 +275,7 @@ impl Engine {
         self.scroll = [0.0; 2];
         self.velocity = [0.0; 2];
         self.scroll_velocity = [0.0; 2];
+        self.legacy_scroll = [0; 2];
     }
 
     pub fn release_all(&mut self) -> Output {
@@ -284,6 +307,7 @@ fn advance_axis(
     target: f64,
     easing: f64,
     seconds: f64,
+    units_per_step: f64,
 ) -> i32 {
     if instant(easing) {
         *velocity = target;
@@ -308,8 +332,8 @@ fn advance_axis(
             *velocity = 0.0;
         }
     }
-    let amount = remainder.trunc() as i32;
-    *remainder -= f64::from(amount);
+    let amount = (*remainder / units_per_step).trunc() as i32;
+    *remainder -= f64::from(amount) * units_per_step;
     if target == 0.0 && *velocity == 0.0 {
         *remainder = 0.0;
     }
@@ -333,6 +357,17 @@ mod tests {
             .iter()
             .map(|event| (event.event_type().0, event.code(), event.value()))
             .collect()
+    }
+
+    fn wheel_events(axis: R, notches: i32) -> Vec<(u16, u16, i32)> {
+        vec![
+            (EventType::RELATIVE.0, axis.0, notches),
+            (
+                EventType::RELATIVE.0,
+                if axis == R::REL_WHEEL { R::REL_WHEEL_HI_RES.0 } else { R::REL_HWHEEL_HI_RES.0 },
+                notches * WHEEL_UNITS_PER_NOTCH,
+            ),
+        ]
     }
 
     fn engine() -> Engine {
@@ -364,12 +399,121 @@ mod tests {
                     R::REL_Y => 1,
                     R::REL_HWHEEL => 2,
                     R::REL_WHEEL => 3,
+                    R::REL_HWHEEL_HI_RES | R::REL_WHEEL_HI_RES => continue,
                     _ => panic!("unexpected axis"),
                 };
                 total[axis] += event.value();
             }
         }
         total
+    }
+
+    #[test]
+    fn high_resolution_scroll_emits_many_small_steps_during_the_initial_ramp() {
+        for (key, axis, sign) in [
+            (K::KEY_N, R::REL_HWHEEL_HI_RES, -1),
+            (K::KEY_DOT, R::REL_HWHEEL_HI_RES, 1),
+            (K::KEY_M, R::REL_WHEEL_HI_RES, -1),
+            (K::KEY_COMMA, R::REL_WHEEL_HI_RES, 1),
+        ] {
+            let mut e = Engine::new(Config::default());
+            e.key(K::KEY_F3, 1);
+            assert!(e.key(key, 1).mouse.is_empty());
+            let mut steps = Vec::new();
+            for _ in 0..25 {
+                for event in e.advance(Duration::from_millis(4)).mouse {
+                    // The first 100 ms is less than a full notch: only hi-res output.
+                    assert_eq!(R(event.code()), axis);
+                    let amount = event.value() * sign;
+                    assert!((1..120).contains(&amount));
+                    steps.push(amount);
+                }
+            }
+            assert!(steps.len() >= 15, "too few ramp updates: {steps:?}");
+            assert!(steps.windows(2).all(|pair| pair[1] >= pair[0] - 1));
+            assert!(steps.last().unwrap() > steps.first().unwrap());
+            let rate = -60.0 * (-0.3_f64).ln_1p();
+            let expected = 120.0 * 6.0 * (0.1 - (1.0 - (-rate * 0.1).exp()) / rate);
+            assert!((f64::from(steps.iter().sum::<i32>()) - expected).abs() < 1.0);
+        }
+    }
+
+    #[test]
+    fn high_resolution_distance_matches_speed_modes_and_legacy_stream_on_reversal() {
+        for (modifier, speed) in [(None, 6.0), (Some(K::KEY_A), 1.5), (Some(K::KEY_S), 24.0)] {
+            let mut e = Engine::new(Config::default());
+            e.key(K::KEY_F3, 1);
+            if let Some(key) = modifier {
+                e.key(key, 1);
+            }
+            for key in [K::KEY_DOT, K::KEY_COMMA] {
+                e.key(key, 1);
+            }
+            let mut high = [0; 2];
+            let mut legacy = [0; 2];
+            for phase in 0..3 {
+                if phase == 1 {
+                    e.key(K::KEY_DOT, 0);
+                    e.key(K::KEY_COMMA, 0);
+                    e.key(K::KEY_N, 1);
+                    e.key(K::KEY_M, 1);
+                } else if phase == 2 {
+                    e.key(K::KEY_N, 0);
+                    e.key(K::KEY_M, 0);
+                }
+                for _ in 0..500 {
+                    for event in e.advance(Duration::from_millis(4)).mouse {
+                        match R(event.code()) {
+                            R::REL_HWHEEL => legacy[0] += event.value(),
+                            R::REL_WHEEL => legacy[1] += event.value(),
+                            R::REL_HWHEEL_HI_RES => high[0] += event.value(),
+                            R::REL_WHEEL_HI_RES => high[1] += event.value(),
+                            _ => panic!("unexpected event"),
+                        }
+                    }
+                    for axis in 0..2 {
+                        assert_eq!(high[axis] - legacy[axis] * 120, e.legacy_scroll[axis]);
+                        assert!(e.legacy_scroll[axis].abs() < 120);
+                    }
+                }
+                if phase == 0 {
+                    let rate = -60.0 * (-0.3_f64).ln_1p();
+                    let expected = 120.0 * speed * (2.0 - (1.0 - (-rate * 2.0).exp()) / rate);
+                    for total in high {
+                        assert!((f64::from(total) - expected).abs() < 1.0);
+                    }
+                }
+            }
+            // Equal holds in opposite directions, followed by the full coast,
+            // cancel to within one high-resolution unit.
+            assert!(high.iter().all(|total| total.abs() <= 1));
+            assert_eq!(e.scroll_velocity, [0.0; 2]);
+        }
+    }
+
+    #[test]
+    fn eased_short_scroll_tap_is_fractional_and_pending_scroll_is_cleared_on_exit() {
+        let mut e = Engine::new(Config::default());
+        e.key(K::KEY_F3, 1);
+        assert!(e.key(K::KEY_COMMA, 1).mouse.is_empty());
+        let output = e.advance(Duration::from_millis(20));
+        assert!(!output.mouse.is_empty());
+        assert!(output.mouse.iter().all(|event| {
+            R(event.code()) == R::REL_WHEEL_HI_RES && (1..120).contains(&event.value())
+        }));
+        assert_ne!(e.legacy_scroll[1], 0);
+        e.key(K::KEY_COMMA, 0);
+        assert!(!e.advance(Duration::from_millis(20)).mouse.is_empty());
+        e.key(K::KEY_F3, 0);
+        assert_eq!(e.legacy_scroll, [0; 2]);
+        assert_eq!(e.scroll, [0.0; 2]);
+        assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
+        e.key(K::KEY_F3, 1);
+        assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
+        e.key(K::KEY_COMMA, 1);
+        e.advance(Duration::from_millis(20));
+        e.release_all();
+        assert_eq!(e.legacy_scroll, [0; 2]);
     }
 
     #[test]
@@ -463,7 +607,7 @@ mod tests {
     }
 
     #[test]
-    fn scroll_eases_on_both_axes_retaining_tap_response_and_fractional_coasting() {
+    fn scroll_eases_on_both_axes_without_an_initial_jump_and_preserves_coasting() {
         for (horizontal, vertical, sign) in [
             (K::KEY_N, K::KEY_M, -1),
             (K::KEY_DOT, K::KEY_COMMA, 1),
@@ -472,7 +616,7 @@ mod tests {
             e.key(K::KEY_F3, 1);
             e.key(K::KEY_S, 1);
             for key in [horizontal, vertical] {
-                assert_eq!(e.key(key, 1).mouse[0].value(), sign);
+                assert!(e.key(key, 1).mouse.is_empty());
                 assert!(e.key(key, 2).mouse.is_empty());
             }
             assert_eq!(e.scroll_velocity, [0.0; 2]);
@@ -527,6 +671,7 @@ mod tests {
                 assert_eq!(e.scroll_velocity, [0.0; 2]);
                 assert_eq!(e.motion, [0.0; 2]);
                 assert_eq!(e.scroll, [0.0; 2]);
+                assert_eq!(e.legacy_scroll, [0; 2]);
                 assert_eq!(advance_ticks(&mut e, 50, 4), [0; 4]);
                 for key in [K::KEY_L, K::KEY_M, K::KEY_F3, K::KEY_LEFTALT] {
                     e.key(key, 0);
@@ -596,14 +741,14 @@ mod tests {
         for easing in [0.2, 0.3] {
             let mut velocity = 0.0;
             let mut remainder = 0.0;
-            advance_axis(&mut remainder, &mut velocity, 300.0, easing, 1.0 / 60.0);
+            advance_axis(&mut remainder, &mut velocity, 300.0, easing, 1.0 / 60.0, 1.0);
             assert!((velocity - 300.0 * easing).abs() < 1e-9);
         }
         for easing in [f64::from_bits(1), 1e-300, 1e-16, 1e-8] {
             let mut velocity = 0.0;
             let mut remainder = 0.0;
             for _ in 0..250 {
-                assert_eq!(advance_axis(&mut remainder, &mut velocity, 300.0, easing, 0.004), 0);
+                assert_eq!(advance_axis(&mut remainder, &mut velocity, 300.0, easing, 0.004, 1.0), 0);
                 assert!(velocity.is_finite() && velocity >= 0.0);
                 assert!(remainder.is_finite() && remainder >= 0.0);
             }
@@ -838,7 +983,7 @@ mod tests {
         ] {
             let mut e = engine();
             e.key(K::KEY_F3, 1);
-            let expected = vec![(EventType::RELATIVE.0, axis.0, amount)];
+            let expected = wheel_events(axis, amount);
             assert_eq!(events(&e.key(key, 1).mouse), expected);
             assert!(e.key(key, 2).mouse.is_empty());
             assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
@@ -1059,6 +1204,7 @@ mod tests {
                         R::REL_X => 0,
                         R::REL_Y => 1,
                         R::REL_WHEEL => 2,
+                        R::REL_WHEEL_HI_RES => continue,
                         _ => panic!("unexpected axis"),
                     };
                     totals[axis] += event.value();
@@ -1087,6 +1233,7 @@ mod tests {
                     let axis = match R(event.code()) {
                         R::REL_HWHEEL => 0,
                         R::REL_WHEEL => 1,
+                        R::REL_HWHEEL_HI_RES | R::REL_WHEEL_HI_RES => continue,
                         _ => panic!("unexpected axis"),
                     };
                     totals[axis] += event.value();
@@ -1127,10 +1274,7 @@ mod tests {
                 assert!(output.mouse.is_empty());
                 assert_eq!(
                     events(&e.advance(Duration::from_millis(50)).mouse),
-                    vec![
-                        (EventType::RELATIVE.0, R::REL_HWHEEL.0, amount),
-                        (EventType::RELATIVE.0, R::REL_WHEEL.0, amount),
-                    ]
+                    [wheel_events(R::REL_HWHEEL, amount), wheel_events(R::REL_WHEEL, amount)].concat()
                 );
             }
         }
@@ -1219,7 +1363,7 @@ mod tests {
         ] {
             assert_eq!(
                 events(&e.key(key, 1).mouse),
-                vec![(EventType::RELATIVE.0, axis.0, value)]
+                wheel_events(axis, value)
             );
             e.key(key, 0);
         }

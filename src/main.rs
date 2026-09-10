@@ -188,6 +188,8 @@ impl Outputs {
             RelativeAxisCode::REL_Y,
             RelativeAxisCode::REL_WHEEL,
             RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
         ]
         .into_iter()
         .collect();
@@ -458,6 +460,15 @@ mod tests {
         let mut outputs = Outputs::new(&input)?;
         let mut keyboard = open_output(&mut outputs.keyboard)?;
         let mut mouse = open_output(&mut outputs.mouse)?;
+        let axes = mouse.supported_relative_axes().expect("pointer relative axes");
+        for axis in [
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+        ] {
+            assert!(axes.contains(axis));
+        }
         let mut config = Config::default();
         config.speeds.normal = 1000.0;
         config.speeds.scroll = 10.0;
@@ -504,6 +515,10 @@ mod tests {
             ]
         );
         assert!(!expected_mouse.is_empty());
+        assert!(expected_mouse.iter().any(|event| {
+            event.0 == EventType::RELATIVE.0
+                && event.1 == RelativeAxisCode::REL_WHEEL_HI_RES.0
+        }));
         assert_eq!(read_events(&mut keyboard)?, expected_keyboard);
         assert_eq!(read_events(&mut mouse)?, expected_mouse);
         assert!(engine.release_all().mouse.is_empty());

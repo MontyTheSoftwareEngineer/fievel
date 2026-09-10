@@ -5,6 +5,8 @@ uinput devices: `fievel keyboard` for normal typing, and
 `fievel pointer` for mouse events. Works below X11/Wayland and is visible
 to tools such as `keyd monitor`. No keystrokes are recorded or sent anywhere.
 
+https://github.com/user-attachments/assets/cdcef352-618e-4b6a-afa2-5eb3f40cdee6
+
 By default, hold **F3** to enter **Free Mouse Mode** and release F3 to leave it.
 With `mode = "toggle"`, press F3 once to enter and again to leave.
 By default, a faint **fievel** rectangle remains at the bottom-left while Free
@@ -23,8 +25,8 @@ Movement and scrolling ease toward their configured speeds, independently of
 keyboard repeat. Movement has normalized diagonal target speeds (not faster
 than horizontal/vertical movement). Opposite directions cancel the target
 velocity. Releasing direction keys gently slows movement/scrolling to a stop;
-changing directions produces smooth turns. Scrolling still sends one notch
-immediately on a direction press, then eases toward its repeat rate.
+changing directions produces smooth turns. Scrolling uses high-resolution wheel
+events (1/120 notch) to ease smoothly from rest without an initial full-notch jump.
 Leaving Free Mouse Mode immediately stops movement/scrolling and releases both mouse buttons,
 even if Space or I is still held. F3 itself never reaches applications.
 Other keys work normally, including modifiers and Ctrl+C.
@@ -160,7 +162,8 @@ and then use Space normally for clicking.
 `speeds.scroll`, `speeds.scroll_slow`, and `speeds.scroll_fast` set normal, slow,
 and fast scrolling in notches per second (defaults: 6, 1.5, and 24). Speed changes
 update the target rate of held scrolling, with slow taking priority over fast.
-The initial one-notch response on a scroll press is unchanged.
+With scroll easing disabled, a scroll press still sends one immediate notch,
+followed by whole-notch repeats.
 
 Default pointer speeds are 300 / 100 / 900 input units per second for normal /
 slow / fast. These and the scroll defaults match the steady-state rates of a
@@ -181,9 +184,14 @@ sharper. Set either value to **0** to disable its easing (1 is also instantaneou
 Setting both to 0 restores the previous immediate start/stop behavior.
 
 At the defaults, movement closes about 95% of the velocity gap in 224 ms and
-scrolling in 140 ms. Scroll output is still whole notches, not pixel-smooth
-scrolling; the initial notch stays immediate, and a short scroll tail can continue
-after releasing a direction. Mouse-button releases, leaving mouse mode, and
+scrolling in 140 ms. With easing enabled, fractional scroll deltas are emitted
+through Linux high-resolution wheel events, with corresponding whole-notch events
+for legacy consumers. Modern input stacks use the high-resolution stream instead
+of adding both streams together. Actual visual smoothness depends on the
+compositor and application; legacy consumers still scroll in whole notches.
+Short taps produce a small eased scroll rather than a guaranteed full notch,
+and a short scroll tail can continue after releasing a direction.
+Mouse-button releases, leaving mouse mode, and
 shutdown are always immediate, with no residual movement on reactivation.
 
 Restart the application to apply edits. Inspect the effective configuration
