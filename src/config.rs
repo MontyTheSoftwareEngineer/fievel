@@ -37,6 +37,8 @@ pub struct Speeds {
     pub slow: f64,
     pub fast: f64,
     pub scroll: f64,
+    pub scroll_slow: f64,
+    pub scroll_fast: f64,
 }
 
 impl Default for Speeds {
@@ -46,6 +48,8 @@ impl Default for Speeds {
             slow: 200.0,
             fast: 1600.0,
             scroll: 8.0,
+            scroll_slow: 2.0,
+            scroll_fast: 16.0,
         }
     }
 }
@@ -53,8 +57,8 @@ impl Default for Speeds {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Keys {
-    #[serde(deserialize_with = "deserialize_key")]
-    pub free_mouse: K,
+    #[serde(deserialize_with = "deserialize_chord")]
+    pub free_mouse: Vec<K>,
     #[serde(deserialize_with = "deserialize_key")]
     pub left: K,
     #[serde(deserialize_with = "deserialize_key")]
@@ -79,14 +83,12 @@ pub struct Keys {
     pub slow: K,
     #[serde(deserialize_with = "deserialize_key")]
     pub fast: K,
-    #[serde(deserialize_with = "deserialize_key")]
-    pub exit: K,
 }
 
 impl Default for Keys {
     fn default() -> Self {
         Self {
-            free_mouse: K::KEY_F3,
+            free_mouse: vec![K::KEY_F3],
             left: K::KEY_H,
             down: K::KEY_J,
             up: K::KEY_K,
@@ -99,7 +101,6 @@ impl Default for Keys {
             scroll_right: K::KEY_DOT,
             slow: K::KEY_A,
             fast: K::KEY_S,
-            exit: K::KEY_ESC,
         }
     }
 }
@@ -122,9 +123,16 @@ impl Keys {
         ]
     }
 
-    pub fn named(&self) -> [(&'static str, K); 14] {
+    pub fn named(&self) -> Vec<(&'static str, K)> {
+        self.free_mouse
+            .iter()
+            .map(|key| ("free_mouse", *key))
+            .chain(self.named_controls())
+            .collect()
+    }
+
+    fn named_controls(&self) -> [(&'static str, K); 12] {
         [
-            ("free_mouse", self.free_mouse),
             ("left", self.left),
             ("down", self.down),
             ("up", self.up),
@@ -137,13 +145,25 @@ impl Keys {
             ("scroll_right", self.scroll_right),
             ("slow", self.slow),
             ("fast", self.fast),
-            ("exit", self.exit),
         ]
     }
 }
 
 fn deserialize_key<'de, D: Deserializer<'de>>(deserializer: D) -> Result<K, D::Error> {
     let value = String::deserialize(deserializer)?;
+    parse_key(&value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_chord<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<K>, D::Error> {
+    let value = String::deserialize(deserializer)?;
+    value
+        .split('+')
+        .map(parse_key)
+        .collect::<Result<_, _>>()
+        .map_err(serde::de::Error::custom)
+}
+
+fn parse_key(value: &str) -> Result<K, String> {
     let upper = value.trim().to_ascii_uppercase();
     let name = match upper.as_str() {
         "," => "COMMA",
@@ -159,9 +179,9 @@ fn deserialize_key<'de, D: Deserializer<'de>>(deserializer: D) -> Result<K, D::E
     };
     let key = name
         .parse::<K>()
-        .map_err(|_| serde::de::Error::custom(format!("unknown keyboard key {value:?}")))?;
+        .map_err(|_| format!("unknown keyboard key {value:?}"))?;
     if key == K::KEY_RESERVED || key == K::KEY_UNKNOWN {
-        return Err(serde::de::Error::custom("reserved/unknown keys cannot be bound"));
+        return Err("reserved/unknown keys cannot be bound".to_owned());
     }
     Ok(key)
 }
@@ -199,13 +219,28 @@ impl Config {
             ("slow", self.speeds.slow),
             ("fast", self.speeds.fast),
             ("scroll", self.speeds.scroll),
+            ("scroll_slow", self.speeds.scroll_slow),
+            ("scroll_fast", self.speeds.scroll_fast),
         ] {
             validate_speed(value).map_err(|error| format!("speeds.{name}: {error}"))?;
         }
         let mut assigned = BTreeMap::new();
         for (name, key) in self.keys.named() {
+            // Chord members may also be controls, but a single activation key may not.
+            if name == "free_mouse" && self.keys.free_mouse.len() > 1 {
+                continue;
+            }
             if let Some(other) = assigned.insert(key, name) {
                 return Err(format!("keys.{name} and keys.{other} both bind {key:?}"));
+            }
+        }
+        let mut chord = std::collections::BTreeSet::new();
+        if self.keys.free_mouse.is_empty() {
+            return Err("keys.free_mouse must contain at least one key".to_owned());
+        }
+        for key in &self.keys.free_mouse {
+            if !chord.insert(key) {
+                return Err(format!("keys.free_mouse repeats {key:?}"));
             }
         }
         Ok(())
@@ -226,6 +261,8 @@ mod tests {
         assert_eq!(config.speeds.slow, 200.0);
         assert_eq!(config.speeds.fast, 1600.0);
         assert_eq!(config.speeds.scroll, 8.0);
+        assert_eq!(config.speeds.scroll_slow, 2.0);
+        assert_eq!(config.speeds.scroll_fast, 16.0);
     }
 
     #[test]
@@ -258,7 +295,7 @@ mod tests {
         .unwrap();
         assert_eq!(config.speeds.normal, 900.0);
         assert_eq!(config.speeds.fast, 1600.0);
-        assert_eq!(config.keys.free_mouse, K::KEY_F4);
+        assert_eq!(config.keys.free_mouse, vec![K::KEY_F4]);
         assert_eq!(config.keys.left, K::KEY_Q);
         assert_eq!(config.keys.scroll_up, K::KEY_COMMA);
         Config::parse("").unwrap();
@@ -267,10 +304,20 @@ mod tests {
     #[test]
     fn accepts_punctuation_and_case_insensitive_names() {
         let config = Config::parse(
-            "[keys]\nscroll_up = ','\nscroll_right = '.'\nexit = 'Escape'\nfast = 'key_s'",
+            "[keys]\nscroll_up = ','\nscroll_right = '.'\nfast = 'key_s'",
         )
         .unwrap();
         assert_eq!(config.keys.named(), Keys::default().named());
+        assert_eq!(parse_key("Escape").unwrap(), K::KEY_ESC);
+    }
+
+    #[test]
+    fn activation_chords_accept_spaces_case_and_overlapping_controls() {
+        let config = Config::parse("[keys]\nfree_mouse = ' LeftAlt + KEY_SPACE '").unwrap();
+        assert_eq!(config.keys.free_mouse, vec![K::KEY_LEFTALT, K::KEY_SPACE]);
+        assert_eq!(config.keys.left_click, K::KEY_SPACE);
+        let config = Config::parse("[keys]\nfree_mouse = 'leftctrl+leftalt+f4'").unwrap();
+        assert_eq!(config.keys.free_mouse.len(), 3);
     }
 
     #[test]
@@ -280,6 +327,9 @@ mod tests {
             "[speeds]\nslow = -1",
             "[speeds]\nfast = nan",
             "[speeds]\nscroll = inf",
+            "[speeds]\nscroll_slow = 0",
+            "[speeds]\nscroll_fast = nan",
+            "[speeds]\nscroll_fast = 100001",
             "[speeds]\nfast = 100001",
             "[keys]\nleft = 'not-a-key'",
             "[keys]\nleft = 'BTN_LEFT'",
@@ -287,6 +337,14 @@ mod tests {
             "[keys]\nleft = 'j'",
             "[keys]\nslow = 'f3'",
             "[keys]\nexit = 's'",
+            "[keys]\nexit = 'esc'",
+            "[keys]\nfree_mouse = ''",
+            "[keys]\nfree_mouse = 'leftalt+'",
+            "[keys]\nfree_mouse = '+space'",
+            "[keys]\nfree_mouse = 'leftalt++space'",
+            "[keys]\nfree_mouse = 'space+KEY_SPACE'",
+            "[keys]\nfree_mouse = 'leftalt+not-a-key'",
+            "[keys]\nleft = 'leftalt+h'",
             "[keys]\nfree_mosu = 'f4'",
             "[speeds]\nnromal = 900",
             "[unknown]\nnormal = 900",
@@ -301,7 +359,7 @@ mod tests {
     fn missing_optional_file_defaults_but_required_file_errors() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("target/nonexistent-config-directory/fievel.config");
-        assert_eq!(Config::load(&path, false).unwrap().keys.free_mouse, K::KEY_F3);
+        assert_eq!(Config::load(&path, false).unwrap().keys.free_mouse, vec![K::KEY_F3]);
         assert!(Config::load(&path, true).is_err());
         assert!(Config::load(Path::new(env!("CARGO_MANIFEST_DIR")), false).is_err());
     }

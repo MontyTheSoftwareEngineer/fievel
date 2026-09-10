@@ -490,10 +490,10 @@ mod tests {
                 (K::KEY_ESC, 1),
             ] {
                 engine.key(key, value);
-                indicator.set_active(engine.active() && !engine.emergency_exit());
+                indicator.set_active(engine.active());
                 assert_eq!(
                     shared.active.load(Ordering::SeqCst),
-                    engine.active() && !engine.emergency_exit(),
+                    engine.active(),
                 );
             }
             engine.release_all();

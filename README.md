@@ -16,9 +16,8 @@ Mouse Mode is active (Wayland/Hyprland/Sway; see [Mode indicator](#mode-indicato
 | Space | Left button down on press, up on release (supports dragging) |
 | I | Right button down on press, up on release |
 | N / M / , / . | Scroll left / down / up / right |
-| S | Hold for fast movement; release for normal speed |
-| A | Hold for slow movement; release for normal speed |
-| Escape | Exit the application and release its input grab |
+| S | Hold for fast movement and scrolling; release for normal speed |
+| A | Hold for slow movement and scrolling; release for normal speed |
 
 Movement is constant-speed, independent of keyboard repeat, with normalized
 diagonals (not faster than horizontal/vertical movement). Opposite directions
@@ -28,7 +27,8 @@ even if Space or I is still held. F3 itself never reaches applications.
 Other keys work normally, including modifiers and Ctrl+C.
 Speed changes are immediate, not accelerated ramps. Slow takes priority if A
 and S are both held; releasing A while S remains held returns to fast speed.
-These modifiers only affect pointer movement, not scrolling. Outside Free Mouse
+These modifiers affect both pointer movement and scrolling, with separately
+configurable rates. Outside Free Mouse
 Mode, A and S type normally. All bindings and speeds can be changed in the config.
 
 Mouse-control keys already held when F3 is pressed transfer to mouse control.
@@ -63,11 +63,13 @@ sudo ./target/release/fievel --device /dev/input/eventN --speed 800 --scroll-spe
 
 `--speed` overrides the configured normal speed in relative input units per
 second, not guaranteed screen pixels. `--scroll-speed` overrides the configured
-scroll rate in notches per second. Slow/fast speeds remain as configured. The update interval
+normal scroll rate in notches per second. Slow/fast pointer and scroll speeds
+remain as configured. The update interval
 is 4 ms; fractional motion is retained between updates. A scheduling stall or
 suspend is capped at 50 ms of movement to avoid large catch-up jumps.
 
-Use **Escape while Free Mouse Mode is active**, Ctrl+C, or SIGTERM to stop. Ctrl+Z also exits rather than
+Use Ctrl+C or SIGTERM to stop. Escape passes through normally and does not quit
+the application or leave Free Mouse Mode. Ctrl+Z also exits rather than
 suspending with the keyboard still grabbed. On a normal exit, handled signal, or input
 read error, held virtual keys/buttons are released and the keyboard is ungrabbed.
 Unplugging the keyboard exits with an error; restart after reconnecting it.
@@ -95,9 +97,11 @@ normal = 800
 slow = 200
 fast = 1600
 scroll = 8
+scroll_slow = 2
+scroll_fast = 16
 
 [keys]
-free_mouse = "f3"
+free_mouse = "f3" # Also accepts chords such as "leftalt + space"
 left = "h"
 down = "j"
 up = "k"
@@ -110,25 +114,44 @@ scroll_up = ","
 scroll_right = "."
 slow = "a"
 fast = "s"
-exit = "esc"
 ```
 
 All settings are optional; omitted values keep their defaults. If the default
 file is missing, a message is printed and built-in defaults are used. An invalid
 or unreadable file stops startup before any input device is grabbed.
-Unknown settings, unknown key names, duplicate bindings, and nonpositive,
+Unknown settings, unknown key names, duplicate control bindings, repeated keys
+within an activation chord, and nonpositive,
 nonfinite, or greater-than-100000 speeds are rejected.
+The old `keys.exit` setting has been removed; delete it from existing configs.
 
 Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
-are accepted. Each action must use a distinct key. Chords still belong in keyd:
-for your D+F -> F3 remap, leave `free_mouse = "f3"`.
+are accepted. Controls must use distinct single keys. `free_mouse` accepts either
+a single distinct key or a `+`-separated chord such as `"leftalt + space"` or
+`"leftctrl+leftalt+f3"`. All chord keys must be held together, in either press
+order; extra held keys do not prevent activation. If keyd already remaps D+F
+to F3, leave `free_mouse = "f3"`.
 The top-level `mode` and `notify` settings must appear before `[speeds]` and `[keys]`.
-`"hold"` activates mouse mode only while the configured key is down.
-`"toggle"` switches it on/off on each new press; releasing the key or keyboard
-autorepeat does not change it. Slow/fast and mouse-button bindings still use
-hold behavior in either mode. The exit key quits while mouse mode is active,
-including when the activation key has been released in toggle mode.
+`"hold"` activates mouse mode only while every activation key is down; releasing
+any chord member leaves the mode. `"toggle"` switches it on/off each time the
+whole chord becomes held; releases and keyboard autorepeat do not toggle it.
+Release and repress at least one member to toggle again. Slow/fast and
+mouse-button bindings still use hold behavior in either mode.
+
+Partial chords pass through normally before completion. When a chord completes,
+previously forwarded members are released on the virtual keyboard (including
+modifiers); the completing press is consumed. Chord members stay suppressed and
+cannot also perform mouse actions until released. Already-forwarded partial
+keypresses cannot be undone, so press modifiers first for shortcuts like Alt+Space.
+Chord members may overlap controls: with `"leftalt + space"`, activation does not
+click. In hold mode, bind `left_click` to another key (for example `"u"`) since
+Space must remain held to keep the mode active. In toggle mode, release the chord
+and then use Space normally for clicking.
+
+`speeds.scroll`, `speeds.scroll_slow`, and `speeds.scroll_fast` set normal, slow,
+and fast scrolling in notches per second (defaults: 8, 2, and 16). Speed changes
+apply immediately to held scrolling, with slow taking priority over fast.
+The initial one-notch response on a scroll press is unchanged.
 
 Restart the application to apply edits. Inspect the effective configuration
 without grabbing a keyboard:
@@ -158,7 +181,7 @@ monitors while active. Desktop effects may alter its appearance.
 
 It stays visible for the entire hold or toggled-on interval, with no timer.
 Leaving the mode destroys the surface immediately via a worker wakeup (subject
-to compositor scheduling), including when exiting with Escape. Normal shutdown,
+to compositor scheduling). Normal shutdown,
 handled signals, and input errors also remove it. Display work runs on a separate
 thread, never in the input polling loop.
 

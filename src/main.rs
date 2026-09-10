@@ -28,7 +28,7 @@ const KEYD_KEYBOARD_NAME: &str = "keyd virtual keyboard";
 const TICK: Duration = Duration::from_millis(4);
 
 #[derive(Parser)]
-#[command(version, about = "Keyboard-driven mouse control (default: hold F3; F3+Escape exits)")]
+#[command(version, about = "Keyboard-driven mouse control (default: hold F3)")]
 struct Args {
     /// Keyboard event node (default: keyd output, otherwise the sole physical keyboard)
     #[arg(short, long)]
@@ -50,7 +50,7 @@ struct Args {
     #[arg(long, value_parser = positive_speed)]
     speed: Option<f64>,
 
-    /// Override scroll speed from config (notches per second)
+    /// Override normal scroll speed from config (notches per second)
     #[arg(long, value_parser = positive_speed)]
     scroll_speed: Option<f64>,
 }
@@ -234,10 +234,7 @@ fn event_loop(
                 for event in events {
                     if event.event_type() == EventType::KEY {
                         outputs.emit(engine.key(KeyCode(event.code()), event.value()))?;
-                        indicator.set_active(engine.active() && !engine.emergency_exit());
-                        if engine.emergency_exit() {
-                            return Ok(());
-                        }
+                        indicator.set_active(engine.active());
                     }
                 }
             }
@@ -305,7 +302,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         )
     })?;
     eprintln!(
-        "Reading {} ({}). {} {:?} for Free Mouse Mode; {:?} while active or Ctrl+C exits.",
+        "Reading {} ({}). {} {:?} for Free Mouse Mode; Ctrl+C exits.",
         path.display(),
         input.name().unwrap_or("unnamed"),
         match config.mode {
@@ -313,17 +310,13 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             config::Mode::Toggle => "Press to toggle",
         },
         config.keys.free_mouse,
-        config.keys.exit,
     );
     let mut engine = Engine::new(config);
     // Seeding held keys preserves modifiers if the process starts mid-keypress.
     let result = (|| -> io::Result<()> {
         for key in input.get_key_state()?.iter() {
             outputs.emit(engine.key(key, 1))?;
-            indicator.set_active(engine.active() && !engine.emergency_exit());
-        }
-        if engine.emergency_exit() {
-            return Ok(());
+            indicator.set_active(engine.active());
         }
         event_loop(&mut input, &mut outputs, &mut engine, &stop, &mut indicator)
     })();
@@ -399,6 +392,8 @@ mod tests {
         assert_eq!(config.speeds.scroll, 12.0);
         assert_eq!(config.speeds.slow, 200.0);
         assert_eq!(config.speeds.fast, 1600.0);
+        assert_eq!(config.speeds.scroll_slow, 2.0);
+        assert_eq!(config.speeds.scroll_fast, 16.0);
     }
 
     #[test]
