@@ -1,0 +1,17 @@
+[package]
+name = "fievel"
+version = "0.1.0"
+edition = "2021"
+description = "Hold F3 for keyboard-driven mouse control on Linux"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+evdev = "0.13.2"
+signal-hook = "0.3"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+lto = true
+strip = true
