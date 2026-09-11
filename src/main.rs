@@ -175,10 +175,11 @@ impl Outputs {
         let keys = input
             .supported_keys()
             .ok_or_else(|| io::Error::other("keyboard has no supported keys"))?;
+        let keys = keyboard_keys(keys);
         let keyboard = VirtualDevice::builder()?
             .name(KEYBOARD_NAME)
             .input_id(InputId::new(BusType::BUS_USB, 0x1209, 0xf301, 1))
-            .with_keys(keys)?
+            .with_keys(&keys)?
             .build()?;
         let buttons: AttributeSet<KeyCode> = [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT]
             .into_iter()
@@ -216,6 +217,13 @@ impl Outputs {
         };
         keyboard.and(mouse)
     }
+}
+
+fn keyboard_keys(input_keys: &evdev::AttributeSetRef<KeyCode>) -> AttributeSet<KeyCode> {
+    input_keys
+        .iter()
+        .chain([KeyCode::KEY_HOME, KeyCode::KEY_END])
+        .collect()
 }
 
 fn event_loop(
@@ -351,6 +359,16 @@ mod tests {
     use super::*;
 
     #[test]
+    fn keyboard_supports_home_end_even_when_source_does_not() {
+        let input_keys: AttributeSet<KeyCode> =
+            [KeyCode::KEY_A, KeyCode::KEY_F3].into_iter().collect();
+        let keys = keyboard_keys(&input_keys);
+        for key in [KeyCode::KEY_A, KeyCode::KEY_F3, KeyCode::KEY_HOME, KeyCode::KEY_END] {
+            assert!(keys.contains(key));
+        }
+    }
+
+    #[test]
     fn defaults_to_keyd_even_with_multiple_physical_keyboards() {
         assert_eq!(preferred_device_index(&[2], &[0, 1]), Ok(2));
         assert_eq!(preferred_device_index(&[2], &[]), Ok(2));
@@ -446,6 +464,9 @@ mod tests {
             KeyCode::KEY_A,
             KeyCode::KEY_F3,
             KeyCode::KEY_H,
+            KeyCode::KEY_J,
+            KeyCode::KEY_K,
+            KeyCode::KEY_L,
             KeyCode::KEY_SPACE,
             KeyCode::KEY_I,
             KeyCode::KEY_M,
@@ -479,7 +500,13 @@ mod tests {
             (KeyCode::KEY_A, 1),
             (KeyCode::KEY_A, 0),
             (KeyCode::KEY_F3, 1),
+            (KeyCode::KEY_J, 1),
+            (KeyCode::KEY_K, 1),
+            (KeyCode::KEY_J, 0),
+            (KeyCode::KEY_K, 0),
+            (KeyCode::KEY_L, 1),
             (KeyCode::KEY_H, 1),
+            (KeyCode::KEY_L, 0),
             (KeyCode::KEY_SPACE, 1),
             (KeyCode::KEY_I, 1),
             (KeyCode::KEY_M, 1),
@@ -512,6 +539,10 @@ mod tests {
             vec![
                 (EventType::KEY.0, KeyCode::KEY_A.0, 1),
                 (EventType::KEY.0, KeyCode::KEY_A.0, 0),
+                (EventType::KEY.0, KeyCode::KEY_HOME.0, 1),
+                (EventType::KEY.0, KeyCode::KEY_HOME.0, 0),
+                (EventType::KEY.0, KeyCode::KEY_END.0, 1),
+                (EventType::KEY.0, KeyCode::KEY_END.0, 0),
             ]
         );
         assert!(!expected_mouse.is_empty());
