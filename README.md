@@ -43,48 +43,81 @@ upstream remapping (such as keyd), not desktop-layout-translated characters.
 
 ## Build and run
 
-Install a stable Rust toolchain with Cargo, then:
+With [Rust and Cargo](https://rustup.rs/) installed, build from the project directory:
 
 ```sh
 cargo build --release
-sudo ./target/release/fievel --list
-sudo ./target/release/fievel
 ```
 
-With no `--device`, the application prefers the accessible `keyd virtual keyboard`,
-so keyd keeps ownership of the physical keyboard and all its remappings happen
-first. If keyd's output is absent, it selects the sole accessible physical
-keyboard. Multiple keyd outputs, or zero/multiple physical keyboards without
-keyd, require an explicit choice. Other virtual devices are not automatically
-selected, and this application's own outputs are always rejected.
-
-To override automatic selection, use `--device` with an `/dev/input/eventN` path
-from `--list`, or a physical keyboard's stable `/dev/input/by-id/...-event-kbd`
-symlink. Set up the keyd exclusions below before running alongside keyd.
+Set up [device permissions](#device-permissions) once, then run the binary:
 
 ```sh
-sudo ./target/release/fievel --device /dev/input/eventN --speed 800 --scroll-speed 8
+./target/release/fievel
 ```
 
-`--speed` overrides the configured normal speed in relative input units per
-second, not guaranteed screen pixels. `--scroll-speed` overrides the configured
-normal scroll rate in notches per second. Slow/fast pointer and scroll speeds
-remain as configured. The update interval
-is 4 ms; fractional motion is retained between updates. A scheduling stall or
-suspend is capped at 50 ms of movement to avoid large catch-up jumps.
+Or copy it to a directory on your `PATH`:
 
-Use Ctrl+C or SIGTERM to stop. Escape passes through normally and does not quit
-the application or leave Free Mouse Mode. Ctrl+Z also exits rather than
-suspending with the keyboard still grabbed. On a normal exit, handled signal, or input
-read error, held virtual keys/buttons are released and the keyboard is ungrabbed.
-Unplugging the keyboard exits with an error; restart after reconnecting it.
-This program does not install or start a service automatically.
+```sh
+sudo install -m 755 target/release/fievel /usr/local/bin/fievel
+fievel
+```
 
-It needs read access to the selected input node and write access to `/dev/uinput`.
-Running with `sudo` is the simplest initial setup. If `/dev/uinput` does not exist,
-load it with `sudo modprobe uinput`. For unprivileged operation, use narrowly
-scoped device permissions; do not make all input devices world-readable/writable.
-Input access can read passwords, and uinput access can inject system-wide input.
+Use **Ctrl+C** to stop and release the keyboard. Escape passes through normally;
+Ctrl+Z exits rather than suspending. Restart fievel if the keyboard is unplugged.
+No service is installed or started automatically.
+
+### Device permissions
+
+To run without sudo, fievel needs read access to the keyboard's input device and
+write access to `/dev/uinput`. On distributions that grant input-device access
+through the `input` group, run this once as your normal user:
+
+```sh
+#!/bin/sh
+set -e
+
+sudo groupadd --system --force fievel
+sudo usermod -aG input,fievel "$USER"
+
+sudo tee /etc/udev/rules.d/99-fievel-input.rules <<EOF
+# Output: Virtual device creation
+KERNEL=="uinput", GROUP="fievel", MODE:="0660"
+EOF
+
+sudo modprobe uinput
+echo "uinput" | sudo tee /etc/modules-load.d/uinput.conf
+
+sudo udevadm control --reload-rules && sudo udevadm trigger
+```
+
+**Log out and back in** for the new group memberships to take effect. The module
+will also load automatically on future boots. If your distribution does not use
+the `input` group, grant read access to the selected keyboard using its device
+permission mechanism instead.
+
+Only grant these permissions to trusted users: the `input` group can read other
+input devices, including password keystrokes, and `fievel` group members can
+inject system-wide input. Do not make input devices world-readable/writable.
+
+### Choosing a keyboard
+
+Fievel automatically selects keyd's virtual keyboard, or the sole accessible
+physical keyboard if keyd is absent. When using keyd, apply the
+[keyd exclusions](#using-alongside-keyd) before starting fievel.
+If there are multiple candidates, list devices and choose one explicitly:
+
+```sh
+./target/release/fievel --list
+./target/release/fievel --device /dev/input/eventN
+```
+
+A physical keyboard's stable `/dev/input/by-id/...-event-kbd` path also works.
+Other virtual keyboards require explicit selection; fievel's own outputs are
+always rejected.
+
+Optional overrides: `--speed 800` sets normal pointer speed in relative input
+units per second (not guaranteed screen pixels), and `--scroll-speed 8` sets
+normal scrolling in notches per second. Slow/fast speeds remain as configured.
 
 ## Configuration
 
