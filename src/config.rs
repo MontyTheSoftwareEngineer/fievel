@@ -7,6 +7,7 @@ use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
 pub struct Config {
     pub mode: Mode,
     pub notify: bool,
+    pub home_end_enabled: bool,
     pub speeds: Speeds,
     pub easing: Easing,
     pub keys: Keys,
@@ -17,6 +18,7 @@ impl Default for Config {
         Self {
             mode: Mode::default(),
             notify: true,
+            home_end_enabled: true,
             speeds: Speeds::default(),
             easing: Easing::default(),
             keys: Keys::default(),
@@ -282,6 +284,7 @@ mod tests {
         let config = Config::parse(include_str!("../fievel.config")).unwrap();
         assert_eq!(config.mode, Mode::Hold);
         assert!(config.notify);
+        assert!(config.home_end_enabled);
         assert_eq!(config.keys.named(), Keys::default().named());
         assert_eq!(config.easing.movement, 0.2);
         assert_eq!(config.easing.scroll, 0.3);
@@ -333,6 +336,17 @@ mod tests {
         assert!(!Config::parse("notify = false").unwrap().notify);
         for text in ["notify = 'true'", "notify = 1", "notify = []"] {
             assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn home_end_defaults_on_and_accepts_only_booleans() {
+        assert!(Config::default().home_end_enabled);
+        assert!(Config::parse("").unwrap().home_end_enabled);
+        assert!(Config::parse("home_end_enabled = true").unwrap().home_end_enabled);
+        assert!(!Config::parse("home_end_enabled = false").unwrap().home_end_enabled);
+        for value in ["'true'", "1", "[]"] {
+            assert!(Config::parse(&format!("home_end_enabled = {value}")).is_err());
         }
     }
 

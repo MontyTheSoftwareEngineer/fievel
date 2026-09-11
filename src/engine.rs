@@ -20,6 +20,7 @@ pub struct Engine {
     forwarded: BTreeSet<K>,
     suppressed: BTreeSet<K>,
     activation_keys: BTreeSet<K>,
+    scroll_reserved: BTreeSet<K>,
     buttons: BTreeSet<K>,
     motion: [f64; 2],
     scroll: [f64; 2],
@@ -37,6 +38,7 @@ impl Engine {
             forwarded: BTreeSet::new(),
             suppressed: BTreeSet::new(),
             activation_keys: BTreeSet::new(),
+            scroll_reserved: BTreeSet::new(),
             buttons: BTreeSet::new(),
             motion: [0.0; 2],
             scroll: [0.0; 2],
@@ -104,9 +106,28 @@ impl Engine {
 
     fn scroll_direction(&self) -> [i32; 2] {
         [
-            self.direction(self.config.keys.scroll_left, self.config.keys.scroll_right),
-            self.direction(self.config.keys.scroll_down, self.config.keys.scroll_up),
+            (self.config.keys.scroll_left, self.config.keys.scroll_right),
+            (self.config.keys.scroll_down, self.config.keys.scroll_up),
         ]
+        .map(|(negative, positive)| {
+            let scrolling = |key| {
+                self.active() && self.control_held(key) && !self.scroll_reserved.contains(&key)
+            };
+            i32::from(scrolling(positive)) - i32::from(scrolling(negative))
+        })
+    }
+
+    fn home_end_chords(&self) -> [bool; 2] {
+        [
+            (self.config.keys.scroll_up, self.config.keys.scroll_down),
+            (self.config.keys.scroll_left, self.config.keys.scroll_right),
+        ]
+        .map(|(first, second)| {
+            self.config.home_end_enabled
+                && self.active()
+                && self.control_held(first)
+                && self.control_held(second)
+        })
     }
 
     pub fn key(&mut self, key: K, value: i32) -> Output {
@@ -116,12 +137,14 @@ impl Engine {
         }
         let old_motion = self.motion_direction();
         let old_scroll = self.scroll_direction();
+        let old_home_end = self.home_end_chords();
         let was_active = self.active();
         let was_chord_held = self.chord_held();
         match value {
             0 => {
                 self.held.remove(&key);
                 self.activation_keys.remove(&key);
+                self.scroll_reserved.remove(&key);
             }
             1 => {
                 self.held.insert(key);
@@ -174,6 +197,32 @@ impl Engine {
                 0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
                 2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
                 _ => {}
+            }
+        }
+
+        for (index, down) in self.home_end_chords().into_iter().enumerate() {
+            if value == 1 && down && !old_home_end[index] {
+                // A page jump must not be followed by coasting or by the remaining
+                // scroll key when the chord is released one member at a time.
+                self.reset_scroll();
+                for control in [
+                    self.config.keys.scroll_left,
+                    self.config.keys.scroll_right,
+                    self.config.keys.scroll_down,
+                    self.config.keys.scroll_up,
+                ] {
+                    if self.control_held(control) {
+                        self.scroll_reserved.insert(control);
+                    }
+                }
+                let target = [K::KEY_HOME, K::KEY_END][index];
+                if self.forwarded.contains(&target) {
+                    // Do not release a Home/End key the user is physically holding.
+                    out.keyboard.push(key_event(target, 2));
+                } else {
+                    out.keyboard.push(key_event(target, 1));
+                    out.keyboard.push(key_event(target, 0));
+                }
             }
         }
 
@@ -270,12 +319,16 @@ impl Engine {
         ));
     }
 
-    fn reset_motion(&mut self) {
-        self.motion = [0.0; 2];
+    fn reset_scroll(&mut self) {
         self.scroll = [0.0; 2];
-        self.velocity = [0.0; 2];
         self.scroll_velocity = [0.0; 2];
         self.legacy_scroll = [0; 2];
+    }
+
+    fn reset_motion(&mut self) {
+        self.motion = [0.0; 2];
+        self.velocity = [0.0; 2];
+        self.reset_scroll();
     }
 
     pub fn release_all(&mut self) -> Output {
@@ -291,6 +344,7 @@ impl Engine {
         self.held.clear();
         self.suppressed.clear();
         self.activation_keys.clear();
+        self.scroll_reserved.clear();
         self.toggled = false;
         self.reset_motion();
         out
@@ -388,6 +442,227 @@ mod tests {
         config.easing.movement = 0.0;
         config.easing.scroll = 0.0;
         config
+    }
+
+    #[test]
+    fn home_end_chords_tap_once_in_either_order_and_activation_mode() {
+        for mode in [Mode::Hold, Mode::Toggle] {
+            for (first, second, target) in [
+                (K::KEY_M, K::KEY_COMMA, K::KEY_HOME),
+                (K::KEY_COMMA, K::KEY_M, K::KEY_HOME),
+                (K::KEY_N, K::KEY_DOT, K::KEY_END),
+                (K::KEY_DOT, K::KEY_N, K::KEY_END),
+            ] {
+                let mut config = instant_config();
+                config.mode = mode;
+                let mut e = Engine::new(config);
+                e.key(K::KEY_F3, 1);
+                if mode == Mode::Toggle {
+                    e.key(K::KEY_F3, 0);
+                }
+                assert!(e.key(first, 1).keyboard.is_empty());
+                let tap = events(&[key_event(target, 1), key_event(target, 0)]);
+                assert_eq!(events(&e.key(second, 1).keyboard), tap);
+                for key in [first, second] {
+                    assert!(e.key(key, 2).keyboard.is_empty());
+                    assert!(e.key(key, 1).keyboard.is_empty());
+                }
+                let out = e.advance(Duration::from_millis(50));
+                assert!(out.keyboard.is_empty());
+                assert!(out.mouse.is_empty());
+                assert!(e.key(K::KEY_A, 1).keyboard.is_empty());
+                assert!(e.key(first, 0).keyboard.is_empty());
+                assert_eq!(events(&e.key(first, 1).keyboard), tap);
+                assert!(e.key(second, 0).keyboard.is_empty());
+                assert!(e.key(first, 0).keyboard.is_empty());
+                assert!(e.release_all().keyboard.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn home_end_clears_scroll_momentum_and_reserves_held_scroll_keys_until_release() {
+        for easing in [0.0, 0.3, 1.0] {
+            for (first, second, other, target) in [
+                (K::KEY_M, K::KEY_COMMA, K::KEY_N, K::KEY_HOME),
+                (K::KEY_COMMA, K::KEY_M, K::KEY_DOT, K::KEY_HOME),
+                (K::KEY_N, K::KEY_DOT, K::KEY_M, K::KEY_END),
+                (K::KEY_DOT, K::KEY_N, K::KEY_COMMA, K::KEY_END),
+            ] {
+                for release_first in [first, second] {
+                    let mut config = Config::default();
+                    config.easing.scroll = easing;
+                    let mut e = Engine::new(config);
+                    e.key(K::KEY_F3, 1);
+                    e.key(first, 1);
+                    e.key(other, 1);
+                    for _ in 0..10 {
+                        e.advance(Duration::from_millis(50));
+                    }
+                    assert!(e.scroll_velocity.iter().all(|speed| *speed != 0.0));
+
+                    let out = e.key(second, 1);
+                    assert_eq!(
+                        events(&out.keyboard),
+                        events(&[key_event(target, 1), key_event(target, 0)]),
+                    );
+                    assert!(out.mouse.is_empty());
+                    assert_eq!(e.scroll_velocity, [0.0; 2]);
+                    assert_eq!(e.scroll, [0.0; 2]);
+                    assert_eq!(e.legacy_scroll, [0; 2]);
+                    assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
+
+                    let release_second = if release_first == first { second } else { first };
+                    for key in [release_first, release_second, other] {
+                        assert!(e.key(key, 2).mouse.is_empty());
+                        assert!(e.key(key, 0).mouse.is_empty());
+                        for _ in 0..10 {
+                            assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
+                        }
+                    }
+                    assert!(e.scroll_reserved.is_empty());
+                    e.key(first, 1);
+                    let mut resumed = false;
+                    for _ in 0..10 {
+                        resumed |= !e.advance(Duration::from_millis(50)).mouse.is_empty();
+                    }
+                    assert!(resumed);
+                    e.key(second, 1);
+                    assert!(!e.scroll_reserved.is_empty());
+                    e.release_all();
+                    assert!(e.scroll_reserved.is_empty());
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn home_end_disabled_preserves_opposite_scroll_coasting_and_release_behavior() {
+        for easing in [0.0, 0.3] {
+            let mut config = Config::default();
+            config.home_end_enabled = false;
+            config.easing.scroll = easing;
+            let mut e = Engine::new(config);
+            e.key(K::KEY_F3, 1);
+            e.key(K::KEY_M, 1);
+            e.advance(Duration::from_millis(50));
+            assert!(e.key(K::KEY_COMMA, 1).keyboard.is_empty());
+            assert!(e.scroll_reserved.is_empty());
+            let coasting = e.advance(Duration::from_millis(50));
+            assert_eq!(coasting.mouse.is_empty(), easing == 0.0);
+            e.key(K::KEY_M, 0);
+            let mut resumed = false;
+            for _ in 0..10 {
+                resumed |= !e.advance(Duration::from_millis(50)).mouse.is_empty();
+            }
+            assert!(resumed);
+        }
+    }
+
+    #[test]
+    fn home_end_chords_are_inactive_outside_mouse_mode_and_when_disabled() {
+        for enabled in [false, true] {
+            let mut config = instant_config();
+            config.home_end_enabled = enabled;
+            let mut e = Engine::new(config);
+            for key in [K::KEY_M, K::KEY_COMMA, K::KEY_N, K::KEY_DOT] {
+                assert_eq!(events(&e.key(key, 1).keyboard), events(&[key_event(key, 1)]));
+            }
+            e.release_all();
+        }
+        let mut config = instant_config();
+        config.home_end_enabled = false;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_F3, 1);
+        for key in [K::KEY_M, K::KEY_COMMA, K::KEY_N, K::KEY_DOT] {
+            assert!(e.key(key, 1).keyboard.is_empty());
+            assert!(e.key(key, 2).keyboard.is_empty());
+        }
+        assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
+    }
+
+    #[test]
+    fn home_end_chords_follow_remapped_scroll_not_movement_keys() {
+        let config = Config::parse(
+            "[keys]\nscroll_up = 'up'\nscroll_down = 'down'\nscroll_left = 'left'\nscroll_right = 'right'",
+        ).unwrap();
+        let mut e = Engine::new(config);
+        e.key(K::KEY_F3, 1);
+        for (first, second, target) in [
+            (K::KEY_UP, K::KEY_DOWN, K::KEY_HOME),
+            (K::KEY_LEFT, K::KEY_RIGHT, K::KEY_END),
+        ] {
+            assert!(e.key(first, 1).keyboard.is_empty());
+            assert_eq!(
+                events(&e.key(second, 1).keyboard),
+                events(&[key_event(target, 1), key_event(target, 0)]),
+            );
+        }
+        for key in [K::KEY_N, K::KEY_M, K::KEY_COMMA, K::KEY_DOT] {
+            assert_eq!(events(&e.key(key, 1).keyboard), events(&[key_event(key, 1)]));
+        }
+        for key in [K::KEY_H, K::KEY_J, K::KEY_K, K::KEY_L] {
+            assert!(e.key(key, 1).keyboard.is_empty());
+        }
+    }
+
+    #[test]
+    fn home_end_chords_respect_activation_reservations_and_mode_exit() {
+        for mode in ["hold", "toggle"] {
+            let config = Config::parse(&format!(
+                "mode = '{mode}'\n[keys]\nfree_mouse = 'm+comma'",
+            )).unwrap();
+            let mut e = Engine::new(config);
+            e.key(K::KEY_M, 1);
+            assert_eq!(events(&e.key(K::KEY_COMMA, 1).keyboard), events(&[key_event(K::KEY_M, 0)]));
+            assert!(e.key(K::KEY_M, 2).keyboard.is_empty());
+            assert!(e.key(K::KEY_COMMA, 0).keyboard.is_empty());
+            assert!(e.key(K::KEY_COMMA, 1).keyboard.is_empty());
+        }
+        let mut e = toggle_engine();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_F3, 0);
+        e.key(K::KEY_M, 1);
+        e.key(K::KEY_COMMA, 1);
+        assert!(e.key(K::KEY_F3, 1).keyboard.is_empty());
+        assert!(e.key(K::KEY_COMMA, 2).keyboard.is_empty());
+        assert!(e.key(K::KEY_M, 0).keyboard.is_empty());
+        assert!(e.key(K::KEY_COMMA, 0).keyboard.is_empty());
+        e.release_all();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_M, 1);
+        assert_eq!(
+            events(&e.key(K::KEY_COMMA, 1).keyboard),
+            events(&[key_event(K::KEY_HOME, 1), key_event(K::KEY_HOME, 0)]),
+        );
+    }
+
+    #[test]
+    fn home_end_chords_transfer_preheld_controls_and_preserve_forwarded_keys() {
+        let mut e = engine();
+        e.key(K::KEY_M, 1);
+        e.key(K::KEY_COMMA, 1);
+        assert_eq!(
+            events(&e.key(K::KEY_F3, 1).keyboard),
+            events(&[
+                key_event(K::KEY_M, 0),
+                key_event(K::KEY_COMMA, 0),
+                key_event(K::KEY_HOME, 1),
+                key_event(K::KEY_HOME, 0),
+            ]),
+        );
+        e.release_all();
+        for (first, second, target) in [
+            (K::KEY_M, K::KEY_COMMA, K::KEY_HOME),
+            (K::KEY_N, K::KEY_DOT, K::KEY_END),
+        ] {
+            e.key(target, 1);
+            e.key(K::KEY_F3, 1);
+            e.key(first, 1);
+            assert_eq!(events(&e.key(second, 1).keyboard), events(&[key_event(target, 2)]));
+            assert_eq!(events(&e.key(target, 0).keyboard), events(&[key_event(target, 0)]));
+            assert!(e.release_all().keyboard.is_empty());
+        }
     }
 
     fn advance_ticks(e: &mut Engine, ticks: usize, millis: u64) -> [i32; 4] {

@@ -5,6 +5,43 @@ uinput devices: `fievel keyboard` for normal typing, and
 `fievel pointer` for mouse events. Works below X11/Wayland and is visible
 to tools such as `keyd monitor`. No keystrokes are recorded or sent anywhere.
 
+## Quickstart
+
+No Rust toolchain or build is needed: download the Linux x64 binary archive
+(`fievel-linux-x64.tar.gz`) from
+[Releases](https://github.com/MontyTheSoftwareEngineer/fievel/releases/latest).
+Set up [device permissions](#device-permissions) once, and if you use keyd,
+apply the [keyd exclusions](#using-alongside-keyd) before running.
+From the download directory:
+
+```sh
+tar -xzf fievel-linux-x64.tar.gz
+chmod +x fievel
+./fievel
+```
+
+Hold **F3** and use **H/J/K/L** to move the mouse. Release F3 to type normally.
+Press **Ctrl+C** to stop. No config file is required to use the defaults.
+
+To customize quickly, download `fievel.config` from the source at the **same
+release tag** (the binary archive does not include it). From the directory
+containing the downloaded config and extracted binary, copy it to the default
+location, edit it, and rerun the binary:
+
+```sh
+mkdir -p ~/.config/fievel
+cp -i fievel.config ~/.config/fievel/fievel.config
+nano ~/.config/fievel/fievel.config
+./fievel
+```
+
+Use your preferred editor instead of `nano` if needed. Stop any running fievel
+with Ctrl+C before restarting; config edits take effect on startup. Use the
+matching release's config to avoid settings unsupported by an older binary.
+See [Configuration](#configuration) for all settings.
+
+## Controls
+
 https://github.com/user-attachments/assets/cdcef352-618e-4b6a-afa2-5eb3f40cdee6
 
 By default, hold **F3** to enter **Free Mouse Mode** and release F3 to leave it.
@@ -15,6 +52,8 @@ Mouse Mode is active (Wayland/Hyprland/Sway; see [Mode indicator](#mode-indicato
 | Key while Free Mouse Mode is active | Action |
 | --- | --- |
 | H / J / K / L | Move left / down / up / right |
+| M + , | Home (top of page) |
+| N + . | End (bottom of page) |
 | Space | Left button down on press, up on release (supports dragging) |
 | I | Right button down on press, up on release |
 | N / M / , / . | Scroll left / down / up / right |
@@ -35,6 +74,19 @@ and S are both held; releasing A while S remains held returns to fast speed.
 These modifiers affect both pointer movement and scrolling, with separately
 configurable rates. Outside Free Mouse
 Mode, A and S type normally. All bindings and speeds can be changed in the config.
+
+Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
+Hold the configured scroll up+down keys together to send Home, or scroll
+left+right to send End, in either press order. Each chord sends one key tap, not autorepeats; release and
+repress either member to fire again. A jump immediately clears scrolling momentum
+on both axes and suppresses scrolling from all currently held scroll keys until
+they are released, so releasing the chord cannot scroll away from the page edge.
+Press a scroll key again after releasing it to resume normal scrolling.
+Set `home_end_enabled = false` to disable
+these shortcuts (opposite directions still cancel scrolling). Movement keys do
+not trigger these shortcuts. These are ordinary
+Home/End key events sent to the focused application; in text fields they may
+move the caret rather than scroll the page, and held modifiers still apply.
 
 Mouse-control keys already held when F3 is pressed transfer to mouse control.
 Keys used in mouse mode stay suppressed until released, so leaving the mode
@@ -129,6 +181,7 @@ in this project:
 ```toml
 mode = "hold" # "hold" (default) or "toggle"
 notify = true # Persistent, faint Free Mouse Mode indicator
+home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
 
 [speeds]
 normal = 300
@@ -174,7 +227,7 @@ a single distinct key or a `+`-separated chord such as `"leftalt + space"` or
 `"leftctrl+leftalt+f3"`. All chord keys must be held together, in either press
 order; extra held keys do not prevent activation. If keyd already remaps D+F
 to F3, leave `free_mouse = "f3"`.
-The top-level `mode` and `notify` settings must appear before any table
+The top-level `mode`, `notify`, and `home_end_enabled` settings must appear before any table
 (`[speeds]`, `[easing]`, or `[keys]`).
 `"hold"` activates mouse mode only while every activation key is down; releasing
 any chord member leaves the mode. `"toggle"` switches it on/off each time the
