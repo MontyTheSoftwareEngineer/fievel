@@ -118,6 +118,69 @@ Use **Ctrl+C** to stop and release the keyboard. Escape passes through normally;
 Ctrl+Z exits rather than suspending. Restart fievel if the keyboard is unplugged.
 No service is installed or started automatically.
 
+### Movement odometer
+
+While fievel is running, it automatically keeps separate totals since reset for
+movement emitted by fievel and movement from physical mice/trackpads, including
+when Free Mouse Mode is inactive. In another terminal, run:
+
+```sh
+fievel --odometer
+```
+
+This prints both totals and exits without opening input devices, grabbing a
+keyboard, loading configuration, or disturbing the running instance. It also
+works when fievel is stopped. Totals survive restarts and are saved atomically
+once per second and on clean shutdown; an abrupt termination may lose the last
+second. Before the first run, the command reports zero.
+
+Reset both totals from any terminal:
+
+```sh
+fievel --reset-odometer
+```
+
+This permanently clears both counters. It works with fievel stopped or running;
+a running instance saves and acknowledges the reset without releasing the
+keyboard or interrupting mouse control, then continues counting from zero.
+Restart an older running binary with the updated version before using live reset.
+
+Distances are displayed in **estimated miles**, using a reference scale of
+**96 raw input units per inch** (6,082,560 units per mile). This is a display
+conversion, not measured physical travel or on-screen cursor distance: fievel's
+relative motion, mouse hardware counts, and trackpad coordinates have different
+scales. The default is a conventional reference, not detected device DPI.
+You can choose a different reference scale when reporting:
+
+```sh
+fievel --odometer --odometer-units-per-inch 800
+```
+
+The same scale applies to both totals, so it cannot calibrate a mixture of devices.
+Raw totals remain stored without rounding; existing history is automatically
+displayed in miles and changing the report scale does not alter stored data.
+Your odometer notification shortcut also displays miles with the updated binary.
+Each input frame
+adds `sqrt(dx*dx + dy*dy)`. Clicks and wheel events are excluded; trackpads count
+single-contact motion, not finger lifts/repositioning or multi-finger gestures.
+Touchscreens and virtual devices (including fievel's own pointer) are excluded.
+These are input-level measurements, not the desktop's final gesture/palm
+classification or accelerated/clipped cursor motion.
+
+Physical devices are read **without grabbing them**, and newly connected devices
+are discovered within about two seconds. Fievel needs read access to their
+`/dev/input/event*` nodes in addition to the keyboard; the `input` group setup
+below generally provides this. Inaccessible devices are reported on stderr and
+cannot contribute to the physical total. Devices exclusively grabbed by another
+program cannot be observed. Nothing is counted while fievel is stopped.
+
+Totals are stored in `$XDG_STATE_HOME/fievel/odometer.toml`, or
+`~/.local/state/fievel/odometer.toml` when `XDG_STATE_HOME` is unset or not absolute.
+Run the main instance and the reporting command as the same user with the same
+state directory. Only one tracking instance can write to that directory; any
+number of `--odometer` readers can run alongside it. Only aggregate distances
+are saved, not event histories or coordinates.
+
 ### Device permissions
 
 To run without sudo, fievel needs read access to the keyboard's input device and

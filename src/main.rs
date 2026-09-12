@@ -1,6 +1,7 @@
 mod config;
 mod engine;
 mod indicator;
+mod odometer;
 
 use clap::Parser;
 use config::Config;
@@ -37,6 +38,18 @@ struct Args {
     /// List accessible keyboards without grabbing them
     #[arg(long)]
     list: bool,
+
+    /// Report saved mouse-movement totals without opening input devices
+    #[arg(long, conflicts_with_all = ["list", "check_config"])]
+    odometer: bool,
+
+    /// Reset both odometer totals, including in a running instance
+    #[arg(long, conflicts_with_all = ["odometer", "list", "check_config"])]
+    reset_odometer: bool,
+
+    /// Reference scale for estimated miles (raw input units per inch)
+    #[arg(long, default_value = "96", requires = "odometer", value_parser = positive_speed)]
+    odometer_units_per_inch: f64,
 
     /// Config file (default: ~/.config/fievel/fievel.config)
     #[arg(long)]
@@ -94,12 +107,15 @@ fn is_ours(device: &Device) -> bool {
     matches!(device.name(), Some(KEYBOARD_NAME | MOUSE_NAME))
 }
 
-fn is_virtual(path: &Path) -> io::Result<bool> {
+fn input_sys_path(path: &Path) -> io::Result<PathBuf> {
     let node = path
         .file_name()
         .ok_or_else(|| io::Error::other("input device has no file name"))?;
-    let sys_path = fs::canonicalize(Path::new("/sys/class/input").join(node))?;
-    Ok(sys_path.starts_with("/sys/devices/virtual"))
+    fs::canonicalize(Path::new("/sys/class/input").join(node))
+}
+
+fn is_virtual(path: &Path) -> io::Result<bool> {
+    Ok(input_sys_path(path)?.starts_with("/sys/devices/virtual"))
 }
 
 fn keyboards() -> io::Result<Vec<(PathBuf, Device)>> {
@@ -168,6 +184,7 @@ fn preferred_device_index(keyd: &[usize], physical: &[usize]) -> Result<usize, S
 struct Outputs {
     keyboard: VirtualDevice,
     mouse: VirtualDevice,
+    odometer: odometer::Counter,
 }
 
 impl Outputs {
@@ -200,7 +217,7 @@ impl Outputs {
             .with_keys(&buttons)?
             .with_relative_axes(&axes)?
             .build()?;
-        Ok(Self { keyboard, mouse })
+        Ok(Self { keyboard, mouse, odometer: odometer::Counter::default() })
     }
 
     fn emit(&mut self, output: Output) -> io::Result<()> {
@@ -215,6 +232,9 @@ impl Outputs {
         } else {
             self.mouse.emit(&output.mouse)
         };
+        if mouse.is_ok() {
+            self.odometer.record(&output.mouse);
+        }
         keyboard.and(mouse)
     }
 }
@@ -258,6 +278,14 @@ fn event_loop(
 }
 
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
+    if args.odometer {
+        odometer::report(args.odometer_units_per_inch)?;
+        return Ok(());
+    }
+    if args.reset_odometer {
+        odometer::reset()?;
+        return Ok(());
+    }
     if args.list {
         for (path, device) in keyboards()? {
             println!(
@@ -296,12 +324,15 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     ] {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
+    let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
     let mut outputs = Outputs::new(&input)
         .map_err(|error| format!("Cannot create uinput devices: {error}. Check /dev/uinput access"))?;
+    outputs.odometer = odometer.counter.clone();
     let mut indicator = Indicator::new(config.notify);
     // Give udev/compositors a chance to discover the outputs before grabbing input.
     thread::sleep(Duration::from_millis(500));
     if stop.load(Ordering::Relaxed) {
+        odometer.finish()?;
         return Ok(());
     }
     input.set_nonblocking(true)?;
@@ -333,9 +364,14 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     indicator.set_active(false);
     let release = outputs.emit(engine.release_all());
     let ungrab = input.ungrab();
+    let saved = odometer.finish();
+    if let Err(error) = &saved {
+        eprintln!("Cannot save odometer: {error}");
+    }
     if let Err(error) = release {
         eprintln!("Failed to release virtual keys/buttons: {error}");
         result?;
+        saved?;
         return Err(error.into());
     }
     if let Err(error) = ungrab {
@@ -357,6 +393,25 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn odometer_is_a_standalone_command() {
+        assert!(Args::try_parse_from(["fievel", "--odometer"]).unwrap().odometer);
+        assert!(Args::try_parse_from(["fievel", "--odometer", "--list"]).is_err());
+        assert!(Args::try_parse_from(["fievel", "--odometer", "--check-config"]).is_err());
+        assert!(Args::try_parse_from(["fievel", "--reset-odometer"]).unwrap().reset_odometer);
+        for conflict in ["--odometer", "--list", "--check-config"] {
+            assert!(Args::try_parse_from(["fievel", "--reset-odometer", conflict]).is_err());
+        }
+        assert_eq!(
+            Args::try_parse_from(["fievel", "--odometer", "--odometer-units-per-inch", "800"])
+                .unwrap().odometer_units_per_inch,
+            800.0
+        );
+        for invalid in ["0", "-1", "NaN", "inf"] {
+            assert!(Args::try_parse_from(["fievel", "--odometer", "--odometer-units-per-inch", invalid]).is_err());
+        }
+    }
 
     #[test]
     fn keyboard_supports_home_end_even_when_source_does_not() {
