@@ -1,17 +1,23 @@
 # fievel
 
-A Linux Rust application that grabs one keyboard through evdev and creates two
-uinput devices: `fievel keyboard` for normal typing, and
-`fievel pointer` for mouse events. Works below X11/Wayland and is visible
-to tools such as `keyd monitor`. No keystrokes are recorded or sent anywhere.
+A Linux Rust application for keyboard-driven mouse control and configurable
+**home-row mods**. Keep your hands on the home row with modifier chords,
+navigation layers, and mouse movement, clicking, and scrolling.
+The optional [home-row profile](homerow.config) maps A+S to Super, S+D to Ctrl,
+and D+F to Free Mouse Mode, with timed Caps Lock navigation.
+
+Fievel reads one keyboard through evdev and creates two uinput devices:
+`fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
+mouse events. Input handling works below X11/Wayland and does not require
+programmable keyboard firmware or a separate remapping tool.
+No keystrokes are recorded or sent anywhere.
 
 ## Quickstart
 
 No Rust toolchain or build is needed: download the Linux x64 binary archive
 (`fievel-linux-x64.tar.gz`) from
 [Releases](https://github.com/MontyTheSoftwareEngineer/fievel/releases/latest).
-Set up [device permissions](#device-permissions) once, and if you use keyd,
-apply the [keyd exclusions](#using-alongside-keyd) before running.
+Set up [device permissions](#device-permissions) once.
 From the download directory:
 
 ```sh
@@ -39,6 +45,11 @@ Use your preferred editor instead of `nano` if needed. Stop any running fievel
 with Ctrl+C before restarting; config edits take effect on startup. Use the
 matching release's config to avoid settings unsupported by an older binary.
 See [Configuration](#configuration) for all settings.
+
+For home-row mods, download [`homerow.config`](homerow.config) from the same
+release tag and run `./fievel --config homerow.config` instead. See
+[Home-row mods and navigation layers](#home-row-mods-and-navigation-layers)
+for the bindings and timing behavior.
 
 ## Controls
 
@@ -73,7 +84,8 @@ Speed changes also ease toward the new target. Slow takes priority if A
 and S are both held; releasing A while S remains held returns to fast speed.
 These modifiers affect both pointer movement and scrolling, with separately
 configurable rates. Outside Free Mouse
-Mode, A and S type normally. All bindings and speeds can be changed in the config.
+Mode, A and S type normally unless used in a configured modifier chord.
+All bindings and speeds can be changed in the config.
 
 Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
 Hold the configured scroll up+down keys together to send Home, or scroll
@@ -90,8 +102,10 @@ move the caret rather than scroll the page, and held modifiers still apply.
 
 Mouse-control keys already held when F3 is pressed transfer to mouse control.
 Keys used in mouse mode stay suppressed until released, so leaving the mode
-does not accidentally type a held key. Bindings use Linux keycodes after any
-upstream remapping (such as keyd), not desktop-layout-translated characters.
+does not accidentally type a held key. Bindings use Linux keycodes, not
+desktop-layout-translated characters. Native keyboard mappings are applied
+before mouse handling; while mouse mode is active, new mouse-control presses
+take precedence over those mappings.
 
 ## Build and run
 
@@ -216,10 +230,10 @@ inject system-wide input. Do not make input devices world-readable/writable.
 
 ### Choosing a keyboard
 
-Fievel automatically selects keyd's virtual keyboard, or the sole accessible
-physical keyboard if keyd is absent. When using keyd, apply the
-[keyd exclusions](#using-alongside-keyd) before starting fievel.
-If there are multiple candidates, list devices and choose one explicitly:
+For standalone use with one accessible physical keyboard, Fievel selects it
+automatically. If there are multiple candidates or other input tools running,
+list devices and explicitly select the physical keyboard for your home-row
+mappings:
 
 ```sh
 ./target/release/fievel --list
@@ -227,8 +241,10 @@ If there are multiple candidates, list devices and choose one explicitly:
 ```
 
 A physical keyboard's stable `/dev/input/by-id/...-event-kbd` path also works.
-Other virtual keyboards require explicit selection; fievel's own outputs are
-always rejected.
+Virtual inputs can be selected with `--device`; fievel's own outputs are
+always rejected. Only one program can exclusively grab an input device, so
+stop any tool that already owns the selected keyboard before starting Fievel.
+Fievel handles one selected keyboard per process.
 
 Optional overrides: `--speed 800` sets normal pointer speed in relative input
 units per second (not guaranteed screen pixels), and `--scroll-speed 8` sets
@@ -238,8 +254,10 @@ normal scrolling in notches per second. Slow/fast speeds remain as configured.
 
 On startup, the application reads
 `~/.config/fievel/fievel.config` (`~` is the current process's `$HOME`).
-The format is TOML. A complete example is included as `fievel.config`
-in this project:
+The format is TOML. [`fievel.config`](fievel.config) documents the default
+mouse controls; [`homerow.config`](homerow.config) adds optional home-row mods
+and navigation layers while retaining the default mouse speeds and controls.
+The default settings are:
 
 ```toml
 mode = "hold" # "hold" (default) or "toggle"
@@ -288,8 +306,9 @@ Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
 are accepted. Controls must use distinct single keys. `free_mouse` accepts either
 a single distinct key or a `+`-separated chord such as `"leftalt + space"` or
 `"leftctrl+leftalt+f3"`. All chord keys must be held together, in either press
-order; extra held keys do not prevent activation. If keyd already remaps D+F
-to F3, leave `free_mouse = "f3"`.
+order; extra held keys do not prevent activation. For a buffered home-row
+activation chord such as D+F, use a `free_mouse` action in `[remap.main]`
+as shown below.
 The top-level `mode`, `notify`, and `home_end_enabled` settings must appear before any table
 (`[speeds]`, `[easing]`, or `[keys]`).
 `"hold"` activates mouse mode only while every activation key is down; releasing
@@ -298,7 +317,7 @@ whole chord becomes held; releases and keyboard autorepeat do not toggle it.
 Release and repress at least one member to toggle again. Slow/fast and
 mouse-button bindings still use hold behavior in either mode.
 
-Partial chords pass through normally before completion. When a chord completes,
+For `keys.free_mouse`, partial chords pass through normally before completion. When a chord completes,
 previously forwarded members are released on the virtual keyboard (including
 modifiers); the completing press is consumed. Chord members stay suppressed and
 cannot also perform mouse actions until released. Already-forwarded partial
@@ -307,6 +326,101 @@ Chord members may overlap controls: with `"leftalt + space"`, activation does no
 click. In hold mode, bind `left_click` to another key (for example `"u"`) since
 Space must remain held to keep the mode active. In toggle mode, release the chord
 and then use Space normally for clicking.
+
+For buffered letter chords that must not type a partial key, use the native
+`free_mouse` action described below instead of `keys.free_mouse`.
+
+### Home-row mods and navigation layers
+
+Fievel provides chord-based home-row mods: press neighboring letter keys
+together to hold a modifier, and use those letters normally when no chord
+completes. It also supports timed keys and named navigation layers.
+These mappings are optional; the default configuration remains mouse-only.
+The ready-to-use [`homerow.config`](homerow.config) in the project root
+contains:
+
+```toml
+mode = "hold"
+
+[remap]
+chord_timeout = 25 # milliseconds
+
+[remap.main]
+"a+s" = "super"
+"s+d" = "ctrl"
+"i+o" = "ctrl"
+"u+i" = "super"
+"a+f" = "escape"
+"d+f" = "free_mouse" # Direct mouse action, no F3 event; either press order
+"w+e" = "layer(nav)"
+capslock = "timeout(layer(control), 175, layer(nav))"
+
+[remap.layers.nav]
+h = "left"
+j = "down"
+k = "up"
+l = "right"
+```
+
+Add these tables to your configuration, or use the example with `--config`.
+Binding names are single Linux keys or `+`-separated chords, in either press
+order. Actions are key names (`escape`, `f3`, `left`, etc.), held modifiers
+(`ctrl`, `super`), `layer(name)`, `free_mouse`, or
+`timeout(short_action, milliseconds, held_action)`. `layer(control)` and
+`layer(meta)` are aliases for holding left Ctrl and left Super.
+Actions are not recursively remapped.
+Undefined layers, duplicate normalized triggers, nested timeouts, nonpositive
+timeouts, and ambiguous strict chord subsets (such as A+S alongside A+S+D)
+are rejected. Layer names and the `layer(...)`/`timeout(...)` syntax are
+case-sensitive; key names are case-insensitive.
+
+Chord members are buffered for up to `chord_timeout` milliseconds (default 25).
+A completed chord consumes its members, so letters do not leak into the
+application. If no chord completes, pending keys are replayed in press order
+through their single-key mappings. Only potential chord members incur this
+delay. Shared-member chords such as A+S and S+D are supported; the first
+completed chord wins. Releasing any member releases the chord action; its
+remaining members stay reserved until released and must be pressed again for
+another chord. Holding a modifier chord holds the modifier, not just a tap.
+
+The Caps Lock binding provides a timed Ctrl/navigation choice: releasing
+before 175 ms taps Ctrl; pressing another key before that deadline chooses
+Ctrl first, allowing a quick Caps+C to send Ctrl+C. Holding Caps without
+another press for 175 ms chooses navigation instead. That choice lasts until
+Caps is released, so a quick Ctrl shortcut does not turn into navigation
+mid-shortcut. W+E is another way to hold the same navigation layer. Layers
+fall through to the main mappings for keys they do not override, and a key's
+chosen mapping is retained through its release even if the layer changes.
+
+`free_mouse` follows the top-level `mode`: hold the chord in hold mode, or
+press it again to switch off in toggle mode. Mouse controls take precedence
+over keyboard mappings while mouse mode is active, so H/J/K/L move the pointer
+even with navigation held and I clicks rather than waiting for I+O. Activation
+members remain reserved until release. With this profile, hold D+F to control
+the mouse, then hold S for fast movement or A for slow movement; neither
+speed key is occupied by the activation chord. The `keys.free_mouse` binding
+(F3 by default) remains available too.
+
+From the project directory, build Fievel and inspect the home-row profile:
+
+```bash
+cargo build --release
+./target/release/fievel --config homerow.config --check-config
+./target/release/fievel --list
+```
+
+Stop any running Fievel instance before changing profiles, then run:
+
+```bash
+./target/release/fievel --config homerow.config
+```
+
+Add `--device /dev/input/by-id/YOUR-KEYBOARD-event-kbd` if needed, replacing
+the placeholder with your physical keyboard's path. To make the profile your
+default, copy or merge `homerow.config` into `~/.config/fievel/fievel.config`.
+Keep any pointer tuning or other settings you already customized.
+
+### Pointer tuning
 
 `speeds.scroll`, `speeds.scroll_slow`, and `speeds.scroll_fast` set normal, slow,
 and fast scrolling in notches per second (defaults: 6, 1.5, and 24). Speed changes
@@ -439,38 +553,6 @@ xinput set-prop 'fievel pointer' 'libinput Natural Scrolling Enabled' 0
 
 Disable natural scrolling for this device if you want the documented scroll
 directions; the desktop can otherwise reverse them.
-
-## Using alongside keyd
-
-Only one program can exclusively grab an input device. By default, fievel
-selects **keyd's virtual keyboard output**, leaving the physical keyboard owned
-by keyd. The pipeline is physical keyboard -> keyd -> fievel -> desktop.
-You can also explicitly select keyd's output using `--device`.
-
-For example, if keyd maps the D+F chord to F3, Fievel sees the remapped F3,
-not the original D and F. With `mode = "hold"`, hold the chord to activate
-Free Mouse Mode; keyd's F3 release exits it, so the mapping must hold F3 down.
-With `mode = "toggle"`, each new chord press switches Free Mouse Mode on/off;
-a mapping that emits an F3 tap also works.
-The other mouse controls likewise operate on keycodes emitted by keyd.
-
-Prevent keyd from processing fievel's outputs again: for each keyd
-configuration whose `[ids]` section matches all devices (`*`), add:
-
-```ini
-[ids]
-*
--1209:f301
--1209:f302
-```
-
-Merge these exclusions into the existing section; do not replace your other
-configuration. Reload keyd before starting fievel. The keyboard has ID
-`1209:f301`; the pointer has ID `1209:f302`. These are application-local virtual
-identifiers, not claims of registered USB product IDs.
-
-Alternatively, stop the conflicting remapper and select the physical keyboard
-directly. Do not run multiple mouse remappers against the same keyboard.
 
 ## Development
 
