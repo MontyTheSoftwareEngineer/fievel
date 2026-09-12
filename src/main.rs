@@ -2,10 +2,13 @@ mod config;
 mod engine;
 mod indicator;
 mod odometer;
+mod pipeline;
+mod remap;
 
 use clap::Parser;
 use config::Config;
-use engine::{Engine, Output};
+use engine::Output;
+use pipeline::InputEngine as Engine;
 use indicator::Indicator;
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
@@ -29,7 +32,7 @@ const KEYD_KEYBOARD_NAME: &str = "keyd virtual keyboard";
 const TICK: Duration = Duration::from_millis(4);
 
 #[derive(Parser)]
-#[command(version, about = "Keyboard-driven mouse control (default: hold F3)")]
+#[command(version, about = "Keyboard remapping and mouse control (default: hold F3)")]
 struct Args {
     /// Keyboard event node (default: keyd output, otherwise the sole physical keyboard)
     #[arg(short, long)]
@@ -188,11 +191,11 @@ struct Outputs {
 }
 
 impl Outputs {
-    fn new(input: &Device) -> io::Result<Self> {
+    fn new(input: &Device, config: &Config) -> io::Result<Self> {
         let keys = input
             .supported_keys()
             .ok_or_else(|| io::Error::other("keyboard has no supported keys"))?;
-        let keys = keyboard_keys(keys);
+        let keys = keyboard_keys(keys, config).map_err(io::Error::other)?;
         let keyboard = VirtualDevice::builder()?
             .name(KEYBOARD_NAME)
             .input_id(InputId::new(BusType::BUS_USB, 0x1209, 0xf301, 1))
@@ -239,11 +242,15 @@ impl Outputs {
     }
 }
 
-fn keyboard_keys(input_keys: &evdev::AttributeSetRef<KeyCode>) -> AttributeSet<KeyCode> {
-    input_keys
+fn keyboard_keys(
+    input_keys: &evdev::AttributeSetRef<KeyCode>,
+    config: &Config,
+) -> Result<AttributeSet<KeyCode>, String> {
+    Ok(input_keys
         .iter()
         .chain([KeyCode::KEY_HOME, KeyCode::KEY_END])
-        .collect()
+        .chain(config.remap.output_keys()?)
+        .collect())
 }
 
 fn event_loop(
@@ -257,6 +264,7 @@ fn event_loop(
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         outputs.emit(engine.advance(now.duration_since(last)))?;
+        indicator.set_active(engine.active());
         last = now;
 
         match input.fetch_events() {
@@ -305,10 +313,20 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let (path, mut input) = select_device(args.device)?;
     let supported = input.supported_keys().ok_or("keyboard has no supported keys")?;
+    let remapped_outputs = config.remap.output_keys()?;
     for (action, key) in config.keys.named() {
-        if !supported.contains(key) {
+        if !supported.contains(key) && !remapped_outputs.contains(&key) {
             return Err(format!(
                 "{} does not support keys.{action} = {key:?}; choose another input or binding",
+                path.display()
+            )
+            .into());
+        }
+    }
+    for key in config.remap.input_keys()? {
+        if !supported.contains(key) {
+            return Err(format!(
+                "{} does not support remap input {key:?}; choose another input or binding",
                 path.display()
             )
             .into());
@@ -325,7 +343,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
-    let mut outputs = Outputs::new(&input)
+    let mut outputs = Outputs::new(&input, &config)
         .map_err(|error| format!("Cannot create uinput devices: {error}. Check /dev/uinput access"))?;
     outputs.odometer = odometer.counter.clone();
     let mut indicator = Indicator::new(config.notify);
@@ -352,7 +370,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         },
         config.keys.free_mouse,
     );
-    let mut engine = Engine::new(config);
+    let mut engine = Engine::new(config)?;
     // Seeding held keys preserves modifiers if the process starts mid-keypress.
     let result = (|| -> io::Result<()> {
         for key in input.get_key_state()?.iter() {
@@ -417,8 +435,21 @@ mod tests {
     fn keyboard_supports_home_end_even_when_source_does_not() {
         let input_keys: AttributeSet<KeyCode> =
             [KeyCode::KEY_A, KeyCode::KEY_F3].into_iter().collect();
-        let keys = keyboard_keys(&input_keys);
+        let keys = keyboard_keys(&input_keys, &Config::default()).unwrap();
         for key in [KeyCode::KEY_A, KeyCode::KEY_F3, KeyCode::KEY_HOME, KeyCode::KEY_END] {
+            assert!(keys.contains(key));
+        }
+    }
+
+    #[test]
+    fn keyboard_supports_all_remapping_targets_without_source_support() {
+        let config = Config::parse(
+            "[remap.main]\na = 'super'\ns = 'timeout(ctrl, 175, layer(nav))'\n\
+             [remap.layers.nav]\nh = 'left'",
+        ).unwrap();
+        let input_keys: AttributeSet<KeyCode> = [KeyCode::KEY_A].into_iter().collect();
+        let keys = keyboard_keys(&input_keys, &config).unwrap();
+        for key in [KeyCode::KEY_A, KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFT] {
             assert!(keys.contains(key));
         }
     }
@@ -533,7 +564,7 @@ mod tests {
             .with_keys(&keys)?
             .build()?;
         let mut input = open_output(&mut source)?;
-        let mut outputs = Outputs::new(&input)?;
+        let mut outputs = Outputs::new(&input, &Config::default())?;
         let mut keyboard = open_output(&mut outputs.keyboard)?;
         let mut mouse = open_output(&mut outputs.mouse)?;
         let axes = mouse.supported_relative_axes().expect("pointer relative axes");
@@ -548,7 +579,7 @@ mod tests {
         let mut config = Config::default();
         config.speeds.normal = 1000.0;
         config.speeds.scroll = 10.0;
-        let mut engine = Engine::new(config);
+        let mut engine = Engine::new(config)?;
         let mut expected_keyboard = Vec::new();
         let mut expected_mouse = Vec::new();
         for (key, value) in [

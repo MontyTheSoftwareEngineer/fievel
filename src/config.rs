@@ -11,6 +11,7 @@ pub struct Config {
     pub speeds: Speeds,
     pub easing: Easing,
     pub keys: Keys,
+    pub remap: crate::remap::RemapConfig,
 }
 
 impl Default for Config {
@@ -22,6 +23,7 @@ impl Default for Config {
             speeds: Speeds::default(),
             easing: Easing::default(),
             keys: Keys::default(),
+            remap: crate::remap::RemapConfig::default(),
         }
     }
 }
@@ -183,7 +185,7 @@ fn deserialize_chord<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<K
         .map_err(serde::de::Error::custom)
 }
 
-fn parse_key(value: &str) -> Result<K, String> {
+pub(crate) fn parse_key(value: &str) -> Result<K, String> {
     let upper = value.trim().to_ascii_uppercase();
     let name = match upper.as_str() {
         "," => "COMMA",
@@ -234,6 +236,7 @@ impl Config {
     }
 
     pub fn validate(&self) -> Result<(), String> {
+        self.remap.validate()?;
         for (name, value) in [
             ("movement", self.easing.movement),
             ("scroll", self.easing.scroll),

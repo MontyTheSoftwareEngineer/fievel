@@ -16,6 +16,7 @@ pub struct Output {
 
 pub struct Engine {
     toggled: bool,
+    direct_mouse_held: bool,
     held: BTreeSet<K>,
     forwarded: BTreeSet<K>,
     suppressed: BTreeSet<K>,
@@ -34,6 +35,7 @@ impl Engine {
     pub fn new(config: Config) -> Self {
         Self {
             toggled: false,
+            direct_mouse_held: false,
             held: BTreeSet::new(),
             forwarded: BTreeSet::new(),
             suppressed: BTreeSet::new(),
@@ -51,7 +53,7 @@ impl Engine {
 
     pub fn active(&self) -> bool {
         match self.config.mode {
-            Mode::Hold => self.chord_held(),
+            Mode::Hold => self.chord_held() || self.direct_mouse_held,
             Mode::Toggle => self.toggled,
         }
     }
@@ -131,8 +133,16 @@ impl Engine {
     }
 
     pub fn key(&mut self, key: K, value: i32) -> Output {
+        self.input(Input::Key(key, value))
+    }
+
+    pub fn mouse(&mut self, down: bool) -> Output {
+        self.input(Input::Mouse(down))
+    }
+
+    fn input(&mut self, input: Input) -> Output {
         let mut out = Output::default();
-        if !(0..=2).contains(&value) {
+        if matches!(input, Input::Key(_, value) if !(0..=2).contains(&value)) {
             return out; // Ignore values outside the Linux EV_KEY protocol.
         }
         let old_motion = self.motion_direction();
@@ -140,22 +150,27 @@ impl Engine {
         let old_home_end = self.home_end_chords();
         let was_active = self.active();
         let was_chord_held = self.chord_held();
-        match value {
-            0 => {
+        let was_direct_held = self.direct_mouse_held;
+        match input {
+            Input::Key(key, 0) => {
                 self.held.remove(&key);
                 self.activation_keys.remove(&key);
                 self.scroll_reserved.remove(&key);
             }
-            1 => {
+            Input::Key(key, 1) => {
                 self.held.insert(key);
             }
+            Input::Mouse(down) => self.direct_mouse_held = down,
             _ => {}
         }
 
-        if !was_chord_held && self.chord_held() {
-            if self.config.mode == Mode::Toggle {
-                self.toggled = !self.toggled;
-            }
+        let chord_pressed = !was_chord_held && self.chord_held();
+        if (chord_pressed || (!was_direct_held && self.direct_mouse_held))
+            && self.config.mode == Mode::Toggle
+        {
+            self.toggled = !self.toggled;
+        }
+        if chord_pressed {
             // Release forwarded chord members (especially modifiers) and reserve
             // them until key-up, so activation cannot also click, move, or scroll.
             for member in &self.config.keys.free_mouse {
@@ -179,29 +194,31 @@ impl Engine {
             }
         }
 
-        let consume = self.config.keys.free_mouse.as_slice() == [key]
-            || self.suppressed.contains(&key)
-            || (self.active() && self.config.keys.controls().contains(&key));
-        if consume {
-            if value == 0 {
-                self.suppressed.remove(&key);
-                if self.forwarded.remove(&key) {
-                    out.keyboard.push(key_event(key, 0));
+        if let Input::Key(key, value) = input {
+            let consume = self.config.keys.free_mouse.as_slice() == [key]
+                || self.suppressed.contains(&key)
+                || (self.active() && self.config.keys.controls().contains(&key));
+            if consume {
+                if value == 0 {
+                    self.suppressed.remove(&key);
+                    if self.forwarded.remove(&key) {
+                        out.keyboard.push(key_event(key, 0));
+                    }
+                } else {
+                    self.suppressed.insert(key);
                 }
             } else {
-                self.suppressed.insert(key);
-            }
-        } else {
-            match value {
-                1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
-                0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
-                2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
-                _ => {}
+                match value {
+                    1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
+                    0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
+                    2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
+                    _ => {}
+                }
             }
         }
 
         for (index, down) in self.home_end_chords().into_iter().enumerate() {
-            if value == 1 && down && !old_home_end[index] {
+            if input.is_press() && down && !old_home_end[index] {
                 // A page jump must not be followed by coasting or by the remaining
                 // scroll key when the chord is released one member at a time.
                 self.reset_scroll();
@@ -346,8 +363,21 @@ impl Engine {
         self.activation_keys.clear();
         self.scroll_reserved.clear();
         self.toggled = false;
+        self.direct_mouse_held = false;
         self.reset_motion();
         out
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Input {
+    Key(K, i32),
+    Mouse(bool),
+}
+
+impl Input {
+    fn is_press(self) -> bool {
+        matches!(self, Self::Key(_, 1) | Self::Mouse(true))
     }
 }
 
