@@ -34,7 +34,7 @@ const TICK: Duration = Duration::from_millis(4);
 #[derive(Parser)]
 #[command(version, about = "Keyboard remapping and mouse control (default: hold F3)")]
 struct Args {
-    /// Keyboard event node (default: keyd output, otherwise the sole physical keyboard)
+    /// Read only this keyboard event node (default: all suitable keyboards)
     #[arg(short, long)]
     device: Option<PathBuf>,
 
@@ -118,7 +118,12 @@ fn input_sys_path(path: &Path) -> io::Result<PathBuf> {
 }
 
 fn is_virtual(path: &Path) -> io::Result<bool> {
-    Ok(input_sys_path(path)?.starts_with("/sys/devices/virtual"))
+    Ok(is_virtual_input(&input_sys_path(path)?))
+}
+
+fn is_virtual_input(sys_path: &Path) -> bool {
+    // Bluetooth keyboards can live under virtual/misc/uhid, unlike uinput outputs.
+    sys_path.starts_with("/sys/devices/virtual/input")
 }
 
 fn keyboards() -> io::Result<Vec<(PathBuf, Device)>> {
@@ -141,7 +146,13 @@ fn keyboards() -> io::Result<Vec<(PathBuf, Device)>> {
     Ok(devices)
 }
 
-fn select_device(path: Option<PathBuf>) -> Result<(PathBuf, Device), Box<dyn Error>> {
+fn automatic_input(name: Option<&str>, virtual_device: bool, pointer: bool) -> bool {
+    !matches!(name, Some(KEYBOARD_NAME | MOUSE_NAME))
+        && !pointer
+        && (!virtual_device || name == Some(KEYD_KEYBOARD_NAME))
+}
+
+fn select_devices(path: Option<PathBuf>) -> Result<Vec<(PathBuf, Device)>, Box<dyn Error>> {
     if let Some(path) = path {
         let device = Device::open(&path)
             .map_err(|error| format!("Cannot open {}: {error}", path.display()))?;
@@ -151,37 +162,100 @@ fn select_device(path: Option<PathBuf>) -> Result<(PathBuf, Device), Box<dyn Err
         if !is_keyboard(&device) {
             return Err(format!("{} is not a keyboard", path.display()).into());
         }
-        return Ok((path, device));
+        return Ok(vec![(path, device)]);
     }
-    let mut devices = keyboards()?;
-    let mut keyd = Vec::new();
-    let mut physical = Vec::new();
-    for (index, (path, device)) in devices.iter().enumerate() {
-        let virtual_device = is_virtual(path)?;
-        if device.name() == Some(KEYD_KEYBOARD_NAME) && virtual_device {
-            keyd.push(index);
-        } else if !virtual_device {
-            physical.push(index);
+    let mut devices = Vec::new();
+    for (path, device) in keyboards()? {
+        let virtual_device = match is_virtual(&path) {
+            Ok(value) => value,
+            Err(error) => {
+                eprintln!("Skipping {}: cannot classify input: {error}", path.display());
+                continue;
+            }
+        };
+        let pointer = device.supported_events().contains(EventType::RELATIVE)
+            || device.supported_events().contains(EventType::ABSOLUTE);
+        if automatic_input(device.name(), virtual_device, pointer) {
+            devices.push((path, device));
+        } else {
+            eprintln!(
+                "Skipping {} ({}): virtual or combined keyboard/pointer input; \
+                 use --device PATH to select it explicitly",
+                path.display(),
+                device.name().unwrap_or("unnamed"),
+            );
         }
     }
-    let index = preferred_device_index(&keyd, &physical)?;
-    Ok(devices.remove(index))
+    if devices.is_empty() {
+        return Err("No suitable keyboards found; use --list, then --device PATH to select one".into());
+    }
+    Ok(devices)
 }
 
-fn preferred_device_index(keyd: &[usize], physical: &[usize]) -> Result<usize, String> {
-    let (candidates, kind) = if keyd.is_empty() {
-        (physical, "physical keyboards")
-    } else {
-        (keyd, "keyd virtual keyboards")
-    };
-    if let [index] = candidates {
-        Ok(*index)
-    } else {
-        Err(format!(
-            "Found {} {kind}; use --list, then --device PATH to select one",
-            candidates.len()
-        ))
+struct HeldKeys {
+    sources: Vec<AttributeSet<KeyCode>>,
+}
+
+impl HeldKeys {
+    fn new(count: usize) -> Self {
+        Self {
+            sources: (0..count).map(|_| AttributeSet::new()).collect(),
+        }
     }
+
+    fn key(&mut self, source: usize, key: KeyCode, value: i32) -> bool {
+        let held = self.sources.iter().any(|keys| keys.contains(key));
+        let keys = &mut self.sources[source];
+        match value {
+            1 => {
+                keys.insert(key);
+                !held
+            }
+            0 => {
+                let was_held = keys.contains(key);
+                keys.remove(key);
+                was_held && !self.sources.iter().any(|keys| keys.contains(key))
+            }
+            2 => keys.contains(key),
+            _ => false,
+        }
+    }
+
+    fn remove(&mut self, source: usize) -> Vec<KeyCode> {
+        self.sources
+            .remove(source)
+            .iter()
+            .filter(|key| !self.sources.iter().any(|keys| keys.contains(*key)))
+            .collect()
+    }
+}
+
+fn merge_keys<'a>(
+    sources: impl IntoIterator<Item = &'a evdev::AttributeSetRef<KeyCode>>,
+) -> AttributeSet<KeyCode> {
+    sources.into_iter().flat_map(|keys| keys.iter()).collect()
+}
+
+fn validate_input_keys(
+    supported: &evdev::AttributeSetRef<KeyCode>,
+    config: &Config,
+) -> Result<(), String> {
+    let remapped_outputs = config.remap.output_keys()?;
+    for (action, key) in config.keys.named() {
+        if !supported.contains(key) && !remapped_outputs.contains(&key) {
+            return Err(format!(
+                "Selected keyboards do not support keys.{action} = {key:?}; choose another input or binding"
+            ));
+        }
+    }
+    for key in config.remap.input_keys()? {
+        if !supported.contains(key) {
+            return Err(format!(
+                "Selected keyboards do not support remap input {key:?}; choose another input or binding"
+            ));
+        }
+    }
+    Ok(())
 }
 
 struct Outputs {
@@ -191,11 +265,8 @@ struct Outputs {
 }
 
 impl Outputs {
-    fn new(input: &Device, config: &Config) -> io::Result<Self> {
-        let keys = input
-            .supported_keys()
-            .ok_or_else(|| io::Error::other("keyboard has no supported keys"))?;
-        let keys = keyboard_keys(keys, config).map_err(io::Error::other)?;
+    fn new(input_keys: &evdev::AttributeSetRef<KeyCode>, config: &Config) -> io::Result<Self> {
+        let keys = keyboard_keys(input_keys, config).map_err(io::Error::other)?;
         let keyboard = VirtualDevice::builder()?
             .name(KEYBOARD_NAME)
             .input_id(InputId::new(BusType::BUS_USB, 0x1209, 0xf301, 1))
@@ -254,7 +325,8 @@ fn keyboard_keys(
 }
 
 fn event_loop(
-    input: &mut Device,
+    inputs: &mut Vec<(PathBuf, Device)>,
+    held: &mut HeldKeys,
     outputs: &mut Outputs,
     engine: &mut Engine,
     stop: &AtomicBool,
@@ -267,18 +339,50 @@ fn event_loop(
         indicator.set_active(engine.active());
         last = now;
 
-        match input.fetch_events() {
-            Ok(events) => {
-                for event in events {
-                    if event.event_type() == EventType::KEY {
-                        outputs.emit(engine.key(KeyCode(event.code()), event.value()))?;
-                        indicator.set_active(engine.active());
+        let mut index = 0;
+        while index < inputs.len() {
+            let (path, input) = &mut inputs[index];
+            let disconnected = match input.fetch_events() {
+                Ok(events) => {
+                    for event in events {
+                        if event.event_type() == EventType::KEY {
+                            let key = KeyCode(event.code());
+                            if held.key(index, key, event.value()) {
+                                outputs.emit(engine.key(key, event.value()))?;
+                                indicator.set_active(engine.active());
+                            }
+                        }
                     }
+                    false
                 }
+                Err(error)
+                    if matches!(
+                        error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) => false,
+                Err(error) if error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error()) => {
+                    eprintln!("Keyboard disconnected: {}", path.display());
+                    true
+                }
+                Err(error) => {
+                    return Err(io::Error::new(
+                        error.kind(), format!("Cannot read {}: {error}", path.display())
+                    ));
+                }
+            };
+            if disconnected {
+                inputs.remove(index);
+                for key in held.remove(index) {
+                    outputs.emit(engine.key(key, 0))?;
+                }
+                indicator.set_active(engine.active());
+                if inputs.is_empty() {
+                    return Err(io::Error::other(
+                        "All keyboards disconnected; restart fievel after reconnecting"
+                    ));
+                }
+            } else {
+                index += 1;
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(error),
         }
         thread::sleep(TICK.saturating_sub(now.elapsed()));
     }
@@ -311,27 +415,10 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         println!("Config: {}\n{config:#?}", config_path.display());
         return Ok(());
     }
-    let (path, mut input) = select_device(args.device)?;
-    let supported = input.supported_keys().ok_or("keyboard has no supported keys")?;
-    let remapped_outputs = config.remap.output_keys()?;
-    for (action, key) in config.keys.named() {
-        if !supported.contains(key) && !remapped_outputs.contains(&key) {
-            return Err(format!(
-                "{} does not support keys.{action} = {key:?}; choose another input or binding",
-                path.display()
-            )
-            .into());
-        }
-    }
-    for key in config.remap.input_keys()? {
-        if !supported.contains(key) {
-            return Err(format!(
-                "{} does not support remap input {key:?}; choose another input or binding",
-                path.display()
-            )
-            .into());
-        }
-    }
+    let explicit = args.device.is_some();
+    let inputs = select_devices(args.device)?;
+    let supported = merge_keys(inputs.iter().filter_map(|(_, input)| input.supported_keys()));
+    validate_input_keys(&supported, &config)?;
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [
         signal_hook::consts::SIGINT,
@@ -343,7 +430,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
-    let mut outputs = Outputs::new(&input, &config)
+    let mut outputs = Outputs::new(&supported, &config)
         .map_err(|error| format!("Cannot create uinput devices: {error}. Check /dev/uinput access"))?;
     outputs.odometer = odometer.counter.clone();
     let mut indicator = Indicator::new(config.notify);
@@ -353,17 +440,31 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         odometer.finish()?;
         return Ok(());
     }
-    input.set_nonblocking(true)?;
-    input.grab().map_err(|error| {
-        format!(
-            "Cannot grab {}: {error}. Another remapper (such as keyd) may own it",
-            path.display()
-        )
-    })?;
+    let mut grabbed = Vec::new();
+    for (path, mut input) in inputs {
+        let result = input.set_nonblocking(true).and_then(|()| input.grab());
+        if let Err(error) = result {
+            let message = format!(
+                "Cannot grab {}: {error}. Another remapper (such as keyd) may own it",
+                path.display()
+            );
+            if explicit {
+                return Err(message.into());
+            }
+            eprintln!("Skipping input: {message}");
+            continue;
+        }
+        eprintln!("Reading {} ({})", path.display(), input.name().unwrap_or("unnamed"));
+        grabbed.push((path, input));
+    }
+    if grabbed.is_empty() {
+        return Err("Cannot grab any keyboards; check input permissions and other remappers".into());
+    }
+    let available = merge_keys(grabbed.iter().filter_map(|(_, input)| input.supported_keys()));
+    validate_input_keys(&available, &config)?;
+    let mut held = HeldKeys::new(grabbed.len());
     eprintln!(
-        "Reading {} ({}). {} {:?} for Free Mouse Mode; Ctrl+C exits.",
-        path.display(),
-        input.name().unwrap_or("unnamed"),
+        "{} {:?} for Free Mouse Mode; Ctrl+C exits.",
         match config.mode {
             config::Mode::Hold => "Hold",
             config::Mode::Toggle => "Press to toggle",
@@ -373,15 +474,25 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     let mut engine = Engine::new(config)?;
     // Seeding held keys preserves modifiers if the process starts mid-keypress.
     let result = (|| -> io::Result<()> {
-        for key in input.get_key_state()?.iter() {
-            outputs.emit(engine.key(key, 1))?;
-            indicator.set_active(engine.active());
+        for (index, (_, input)) in grabbed.iter().enumerate() {
+            for key in input.get_key_state()?.iter() {
+                if held.key(index, key, 1) {
+                    outputs.emit(engine.key(key, 1))?;
+                    indicator.set_active(engine.active());
+                }
+            }
         }
-        event_loop(&mut input, &mut outputs, &mut engine, &stop, &mut indicator)
+        event_loop(&mut grabbed, &mut held, &mut outputs, &mut engine, &stop, &mut indicator)
     })();
     indicator.set_active(false);
     let release = outputs.emit(engine.release_all());
-    let ungrab = input.ungrab();
+    let mut ungrab = Ok(());
+    for (path, input) in &mut grabbed {
+        if let Err(error) = input.ungrab() {
+            eprintln!("Failed to ungrab {}: {error}", path.display());
+            ungrab = Err(error);
+        }
+    }
     let saved = odometer.finish();
     if let Err(error) = &saved {
         eprintln!("Cannot save odometer: {error}");
@@ -455,21 +566,144 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_keyd_even_with_multiple_physical_keyboards() {
-        assert_eq!(preferred_device_index(&[2], &[0, 1]), Ok(2));
-        assert_eq!(preferred_device_index(&[2], &[]), Ok(2));
+    fn defaults_to_all_physical_keyboards_and_keyd_output() {
+        for name in [Some("Laptop keyboard"), Some("USB keyboard"), Some("Bluetooth keyboard"), None] {
+            assert!(automatic_input(name, false, false));
+        }
+        assert!(automatic_input(Some(KEYD_KEYBOARD_NAME), true, false));
     }
 
     #[test]
-    fn falls_back_to_sole_physical_keyboard_without_keyd() {
-        assert_eq!(preferred_device_index(&[], &[1]), Ok(1));
+    fn automatic_selection_excludes_feedback_and_combined_pointer_inputs() {
+        for name in [Some(KEYBOARD_NAME), Some(MOUSE_NAME), Some("other remapper"), None] {
+            assert!(!automatic_input(name, true, false));
+        }
+        assert!(!automatic_input(Some(KEYBOARD_NAME), false, false));
+        assert!(!automatic_input(Some("Keyboard with touchpad"), false, true));
+        assert!(!automatic_input(Some(KEYD_KEYBOARD_NAME), true, true));
     }
 
     #[test]
-    fn ambiguous_or_missing_inputs_require_explicit_selection() {
-        assert!(preferred_device_index(&[], &[]).is_err());
-        assert!(preferred_device_index(&[], &[0, 1]).is_err());
-        assert!(preferred_device_index(&[0, 1], &[2]).is_err());
+    fn virtual_classification_includes_bluetooth_hardware() {
+        assert!(is_virtual_input(Path::new("/sys/devices/virtual/input/input42/event42")));
+        for path in [
+            "/sys/devices/pci0000:00/usb1/input/input1/event1",
+            "/sys/devices/virtual/misc/uhid/0005:1234/input/input1/event1",
+        ] {
+            assert!(!is_virtual_input(Path::new(path)));
+        }
+    }
+
+    #[test]
+    fn capabilities_and_bindings_use_the_union_of_input_keys() {
+        let config = Config::parse("[remap.main]\nz = 'f24'").unwrap();
+        let first: AttributeSet<KeyCode> = config.keys.named().into_iter()
+            .map(|(_, key)| key).collect();
+        let second: AttributeSet<KeyCode> = [KeyCode::KEY_Z].into_iter().collect();
+        let third: AttributeSet<KeyCode> = [KeyCode::KEY_VOLUMEUP].into_iter().collect();
+        assert!(validate_input_keys(&first, &config).is_err());
+        assert!(validate_input_keys(&second, &config).is_err());
+        let supported = merge_keys([&*first, &*second, &*third]);
+        validate_input_keys(&supported, &config).unwrap();
+        let output = keyboard_keys(&supported, &config).unwrap();
+        for key in [KeyCode::KEY_Z, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_F24] {
+            assert!(output.contains(key));
+        }
+    }
+
+    #[test]
+    fn multiple_keyboards_share_presses_without_premature_releases() {
+        let mut held = HeldKeys::new(3);
+        let key = KeyCode::KEY_LEFTCTRL;
+        assert!(held.key(0, key, 1));
+        assert!(!held.key(0, key, 1));
+        assert!(!held.key(1, key, 1));
+        assert!(!held.key(2, key, 1));
+        assert!(!held.key(0, key, 0));
+        assert!(!held.key(0, key, 2));
+        assert!(held.key(1, key, 2));
+        assert!(!held.key(1, key, 0));
+        assert!(held.key(2, key, 0));
+        assert!(!held.key(2, key, 0));
+        assert!(!held.key(2, key, 2));
+    }
+
+    #[test]
+    fn disconnect_releases_only_keys_not_held_elsewhere() {
+        let mut held = HeldKeys::new(3);
+        held.key(0, KeyCode::KEY_LEFTCTRL, 1);
+        held.key(1, KeyCode::KEY_LEFTCTRL, 1);
+        held.key(1, KeyCode::KEY_A, 1);
+        held.key(2, KeyCode::KEY_B, 1);
+        assert_eq!(held.remove(1), [KeyCode::KEY_A]);
+        assert!(held.key(1, KeyCode::KEY_B, 0));
+        assert_eq!(held.remove(0), [KeyCode::KEY_LEFTCTRL]);
+        assert!(held.remove(0).is_empty());
+    }
+
+    #[test]
+    fn three_keyboards_share_mouse_mode_and_release_without_stuck_keys() {
+        let mut held = HeldKeys::new(3);
+        let mut config = Config::default();
+        config.easing.movement = 0.0;
+        let mut engine = Engine::new(config).unwrap();
+        let mut keyboard = Vec::new();
+        let mut mouse = Vec::new();
+        for (source, key, value) in [
+            (0, KeyCode::KEY_LEFTCTRL, 1),
+            (1, KeyCode::KEY_LEFTCTRL, 1),
+            (2, KeyCode::KEY_A, 1),
+            (0, KeyCode::KEY_LEFTCTRL, 0),
+            (2, KeyCode::KEY_A, 0),
+            (1, KeyCode::KEY_LEFTCTRL, 0),
+            (0, KeyCode::KEY_F3, 1),
+            (1, KeyCode::KEY_F3, 1),
+            (0, KeyCode::KEY_F3, 0),
+            (2, KeyCode::KEY_H, 1),
+            (2, KeyCode::KEY_SPACE, 1),
+        ] {
+            if held.key(source, key, value) {
+                let output = engine.key(key, value);
+                keyboard.extend(output.keyboard);
+                mouse.extend(output.mouse);
+            }
+        }
+        assert_eq!(
+            keyboard.iter().map(|event| (KeyCode(event.code()), event.value())).collect::<Vec<_>>(),
+            [
+                (KeyCode::KEY_LEFTCTRL, 1), (KeyCode::KEY_A, 1),
+                (KeyCode::KEY_A, 0), (KeyCode::KEY_LEFTCTRL, 0),
+            ]
+        );
+        assert!(engine.active());
+        assert_eq!(mouse.len(), 1);
+        assert_eq!((mouse[0].code(), mouse[0].value()), (KeyCode::BTN_LEFT.0, 1));
+        assert!(engine.advance(Duration::from_millis(20)).mouse.iter().any(|event| {
+            event.code() == RelativeAxisCode::REL_X.0 && event.value() < 0
+        }));
+        for key in held.remove(1) {
+            let output = engine.key(key, 0);
+            assert!(output.keyboard.is_empty());
+            mouse.extend(output.mouse);
+        }
+        assert!(!engine.active());
+        assert_eq!((mouse[1].code(), mouse[1].value()), (KeyCode::BTN_LEFT.0, 0));
+        assert!(held.key(1, KeyCode::KEY_H, 0));
+        assert!(engine.key(KeyCode::KEY_H, 0).keyboard.is_empty());
+        assert!(held.key(1, KeyCode::KEY_SPACE, 0));
+        assert!(engine.key(KeyCode::KEY_SPACE, 0).mouse.is_empty());
+        let release = engine.release_all();
+        assert!(release.keyboard.is_empty());
+        assert!(release.mouse.is_empty());
+    }
+
+    #[test]
+    fn cli_defaults_to_all_inputs_but_accepts_one_device() {
+        assert!(Args::try_parse_from(["fievel"]).unwrap().device.is_none());
+        assert_eq!(
+            Args::try_parse_from(["fievel", "--device", "/dev/input/event3"]).unwrap().device,
+            Some(PathBuf::from("/dev/input/event3"))
+        );
     }
 
     #[test]
@@ -564,7 +798,7 @@ mod tests {
             .with_keys(&keys)?
             .build()?;
         let mut input = open_output(&mut source)?;
-        let mut outputs = Outputs::new(&input, &Config::default())?;
+        let mut outputs = Outputs::new(input.supported_keys().unwrap(), &Config::default())?;
         let mut keyboard = open_output(&mut outputs.keyboard)?;
         let mut mouse = open_output(&mut outputs.mouse)?;
         let axes = mouse.supported_relative_axes().expect("pointer relative axes");
