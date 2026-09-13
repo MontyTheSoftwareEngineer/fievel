@@ -127,6 +127,10 @@ fn is_virtual_input(sys_path: &Path) -> bool {
 }
 
 fn keyboards() -> io::Result<Vec<(PathBuf, Device)>> {
+    keyboards_excluding(&[])
+}
+
+fn keyboards_excluding(excluded: &[PathBuf]) -> io::Result<Vec<(PathBuf, Device)>> {
     let mut devices = Vec::new();
     for entry in fs::read_dir("/dev/input")? {
         let entry = entry?;
@@ -134,6 +138,9 @@ fn keyboards() -> io::Result<Vec<(PathBuf, Device)>> {
             continue;
         }
         let path = entry.path();
+        if excluded.contains(&path) {
+            continue;
+        }
         match Device::open(&path) {
             Ok(device) if is_keyboard(&device) && !is_ours(&device) => {
                 devices.push((path, device));
@@ -146,10 +153,87 @@ fn keyboards() -> io::Result<Vec<(PathBuf, Device)>> {
     Ok(devices)
 }
 
+type KeyboardScanResult = io::Result<Vec<(PathBuf, Device)>>;
+
+#[derive(Default)]
+struct KeyboardScanner {
+    worker: Option<thread::JoinHandle<KeyboardScanResult>>,
+}
+
+impl KeyboardScanner {
+    fn start(&mut self, excluded: Vec<PathBuf>) -> io::Result<()> {
+        if self.worker.is_none() {
+            self.worker = Some(
+                thread::Builder::new()
+                    .name("fievel-keyboards".into())
+                    .spawn(move || {
+                        let mut devices = keyboards_excluding(&excluded)?;
+                        devices.retain(|(path, device)| is_auto_candidate(path, device, true));
+                        Ok(devices)
+                    })?,
+            );
+        }
+        Ok(())
+    }
+
+    fn poll(&mut self) -> Option<KeyboardScanResult> {
+        if self.worker.as_ref().is_some_and(|worker| worker.is_finished()) {
+            self.finish()
+        } else {
+            None
+        }
+    }
+
+    fn finish(&mut self) -> Option<KeyboardScanResult> {
+        self.worker.take().map(|worker| {
+            worker.join().unwrap_or_else(|_| {
+                Err(io::Error::other("Keyboard discovery thread panicked"))
+            })
+        })
+    }
+}
+
+impl Drop for KeyboardScanner {
+    fn drop(&mut self) {
+        if let Some(Err(error)) = self.finish() {
+            eprintln!("Cannot finish keyboard discovery: {error}");
+        }
+    }
+}
+
 fn automatic_input(name: Option<&str>, virtual_device: bool, pointer: bool) -> bool {
     !matches!(name, Some(KEYBOARD_NAME | MOUSE_NAME))
         && !pointer
         && (!virtual_device || name == Some(KEYD_KEYBOARD_NAME))
+}
+
+// Returns true if `device` is a keyboard fievel should automatically read, printing a
+// diagnostic and returning false for anything skipped (virtual, combined pointer, etc).
+fn is_auto_candidate(path: &Path, device: &Device, quiet: bool) -> bool {
+    let virtual_device = match is_virtual(path) {
+        Ok(value) => value,
+        Err(error) => {
+            if !quiet {
+                eprintln!("Skipping {}: cannot classify input: {error}", path.display());
+            }
+            return false;
+        }
+    };
+    let pointer = device.supported_events().contains(EventType::RELATIVE)
+        || device.supported_events().contains(EventType::ABSOLUTE);
+    if automatic_input(device.name(), virtual_device, pointer) {
+        true
+    } else {
+        if !quiet {
+            eprintln!(
+                "Skipping {} ({}): virtual or combined keyboard/pointer input; \
+                 use --device PATH to select it explicitly",
+                path.display(),
+                device.name().unwrap_or("unnamed"),
+            );
+        }
+        false
+    }
 }
 
 fn select_devices(path: Option<PathBuf>) -> Result<Vec<(PathBuf, Device)>, Box<dyn Error>> {
@@ -166,30 +250,84 @@ fn select_devices(path: Option<PathBuf>) -> Result<Vec<(PathBuf, Device)>, Box<d
     }
     let mut devices = Vec::new();
     for (path, device) in keyboards()? {
-        let virtual_device = match is_virtual(&path) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("Skipping {}: cannot classify input: {error}", path.display());
-                continue;
-            }
-        };
-        let pointer = device.supported_events().contains(EventType::RELATIVE)
-            || device.supported_events().contains(EventType::ABSOLUTE);
-        if automatic_input(device.name(), virtual_device, pointer) {
+        if is_auto_candidate(&path, &device, false) {
             devices.push((path, device));
-        } else {
-            eprintln!(
-                "Skipping {} ({}): virtual or combined keyboard/pointer input; \
-                 use --device PATH to select it explicitly",
-                path.display(),
-                device.name().unwrap_or("unnamed"),
-            );
         }
     }
     if devices.is_empty() {
         return Err("No suitable keyboards found; use --list, then --device PATH to select one".into());
     }
     Ok(devices)
+}
+
+fn prepare_reconnected_keyboard(device: &mut Device) -> io::Result<AttributeSet<KeyCode>> {
+    device.set_nonblocking(true)?;
+    device.grab()?;
+    // Discovery leaves the device ungrabbed. Do not replay typing already sent
+    // to the desktop while the scan was running.
+    for _ in 0..32 {
+        let settled = match device.fetch_events() {
+            Ok(events) => {
+                events.for_each(drop);
+                false
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => true,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => false,
+            Err(error) => return Err(error),
+        };
+        if settled {
+            return device.get_key_state();
+        }
+    }
+    Err(io::Error::other("Keyboard event queue did not settle during reconnect"))
+}
+
+fn attach_new_keyboards(
+    candidates: KeyboardScanResult,
+    inputs: &mut Vec<(PathBuf, Device)>,
+    held: &mut HeldKeys,
+    outputs: &mut Outputs,
+    engine: &mut Engine,
+    indicator: &mut Indicator,
+) -> io::Result<()> {
+    let candidates = match candidates {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            eprintln!("Cannot scan for new keyboards: {error}");
+            return Ok(());
+        }
+    };
+    for (path, mut device) in candidates {
+        if inputs.iter().any(|(existing, _)| existing == &path) {
+            continue;
+        }
+        let keys = match prepare_reconnected_keyboard(&mut device) {
+            Ok(keys) => keys,
+            Err(error) => {
+                eprintln!(
+                    "Skipping newly connected {}: cannot initialize: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        eprintln!(
+            "Reading newly connected {} ({})",
+            path.display(),
+            device.name().unwrap_or("unnamed"),
+        );
+        held.push();
+        let index = inputs.len();
+        // Seed held keys so modifiers already down when the keyboard reconnects still work.
+        for key in keys.iter() {
+            if held.key(index, key, 1) {
+                outputs.emit(engine.key(key, 1))?;
+                indicator.set_active(engine.active());
+            }
+        }
+        inputs.push((path, device));
+    }
+    Ok(())
 }
 
 struct HeldKeys {
@@ -227,6 +365,10 @@ impl HeldKeys {
             .iter()
             .filter(|key| !self.sources.iter().any(|keys| keys.contains(*key)))
             .collect()
+    }
+
+    fn push(&mut self) {
+        self.sources.push(AttributeSet::new());
     }
 }
 
@@ -324,6 +466,8 @@ fn keyboard_keys(
         .collect())
 }
 
+const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
+
 fn event_loop(
     inputs: &mut Vec<(PathBuf, Device)>,
     held: &mut HeldKeys,
@@ -331,8 +475,10 @@ fn event_loop(
     engine: &mut Engine,
     stop: &AtomicBool,
     indicator: &mut Indicator,
+    mut scanner: Option<&mut KeyboardScanner>,
 ) -> io::Result<()> {
     let mut last = Instant::now();
+    let mut next_scan = last + RESCAN_INTERVAL;
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         outputs.emit(engine.advance(now.duration_since(last)))?;
@@ -375,13 +521,24 @@ fn event_loop(
                     outputs.emit(engine.key(key, 0))?;
                 }
                 indicator.set_active(engine.active());
-                if inputs.is_empty() {
+                if inputs.is_empty() && scanner.is_none() {
                     return Err(io::Error::other(
                         "All keyboards disconnected; restart fievel after reconnecting"
                     ));
                 }
             } else {
                 index += 1;
+            }
+        }
+        // Retire disconnected handles before attaching replacements: Linux can
+        // reuse an event-node path for the newly connected keyboard.
+        if let Some(scanner) = scanner.as_deref_mut() {
+            if let Some(candidates) = scanner.poll() {
+                attach_new_keyboards(candidates, inputs, held, outputs, engine, indicator)?;
+                next_scan = Instant::now() + RESCAN_INTERVAL;
+            }
+            if now >= next_scan {
+                scanner.start(inputs.iter().map(|(path, _)| path.clone()).collect())?;
             }
         }
         thread::sleep(TICK.saturating_sub(now.elapsed()));
@@ -434,6 +591,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         .map_err(|error| format!("Cannot create uinput devices: {error}. Check /dev/uinput access"))?;
     outputs.odometer = odometer.counter.clone();
     let mut indicator = Indicator::new(config.notify);
+    // Keep discovery alive outside the loop so shutdown releases input before
+    // waiting for an in-flight scan to finish.
+    let mut scanner = KeyboardScanner::default();
     // Give udev/compositors a chance to discover the outputs before grabbing input.
     thread::sleep(Duration::from_millis(500));
     if stop.load(Ordering::Relaxed) {
@@ -482,7 +642,10 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
                 }
             }
         }
-        event_loop(&mut grabbed, &mut held, &mut outputs, &mut engine, &stop, &mut indicator)
+        event_loop(
+            &mut grabbed, &mut held, &mut outputs, &mut engine, &stop, &mut indicator,
+            if explicit { None } else { Some(&mut scanner) },
+        )
     })();
     indicator.set_active(false);
     let release = outputs.emit(engine.release_all());
@@ -522,6 +685,50 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slow_keyboard_discovery_does_not_block_or_queue_more_scans() {
+        let (release, resume) = std::sync::mpsc::channel();
+        let mut scanner = KeyboardScanner {
+            worker: Some(thread::spawn(move || {
+                resume.recv_timeout(Duration::from_secs(2)).unwrap();
+                Ok(Vec::new())
+            })),
+        };
+        let worker_id = scanner.worker.as_ref().unwrap().thread().id();
+        assert!(scanner.poll().is_none());
+        scanner.start(Vec::new()).unwrap();
+        assert_eq!(scanner.worker.as_ref().unwrap().thread().id(), worker_id);
+        release.send(()).unwrap();
+        assert!(scanner.finish().unwrap().unwrap().is_empty());
+        assert!(scanner.poll().is_none());
+    }
+
+    #[test]
+    fn completed_keyboard_scan_is_delivered_once() {
+        let mut scanner = KeyboardScanner {
+            worker: Some(thread::spawn(|| Ok(Vec::new()))),
+        };
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !scanner.worker.as_ref().unwrap().is_finished() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(1));
+        }
+        assert!(scanner.poll().unwrap().unwrap().is_empty());
+        assert!(scanner.poll().is_none());
+    }
+
+    #[test]
+    fn keyboard_discovery_errors_are_reported_and_clear_pending_scan() {
+        for worker in [
+            thread::spawn(|| Err(io::Error::other("scan failed"))),
+            thread::spawn(|| panic!("scan panicked")),
+        ] {
+            let mut scanner = KeyboardScanner { worker: Some(worker) };
+            assert!(scanner.finish().unwrap().is_err());
+            assert!(scanner.worker.is_none());
+        }
+    }
 
     #[test]
     fn odometer_is_a_standalone_command() {
@@ -639,6 +846,20 @@ mod tests {
         assert!(held.key(1, KeyCode::KEY_B, 0));
         assert_eq!(held.remove(0), [KeyCode::KEY_LEFTCTRL]);
         assert!(held.remove(0).is_empty());
+    }
+
+    #[test]
+    fn reconnect_starts_with_fresh_held_keys_and_preserves_other_sources() {
+        let mut held = HeldKeys::new(2);
+        assert!(held.key(0, KeyCode::KEY_A, 1));
+        assert!(held.key(1, KeyCode::KEY_LEFTCTRL, 1));
+        assert_eq!(held.remove(0), [KeyCode::KEY_A]);
+        held.push();
+        assert!(!held.key(1, KeyCode::KEY_A, 2));
+        assert!(held.key(1, KeyCode::KEY_A, 1));
+        assert!(!held.key(1, KeyCode::KEY_LEFTCTRL, 1));
+        assert_eq!(held.remove(1), [KeyCode::KEY_A]);
+        assert!(held.key(0, KeyCode::KEY_LEFTCTRL, 0));
     }
 
     #[test]
@@ -875,6 +1096,20 @@ mod tests {
         assert_eq!(read_events(&mut keyboard)?, expected_keyboard);
         assert_eq!(read_events(&mut mouse)?, expected_mouse);
         assert!(engine.release_all().mouse.is_empty());
+
+        source.emit(&[
+            evdev::InputEvent::new(EventType::KEY.0, KeyCode::KEY_A.0, 1),
+            evdev::InputEvent::new(EventType::KEY.0, KeyCode::KEY_A.0, 0),
+            evdev::InputEvent::new(EventType::KEY.0, KeyCode::KEY_H.0, 1),
+        ])?;
+        let held = prepare_reconnected_keyboard(&mut input)?;
+        assert_eq!(held.iter().collect::<Vec<_>>(), [KeyCode::KEY_H]);
+        assert!(read_events(&mut input)?.is_empty());
+        source.emit(&[evdev::InputEvent::new(EventType::KEY.0, KeyCode::KEY_H.0, 0)])?;
+        assert_eq!(
+            read_events(&mut input)?,
+            [(EventType::KEY.0, KeyCode::KEY_H.0, 0)]
+        );
         Ok(())
     }
 }
