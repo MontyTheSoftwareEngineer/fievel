@@ -6,7 +6,7 @@ navigation layers, and mouse movement, clicking, and scrolling.
 The optional [home-row profile](homerow.config) maps A+S to Super, S+D to Ctrl,
 and D+F to Free Mouse Mode, with timed Caps Lock navigation.
 
-Fievel reads one keyboard through evdev and creates two uinput devices:
+Fievel reads all suitable keyboards through evdev by default and creates two uinput devices:
 `fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
 mouse events. Input handling works below X11/Wayland and does not require
 programmable keyboard firmware or a separate remapping tool.
@@ -128,8 +128,10 @@ sudo install -m 755 target/release/fievel /usr/local/bin/fievel
 fievel
 ```
 
-Use **Ctrl+C** to stop and release the keyboard. Escape passes through normally;
-Ctrl+Z exits rather than suspending. Restart fievel if the keyboard is unplugged.
+Use **Ctrl+C** to stop and release the keyboards. Escape passes through normally;
+Ctrl+Z exits rather than suspending. Restart fievel to pick up newly connected
+or reconnected keyboards. Unplugging one keyboard releases its held keys without
+interrupting the others; fievel exits if all selected keyboards disconnect.
 No service is installed or started automatically.
 
 ### Movement odometer
@@ -197,7 +199,7 @@ are saved, not event histories or coordinates.
 
 ### Device permissions
 
-To run without sudo, fievel needs read access to the keyboard's input device and
+To run without sudo, fievel needs read access to each keyboard's input device and
 write access to `/dev/uinput`. On distributions that grant input-device access
 through the `input` group, run this once as your normal user:
 
@@ -230,10 +232,22 @@ inject system-wide input. Do not make input devices world-readable/writable.
 
 ### Choosing a keyboard
 
-For standalone use with one accessible physical keyboard, Fievel selects it
-automatically. If there are multiple candidates or other input tools running,
-list devices and explicitly select the physical keyboard for your home-row
-mappings:
+By default, Fievel uses **all accessible, suitable keyboards connected at startup**,
+including built-in, USB, and Bluetooth keyboards. No `--device` option is needed
+to use several keyboards. They share one set of mappings and mouse-mode state:
+you can hold a modifier or mouse-mode key on one and use keys on another.
+Releasing a key on one keyboard does not release it while another still holds it.
+
+Automatic selection excludes Fievel's own outputs, unknown virtual inputs,
+non-keyboards, and combined keyboard/pointer event nodes whose pointer events
+would otherwise be swallowed. Separate keyboard nodes on those devices still work.
+The known `keyd virtual keyboard` output is included alongside available physical
+keyboards; inputs already grabbed by keyd or another program are skipped with a
+diagnostic rather than preventing the other keyboards from working.
+Inaccessible inputs are also reported and skipped. Startup fails if no suitable
+keyboard can be grabbed.
+
+To restrict Fievel to **one keyboard**, list devices and select it explicitly:
 
 ```sh
 ./target/release/fievel --list
@@ -243,8 +257,9 @@ mappings:
 A physical keyboard's stable `/dev/input/by-id/...-event-kbd` path also works.
 Virtual inputs can be selected with `--device`; fievel's own outputs are
 always rejected. Only one program can exclusively grab an input device, so
-stop any tool that already owns the selected keyboard before starting Fievel.
-Fievel handles one selected keyboard per process.
+stop any tool that already owns an explicitly selected keyboard before starting
+Fievel. Unlike automatic selection, `--device` fails if that device cannot be
+opened or grabbed; it never falls back to other keyboards.
 
 Optional overrides: `--speed 800` sets normal pointer speed in relative input
 units per second (not guaranteed screen pixels), and `--scroll-speed 8` sets
