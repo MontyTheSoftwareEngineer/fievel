@@ -60,6 +60,12 @@ By default, hold **F3** to enter **Free Mouse Mode** and release F3 to leave it.
 With `mode = "toggle"`, press F3 once to enter and again to leave.
 By default, a faint **fievel** rectangle remains at the bottom-left while Free
 Mouse Mode is active (Wayland/Hyprland/Sway; see [Mode indicator](#mode-indicator)).
+Press **Super+Space** to enter hint mode for a left click or **Super+I** for a
+right click: fievel captures the visible wlroots output, draws labeled target
+boxes, and clicks as soon as you type a full label.
+Press the same activation shortcut again to cancel without clicking. Press the
+other shortcut to switch the click button without losing your selection.
+Hold **Left Ctrl** for a more opaque background behind hint text; release to hide it.
 
 | Key while Free Mouse Mode is active | Action |
 | --- | --- |
@@ -316,6 +322,24 @@ enabled = false # Opt in to the caster hotkey; casting starts off
 hotkey = "esc"
 max_keys = 8
 timeout = 3 # Seconds of inactivity
+
+[hints]
+label_symbols = "abcdefghijklmnopqrstuvwxyz"
+border_color = "#00ff00e0"
+fill_color = "#00ff0018"
+readability_color = "#404040e6"
+label_color = "#ffffffff"
+label_highlight_color = "#ffc107ff"
+min_width = 8
+max_width = 499
+min_height = 4
+max_height = 49
+
+[hints.keys]
+left = "leftmeta + space"
+right = "leftmeta + i"
+cancel = "enter"
+toggle_background = "leftctrl"
 ```
 
 All settings are optional; omitted values keep their defaults. If the default
@@ -324,19 +348,21 @@ or unreadable file stops startup before any input device is grabbed.
 Unknown settings, unknown key names, duplicate control bindings, repeated keys
 within an activation chord, and nonpositive,
 nonfinite, or greater-than-100000 speeds are rejected.
-Easing values must be finite numbers between 0 and 1.
+Easing values must be finite numbers between 0 and 1. Hint labels must use 2-26
+unique lowercase ASCII letters, and hint size limits must stay positive with
+max >= min.
 The old `keys.exit` setting has been removed; delete it from existing configs.
 
 Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
-are accepted. Controls must use distinct single keys. `free_mouse` accepts either
-a single distinct key or a `+`-separated chord such as `"leftalt + space"` or
-`"leftctrl+leftalt+f3"`. All chord keys must be held together, in either press
-order; extra held keys do not prevent activation. For a buffered home-row
-activation chord such as D+F, use a `free_mouse` action in `[remap.main]`
-as shown below.
+are accepted. Controls must use distinct single keys. `free_mouse` and
+`[hints.keys]` activators accept either a single distinct key or a `+`-separated
+chord such as `"leftalt + space"` or `"leftctrl+leftalt+f3"`. All chord keys must
+be held together, in either press order; extra held keys do not prevent
+activation. For a buffered home-row activation chord such as D+F, use a
+`free_mouse` action in `[remap.main]` as shown below.
 The top-level `mode`, `notify`, and `home_end_enabled` settings must appear before any table
-(`[speeds]`, `[easing]`, `[keys]`, or `[keycast]`).
+(`[speeds]`, `[easing]`, `[keys]`, `[keycast]`, or `[hints]`).
 `"hold"` activates mouse mode only while every activation key is down; releasing
 any chord member leaves the mode. `"toggle"` switches it on/off each time the
 whole chord becomes held; releases and keyboard autorepeat do not toggle it.
@@ -355,6 +381,51 @@ and then use Space normally for clicking.
 
 For buffered letter chords that must not type a partial key, use the native
 `free_mouse` action described below instead of `keys.free_mouse`.
+
+Hint mode is optional, like the indicator: outside a wlroots Wayland session it
+prints a warning and immediately returns to normal keyboard passthrough. While
+hints are visible, letter keys matching `label_symbols` extend the current
+selection, Backspace deletes one character (or cancels when empty), Enter cancels
+by default, and Escape always cancels. Any matching full label immediately warps
+the pointer to that region's center and emits the configured left or right click.
+`border_color` and `fill_color` control the target box, while `label_color` and
+`label_highlight_color` control the untyped and already-typed label text.
+Hold **Left Ctrl** while hints are visible for a more opaque grey fill
+inside the boxes, behind the text. Release it to restore the normal fill.
+The background is hidden unless this key is held. Set
+`hints.readability_color` (`#RRGGBB` or `#RRGGBBAA`, including opacity) and
+`hints.keys.toggle_background` to customize the color and hold key
+(for example, `"rightctrl"`). The existing setting name is retained for config
+compatibility; its behavior is now hold-to-show, not toggle. Autorepeat has no effect.
+The background preserves typed letters and filtering, and cannot use a hint-label
+letter, Escape, Backspace, or the configured cancel key.
+Hint activation shortcuts are recognized after Fievel's remapping, so a
+home-row chord mapped to Super works with Space/I just like physical Super.
+While hints are active, re-press the same shortcut to cancel without clicking,
+or press the other shortcut to switch between left and right click. Switching
+preserves labels, typed characters, and the readability background.
+The completing key is consumed rather than forwarded to desktop shortcuts.
+No compositor keybinding is needed; remove old Super+Space/Super+I bindings
+that launch wl-kbptr to avoid opening its separate overlay when Fievel is not
+handling input. While hints are active, remappings needed for the activation
+shortcuts or readability hold key are applied. For example, holding S+D mapped
+to Ctrl shows the grey background; releasing either key hides it. If another
+Ctrl-producing key or chord is still held, the background stays visible until
+the last one is released. Ordinary navigation and mouse remappings do not replace
+hint letters. Partial shortcut chords use `remap.chord_timeout`, so a letter
+shared with a shortcut may wait briefly before appearing. Escape and the cancel
+key cancel immediately without replaying pending labels.
+`min_width`/`max_width` and `min_height`/`max_height` filter detected regions in
+logical clickable-element units, matching wl-kbptr-style defaults.
+Detection runs natively in Rust on an in-memory screencopy: connected edges
+find unboxed text, links and open icons as well as outlined or filled controls.
+Nearby character strokes are grouped, and redundant nested targets are filtered.
+It is a visual heuristic, not application accessibility data: some non-clickable
+text may be labeled and low-contrast or tightly packed targets can still be missed.
+Captures are oriented and resampled to the compositor-configured logical output
+size; detection, overlay drawing and output-local clicks share those coordinates,
+including fractional scaling and rotated/flipped outputs. No screenshots are saved
+and no OpenCV runtime is required.
 
 ### Home-row mods and navigation layers
 

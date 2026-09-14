@@ -1,7 +1,12 @@
 mod config;
+mod detect;
 mod engine;
+mod font;
+mod hint_input;
+mod hints;
 mod indicator;
 mod keycast;
+mod label;
 mod odometer;
 mod pipeline;
 mod remap;
@@ -9,12 +14,14 @@ mod remap;
 use clap::Parser;
 use config::Config;
 use engine::Output;
-use pipeline::InputEngine as Engine;
-use indicator::Overlays as Indicator;
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
     RelativeAxisCode,
 };
+use hint_input::{HintInput, HintInputEvent};
+use hints::{ActiveHints, HintResult};
+use indicator::Overlays as Indicator;
+use pipeline::InputEngine as Engine;
 use std::{
     error::Error,
     fs, io,
@@ -33,7 +40,10 @@ const KEYD_KEYBOARD_NAME: &str = "keyd virtual keyboard";
 const TICK: Duration = Duration::from_millis(4);
 
 #[derive(Parser)]
-#[command(version, about = "Keyboard remapping and mouse control (default: hold F3)")]
+#[command(
+    version,
+    about = "Keyboard remapping and mouse control (default: hold F3)"
+)]
 struct Args {
     /// Read only this keyboard event node (default: all suitable keyboards)
     #[arg(short, long)]
@@ -178,7 +188,11 @@ impl KeyboardScanner {
     }
 
     fn poll(&mut self) -> Option<KeyboardScanResult> {
-        if self.worker.as_ref().is_some_and(|worker| worker.is_finished()) {
+        if self
+            .worker
+            .as_ref()
+            .is_some_and(|worker| worker.is_finished())
+        {
             self.finish()
         } else {
             None
@@ -187,9 +201,9 @@ impl KeyboardScanner {
 
     fn finish(&mut self) -> Option<KeyboardScanResult> {
         self.worker.take().map(|worker| {
-            worker.join().unwrap_or_else(|_| {
-                Err(io::Error::other("Keyboard discovery thread panicked"))
-            })
+            worker
+                .join()
+                .unwrap_or_else(|_| Err(io::Error::other("Keyboard discovery thread panicked")))
         })
     }
 }
@@ -215,7 +229,10 @@ fn is_auto_candidate(path: &Path, device: &Device, quiet: bool) -> bool {
         Ok(value) => value,
         Err(error) => {
             if !quiet {
-                eprintln!("Skipping {}: cannot classify input: {error}", path.display());
+                eprintln!(
+                    "Skipping {}: cannot classify input: {error}",
+                    path.display()
+                );
             }
             return false;
         }
@@ -256,7 +273,9 @@ fn select_devices(path: Option<PathBuf>) -> Result<Vec<(PathBuf, Device)>, Box<d
         }
     }
     if devices.is_empty() {
-        return Err("No suitable keyboards found; use --list, then --device PATH to select one".into());
+        return Err(
+            "No suitable keyboards found; use --list, then --device PATH to select one".into(),
+        );
     }
     Ok(devices)
 }
@@ -280,7 +299,9 @@ fn prepare_reconnected_keyboard(device: &mut Device) -> io::Result<AttributeSet<
             return device.get_key_state();
         }
     }
-    Err(io::Error::other("Keyboard event queue did not settle during reconnect"))
+    Err(io::Error::other(
+        "Keyboard event queue did not settle during reconnect",
+    ))
 }
 
 fn attach_new_keyboards(
@@ -342,8 +363,16 @@ impl HeldKeys {
         }
     }
 
+    fn contains(&self, key: KeyCode) -> bool {
+        self.sources.iter().any(|keys| keys.contains(key))
+    }
+
+    fn keys(&self) -> AttributeSet<KeyCode> {
+        self.sources.iter().flat_map(|keys| keys.iter()).collect()
+    }
+
     fn key(&mut self, source: usize, key: KeyCode, value: i32) -> bool {
-        let held = self.sources.iter().any(|keys| keys.contains(key));
+        let held = self.contains(key);
         let keys = &mut self.sources[source];
         match value {
             1 => {
@@ -353,7 +382,7 @@ impl HeldKeys {
             0 => {
                 let was_held = keys.contains(key);
                 keys.remove(key);
-                was_held && !self.sources.iter().any(|keys| keys.contains(key))
+                was_held && !self.contains(key)
             }
             2 => keys.contains(key),
             _ => false,
@@ -364,7 +393,7 @@ impl HeldKeys {
         self.sources
             .remove(source)
             .iter()
-            .filter(|key| !self.sources.iter().any(|keys| keys.contains(*key)))
+            .filter(|key| !self.contains(*key))
             .collect()
     }
 
@@ -390,13 +419,33 @@ fn validate_input_keys(
     }
     for (action, key) in bindings {
         if !supported.contains(key) && !remapped_outputs.contains(&key) {
-            let setting = if action == "keycast.hotkey" {
-                action.to_owned()
-            } else {
-                format!("keys.{action}")
-            };
             return Err(format!(
-                "Selected keyboards do not support {setting} = {key:?}; choose another input or binding"
+                "Selected keyboards do not support {action} = {key:?}; choose another input or binding"
+            ));
+        }
+    }
+    for (action, chord) in [
+        ("hints.keys.left", &config.hints.keys.left),
+        ("hints.keys.right", &config.hints.keys.right),
+    ] {
+        for key in chord {
+            if !supported.contains(*key) && !remapped_outputs.contains(key) {
+                return Err(format!(
+                    "Selected keyboards do not support {action} = {key:?}; choose another input or binding"
+                ));
+            }
+        }
+    }
+    for (action, key) in [
+        ("hints.keys.cancel", config.hints.keys.cancel),
+        (
+            "hints.keys.toggle_background",
+            config.hints.keys.toggle_background,
+        ),
+    ] {
+        if !supported.contains(key) && !remapped_outputs.contains(&key) {
+            return Err(format!(
+                "Selected keyboards do not support {action} = {key:?}; choose another input or binding"
             ));
         }
     }
@@ -443,7 +492,11 @@ impl Outputs {
             .with_keys(&buttons)?
             .with_relative_axes(&axes)?
             .build()?;
-        Ok(Self { keyboard, mouse, odometer: odometer::Counter::default() })
+        Ok(Self {
+            keyboard,
+            mouse,
+            odometer: odometer::Counter::default(),
+        })
     }
 
     fn emit(&mut self, output: Output) -> io::Result<()> {
@@ -483,16 +536,25 @@ fn event_loop(
     held: &mut HeldKeys,
     outputs: &mut Outputs,
     engine: &mut Engine,
+    config: &Config,
     stop: &AtomicBool,
     indicator: &mut Indicator,
     mut scanner: Option<&mut KeyboardScanner>,
 ) -> io::Result<()> {
     let mut last = Instant::now();
     let mut next_scan = last + RESCAN_INTERVAL;
+    let mut hint_mode: Option<ActiveHints> = None;
+    let mut hint_input = HintInput::new(config).map_err(io::Error::other)?;
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
-        outputs.emit(engine.advance(now.duration_since(last)))?;
-        indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+        if hint_mode.is_none() {
+            outputs.emit(engine.advance(now.duration_since(last)))?;
+            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+            activate_pending_hints(engine, &mut hint_mode, &mut hint_input, held, config);
+        } else {
+            let actions = hint_input.advance(now.duration_since(last));
+            handle_hint_input(actions, &mut hint_mode, config);
+        }
         last = now;
 
         let mut index = 0;
@@ -501,39 +563,69 @@ fn event_loop(
             let disconnected = match input.fetch_events() {
                 Ok(events) => {
                     for event in events {
-                        if event.event_type() == EventType::KEY {
-                            let key = KeyCode(event.code());
-                            if held.key(index, key, event.value()) {
-                                outputs.emit(engine.key(key, event.value()))?;
-                                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+                        if event.event_type() != EventType::KEY {
+                            continue;
+                        }
+                        let key = KeyCode(event.code());
+                        let value = event.value();
+                        let changed = held.key(index, key, value);
+                        if hint_mode.is_some() {
+                            if !changed {
+                                continue;
                             }
+                            let actions = hint_input.key(key, value);
+                            handle_hint_input(actions, &mut hint_mode, config);
+                            continue;
+                        }
+                        if changed {
+                            outputs.emit(engine.key(key, value))?;
+                            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+                            activate_pending_hints(
+                                engine,
+                                &mut hint_mode,
+                                &mut hint_input,
+                                held,
+                                config,
+                            );
                         }
                     }
                     false
                 }
                 Err(error)
                     if matches!(
-                        error.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
-                    ) => false,
-                Err(error) if error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error()) => {
+                        error.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted
+                    ) =>
+                {
+                    false
+                }
+                Err(error)
+                    if error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error()) =>
+                {
                     eprintln!("Keyboard disconnected: {}", path.display());
                     true
                 }
                 Err(error) => {
                     return Err(io::Error::new(
-                        error.kind(), format!("Cannot read {}: {error}", path.display())
+                        error.kind(),
+                        format!("Cannot read {}: {error}", path.display()),
                     ));
                 }
             };
             if disconnected {
                 inputs.remove(index);
                 for key in held.remove(index) {
-                    outputs.emit(engine.key(key, 0))?;
+                    if hint_mode.is_some() {
+                        let actions = hint_input.key(key, 0);
+                        handle_hint_input(actions, &mut hint_mode, config);
+                    } else {
+                        outputs.emit(engine.key(key, 0))?;
+                    }
                 }
                 indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
                 if inputs.is_empty() && scanner.is_none() {
                     return Err(io::Error::other(
-                        "All keyboards disconnected; restart fievel after reconnecting"
+                        "All keyboards disconnected; restart fievel after reconnecting",
                     ));
                 }
             } else {
@@ -556,6 +648,61 @@ fn event_loop(
     Ok(())
 }
 
+fn activate_pending_hints(
+    engine: &mut Engine,
+    hint_mode: &mut Option<ActiveHints>,
+    hint_input: &mut HintInput,
+    held: &HeldKeys,
+    config: &Config,
+) {
+    if let Some(click) = engine.take_hint_request() {
+        match ActiveHints::activate(&config.hints, click) {
+            Ok(hints) => {
+                hint_input.begin(held.keys().iter());
+                *hint_mode = Some(hints);
+                if hint_input.readability_held() {
+                    handle_hint_input(
+                        vec![HintInputEvent::Key(config.hints.keys.toggle_background, 1)],
+                        hint_mode,
+                        config,
+                    );
+                }
+            }
+            Err(error) => ActiveHints::warning(error.as_ref()),
+        }
+    }
+}
+
+fn handle_hint_input(
+    actions: Vec<HintInputEvent>,
+    hint_mode: &mut Option<ActiveHints>,
+    config: &Config,
+) {
+    for action in actions {
+        let Some(hints) = hint_mode.as_mut() else {
+            break;
+        };
+        match action {
+            HintInputEvent::Shortcut(click) => {
+                if hints.click_kind() == click {
+                    hints.cancel();
+                    *hint_mode = None;
+                } else {
+                    hints.set_click_kind(click);
+                }
+            }
+            HintInputEvent::Key(key, value) => match hints.handle_key(key, value, &config.hints) {
+                Ok(HintResult::Continue) => {}
+                Ok(HintResult::Cancelled | HintResult::Clicked) => *hint_mode = None,
+                Err(error) => {
+                    ActiveHints::warning(error.as_ref());
+                    *hint_mode = None;
+                }
+            },
+        }
+    }
+}
+
 fn run(args: Args) -> Result<(), Box<dyn Error>> {
     if args.odometer {
         odometer::report(args.odometer_units_per_inch)?;
@@ -570,7 +717,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             println!(
                 "{}\t{}\t{}",
                 path.display(),
-                if is_virtual(&path)? { "virtual" } else { "physical" },
+                if is_virtual(&path)? {
+                    "virtual"
+                } else {
+                    "physical"
+                },
                 device.name().unwrap_or("(unnamed)")
             );
         }
@@ -584,7 +735,11 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let explicit = args.device.is_some();
     let inputs = select_devices(args.device)?;
-    let supported = merge_keys(inputs.iter().filter_map(|(_, input)| input.supported_keys()));
+    let supported = merge_keys(
+        inputs
+            .iter()
+            .filter_map(|(_, input)| input.supported_keys()),
+    );
     validate_input_keys(&supported, &config)?;
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [
@@ -597,8 +752,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
-    let mut outputs = Outputs::new(&supported, &config)
-        .map_err(|error| format!("Cannot create uinput devices: {error}. Check /dev/uinput access"))?;
+    let mut outputs = Outputs::new(&supported, &config).map_err(|error| {
+        format!("Cannot create uinput devices: {error}. Check /dev/uinput access")
+    })?;
     outputs.odometer = odometer.counter.clone();
     let mut indicator = Indicator::new(config.notify, config.keycast.enabled);
     // Keep discovery alive outside the loop so shutdown releases input before
@@ -624,13 +780,23 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             eprintln!("Skipping input: {message}");
             continue;
         }
-        eprintln!("Reading {} ({})", path.display(), input.name().unwrap_or("unnamed"));
+        eprintln!(
+            "Reading {} ({})",
+            path.display(),
+            input.name().unwrap_or("unnamed")
+        );
         grabbed.push((path, input));
     }
     if grabbed.is_empty() {
-        return Err("Cannot grab any keyboards; check input permissions and other remappers".into());
+        return Err(
+            "Cannot grab any keyboards; check input permissions and other remappers".into(),
+        );
     }
-    let available = merge_keys(grabbed.iter().filter_map(|(_, input)| input.supported_keys()));
+    let available = merge_keys(
+        grabbed
+            .iter()
+            .filter_map(|(_, input)| input.supported_keys()),
+    );
     validate_input_keys(&available, &config)?;
     let mut held = HeldKeys::new(grabbed.len());
     eprintln!(
@@ -641,7 +807,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         },
         config.keys.free_mouse,
     );
-    let mut engine = Engine::new(config)?;
+    let mut engine = Engine::new(config.clone())?;
     // Seeding held keys preserves modifiers if the process starts mid-keypress.
     let result = (|| -> io::Result<()> {
         for (index, (_, input)) in grabbed.iter().enumerate() {
@@ -653,7 +819,13 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             }
         }
         event_loop(
-            &mut grabbed, &mut held, &mut outputs, &mut engine, &stop, &mut indicator,
+            &mut grabbed,
+            &mut held,
+            &mut outputs,
+            &mut engine,
+            &config,
+            &stop,
+            &mut indicator,
             if explicit { None } else { Some(&mut scanner) },
         )
     })();
@@ -699,11 +871,23 @@ mod tests {
     #[test]
     fn keycast_hotkey_capability_is_required_only_when_enabled() {
         let mut config = Config::default();
-        let mut supported: AttributeSet<KeyCode> =
-            config.keys.named().into_iter().map(|(_, key)| key).collect();
+        let mut supported: AttributeSet<KeyCode> = config
+            .keys
+            .named()
+            .into_iter()
+            .map(|(_, key)| key)
+            .chain(config.hints.keys.left.iter().copied())
+            .chain(config.hints.keys.right.iter().copied())
+            .chain([
+                config.hints.keys.cancel,
+                config.hints.keys.toggle_background,
+            ])
+            .collect();
         assert!(validate_input_keys(&supported, &config).is_ok());
         config.keycast.enabled = true;
-        assert!(validate_input_keys(&supported, &config).unwrap_err().contains("keycast.hotkey"));
+        assert!(validate_input_keys(&supported, &config)
+            .unwrap_err()
+            .contains("keycast.hotkey"));
         supported.insert(config.keycast.hotkey);
         assert!(validate_input_keys(&supported, &config).is_ok());
     }
@@ -746,7 +930,9 @@ mod tests {
             thread::spawn(|| Err(io::Error::other("scan failed"))),
             thread::spawn(|| panic!("scan panicked")),
         ] {
-            let mut scanner = KeyboardScanner { worker: Some(worker) };
+            let mut scanner = KeyboardScanner {
+                worker: Some(worker),
+            };
             assert!(scanner.finish().unwrap().is_err());
             assert!(scanner.worker.is_none());
         }
@@ -754,20 +940,35 @@ mod tests {
 
     #[test]
     fn odometer_is_a_standalone_command() {
-        assert!(Args::try_parse_from(["fievel", "--odometer"]).unwrap().odometer);
+        assert!(
+            Args::try_parse_from(["fievel", "--odometer"])
+                .unwrap()
+                .odometer
+        );
         assert!(Args::try_parse_from(["fievel", "--odometer", "--list"]).is_err());
         assert!(Args::try_parse_from(["fievel", "--odometer", "--check-config"]).is_err());
-        assert!(Args::try_parse_from(["fievel", "--reset-odometer"]).unwrap().reset_odometer);
+        assert!(
+            Args::try_parse_from(["fievel", "--reset-odometer"])
+                .unwrap()
+                .reset_odometer
+        );
         for conflict in ["--odometer", "--list", "--check-config"] {
             assert!(Args::try_parse_from(["fievel", "--reset-odometer", conflict]).is_err());
         }
         assert_eq!(
             Args::try_parse_from(["fievel", "--odometer", "--odometer-units-per-inch", "800"])
-                .unwrap().odometer_units_per_inch,
+                .unwrap()
+                .odometer_units_per_inch,
             800.0
         );
         for invalid in ["0", "-1", "NaN", "inf"] {
-            assert!(Args::try_parse_from(["fievel", "--odometer", "--odometer-units-per-inch", invalid]).is_err());
+            assert!(Args::try_parse_from([
+                "fievel",
+                "--odometer",
+                "--odometer-units-per-inch",
+                invalid
+            ])
+            .is_err());
         }
     }
 
@@ -776,7 +977,12 @@ mod tests {
         let input_keys: AttributeSet<KeyCode> =
             [KeyCode::KEY_A, KeyCode::KEY_F3].into_iter().collect();
         let keys = keyboard_keys(&input_keys, &Config::default()).unwrap();
-        for key in [KeyCode::KEY_A, KeyCode::KEY_F3, KeyCode::KEY_HOME, KeyCode::KEY_END] {
+        for key in [
+            KeyCode::KEY_A,
+            KeyCode::KEY_F3,
+            KeyCode::KEY_HOME,
+            KeyCode::KEY_END,
+        ] {
             assert!(keys.contains(key));
         }
     }
@@ -786,17 +992,28 @@ mod tests {
         let config = Config::parse(
             "[remap.main]\na = 'super'\ns = 'timeout(ctrl, 175, layer(nav))'\n\
              [remap.layers.nav]\nh = 'left'",
-        ).unwrap();
+        )
+        .unwrap();
         let input_keys: AttributeSet<KeyCode> = [KeyCode::KEY_A].into_iter().collect();
         let keys = keyboard_keys(&input_keys, &config).unwrap();
-        for key in [KeyCode::KEY_A, KeyCode::KEY_LEFTCTRL, KeyCode::KEY_LEFTMETA, KeyCode::KEY_LEFT] {
+        for key in [
+            KeyCode::KEY_A,
+            KeyCode::KEY_LEFTCTRL,
+            KeyCode::KEY_LEFTMETA,
+            KeyCode::KEY_LEFT,
+        ] {
             assert!(keys.contains(key));
         }
     }
 
     #[test]
     fn defaults_to_all_physical_keyboards_and_keyd_output() {
-        for name in [Some("Laptop keyboard"), Some("USB keyboard"), Some("Bluetooth keyboard"), None] {
+        for name in [
+            Some("Laptop keyboard"),
+            Some("USB keyboard"),
+            Some("Bluetooth keyboard"),
+            None,
+        ] {
             assert!(automatic_input(name, false, false));
         }
         assert!(automatic_input(Some(KEYD_KEYBOARD_NAME), true, false));
@@ -804,17 +1021,28 @@ mod tests {
 
     #[test]
     fn automatic_selection_excludes_feedback_and_combined_pointer_inputs() {
-        for name in [Some(KEYBOARD_NAME), Some(MOUSE_NAME), Some("other remapper"), None] {
+        for name in [
+            Some(KEYBOARD_NAME),
+            Some(MOUSE_NAME),
+            Some("other remapper"),
+            None,
+        ] {
             assert!(!automatic_input(name, true, false));
         }
         assert!(!automatic_input(Some(KEYBOARD_NAME), false, false));
-        assert!(!automatic_input(Some("Keyboard with touchpad"), false, true));
+        assert!(!automatic_input(
+            Some("Keyboard with touchpad"),
+            false,
+            true
+        ));
         assert!(!automatic_input(Some(KEYD_KEYBOARD_NAME), true, true));
     }
 
     #[test]
     fn virtual_classification_includes_bluetooth_hardware() {
-        assert!(is_virtual_input(Path::new("/sys/devices/virtual/input/input42/event42")));
+        assert!(is_virtual_input(Path::new(
+            "/sys/devices/virtual/input/input42/event42"
+        )));
         for path in [
             "/sys/devices/pci0000:00/usb1/input/input1/event1",
             "/sys/devices/virtual/misc/uhid/0005:1234/input/input1/event1",
@@ -826,8 +1054,18 @@ mod tests {
     #[test]
     fn capabilities_and_bindings_use_the_union_of_input_keys() {
         let config = Config::parse("[remap.main]\nz = 'f24'").unwrap();
-        let first: AttributeSet<KeyCode> = config.keys.named().into_iter()
-            .map(|(_, key)| key).collect();
+        let first: AttributeSet<KeyCode> = config
+            .keys
+            .named()
+            .into_iter()
+            .map(|(_, key)| key)
+            .chain(config.hints.keys.left.iter().copied())
+            .chain(config.hints.keys.right.iter().copied())
+            .chain([
+                config.hints.keys.cancel,
+                config.hints.keys.toggle_background,
+            ])
+            .collect();
         let second: AttributeSet<KeyCode> = [KeyCode::KEY_Z].into_iter().collect();
         let third: AttributeSet<KeyCode> = [KeyCode::KEY_VOLUMEUP].into_iter().collect();
         assert!(validate_input_keys(&first, &config).is_err());
@@ -912,25 +1150,38 @@ mod tests {
             }
         }
         assert_eq!(
-            keyboard.iter().map(|event| (KeyCode(event.code()), event.value())).collect::<Vec<_>>(),
+            keyboard
+                .iter()
+                .map(|event| (KeyCode(event.code()), event.value()))
+                .collect::<Vec<_>>(),
             [
-                (KeyCode::KEY_LEFTCTRL, 1), (KeyCode::KEY_A, 1),
-                (KeyCode::KEY_A, 0), (KeyCode::KEY_LEFTCTRL, 0),
+                (KeyCode::KEY_LEFTCTRL, 1),
+                (KeyCode::KEY_A, 1),
+                (KeyCode::KEY_A, 0),
+                (KeyCode::KEY_LEFTCTRL, 0),
             ]
         );
         assert!(engine.active());
         assert_eq!(mouse.len(), 1);
-        assert_eq!((mouse[0].code(), mouse[0].value()), (KeyCode::BTN_LEFT.0, 1));
-        assert!(engine.advance(Duration::from_millis(20)).mouse.iter().any(|event| {
-            event.code() == RelativeAxisCode::REL_X.0 && event.value() < 0
-        }));
+        assert_eq!(
+            (mouse[0].code(), mouse[0].value()),
+            (KeyCode::BTN_LEFT.0, 1)
+        );
+        assert!(engine
+            .advance(Duration::from_millis(20))
+            .mouse
+            .iter()
+            .any(|event| { event.code() == RelativeAxisCode::REL_X.0 && event.value() < 0 }));
         for key in held.remove(1) {
             let output = engine.key(key, 0);
             assert!(output.keyboard.is_empty());
             mouse.extend(output.mouse);
         }
         assert!(!engine.active());
-        assert_eq!((mouse[1].code(), mouse[1].value()), (KeyCode::BTN_LEFT.0, 0));
+        assert_eq!(
+            (mouse[1].code(), mouse[1].value()),
+            (KeyCode::BTN_LEFT.0, 0)
+        );
         assert!(held.key(1, KeyCode::KEY_H, 0));
         assert!(engine.key(KeyCode::KEY_H, 0).keyboard.is_empty());
         assert!(held.key(1, KeyCode::KEY_SPACE, 0));
@@ -944,7 +1195,9 @@ mod tests {
     fn cli_defaults_to_all_inputs_but_accepts_one_device() {
         assert!(Args::try_parse_from(["fievel"]).unwrap().device.is_none());
         assert_eq!(
-            Args::try_parse_from(["fievel", "--device", "/dev/input/event3"]).unwrap().device,
+            Args::try_parse_from(["fievel", "--device", "/dev/input/event3"])
+                .unwrap()
+                .device,
             Some(PathBuf::from("/dev/input/event3"))
         );
     }
@@ -967,7 +1220,13 @@ mod tests {
         assert_eq!(config.speeds.normal, 300.0);
         assert_eq!(config.speeds.scroll, 6.0);
         let args = Args::try_parse_from([
-            "fievel", "--config", path, "--speed", "1200", "--scroll-speed", "12",
+            "fievel",
+            "--config",
+            path,
+            "--speed",
+            "1200",
+            "--scroll-speed",
+            "12",
         ])
         .unwrap();
         let (_, config) = load_config(&args).unwrap();
@@ -1044,7 +1303,9 @@ mod tests {
         let mut outputs = Outputs::new(input.supported_keys().unwrap(), &Config::default())?;
         let mut keyboard = open_output(&mut outputs.keyboard)?;
         let mut mouse = open_output(&mut outputs.mouse)?;
-        let axes = mouse.supported_relative_axes().expect("pointer relative axes");
+        let axes = mouse
+            .supported_relative_axes()
+            .expect("pointer relative axes");
         for axis in [
             RelativeAxisCode::REL_WHEEL,
             RelativeAxisCode::REL_HWHEEL,
@@ -1056,7 +1317,7 @@ mod tests {
         let mut config = Config::default();
         config.speeds.normal = 1000.0;
         config.speeds.scroll = 10.0;
-        let mut engine = Engine::new(config)?;
+        let mut engine = Engine::new(config.clone())?;
         let mut expected_keyboard = Vec::new();
         let mut expected_mouse = Vec::new();
         for (key, value) in [
@@ -1089,12 +1350,18 @@ mod tests {
                     engine.key(KeyCode(code), value),
                     engine.advance(Duration::from_millis(10)),
                 ] {
-                    expected_keyboard.extend(output.keyboard.iter().map(|event| {
-                        (event.event_type().0, event.code(), event.value())
-                    }));
-                    expected_mouse.extend(output.mouse.iter().map(|event| {
-                        (event.event_type().0, event.code(), event.value())
-                    }));
+                    expected_keyboard.extend(
+                        output
+                            .keyboard
+                            .iter()
+                            .map(|event| (event.event_type().0, event.code(), event.value())),
+                    );
+                    expected_mouse.extend(
+                        output
+                            .mouse
+                            .iter()
+                            .map(|event| (event.event_type().0, event.code(), event.value())),
+                    );
                     outputs.emit(output)?;
                 }
             }
@@ -1112,8 +1379,7 @@ mod tests {
         );
         assert!(!expected_mouse.is_empty());
         assert!(expected_mouse.iter().any(|event| {
-            event.0 == EventType::RELATIVE.0
-                && event.1 == RelativeAxisCode::REL_WHEEL_HI_RES.0
+            event.0 == EventType::RELATIVE.0 && event.1 == RelativeAxisCode::REL_WHEEL_HI_RES.0
         }));
         assert_eq!(read_events(&mut keyboard)?, expected_keyboard);
         assert_eq!(read_events(&mut mouse)?, expected_mouse);
@@ -1127,7 +1393,11 @@ mod tests {
         let held = prepare_reconnected_keyboard(&mut input)?;
         assert_eq!(held.iter().collect::<Vec<_>>(), [KeyCode::KEY_H]);
         assert!(read_events(&mut input)?.is_empty());
-        source.emit(&[evdev::InputEvent::new(EventType::KEY.0, KeyCode::KEY_H.0, 0)])?;
+        source.emit(&[evdev::InputEvent::new(
+            EventType::KEY.0,
+            KeyCode::KEY_H.0,
+            0,
+        )])?;
         assert_eq!(
             read_events(&mut input)?,
             [(EventType::KEY.0, KeyCode::KEY_H.0, 0)]
