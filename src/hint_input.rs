@@ -37,7 +37,7 @@ impl HintInput {
             .iter()
             .chain(&config.hints.keys.right)
             .copied()
-            .chain([config.hints.keys.toggle_background])
+            .chain([config.hints.keys.toggle_background, config.hints.keys.debug])
             .collect();
         Ok(Self {
             remapper: Remapper::for_shortcuts(config.remap.clone(), &keys)?,
@@ -105,7 +105,7 @@ impl HintInput {
             }
             false
         });
-        output
+        self.guard_debug_transition(output)
     }
 
     pub fn advance(&mut self, elapsed: Duration) -> Vec<HintInputEvent> {
@@ -119,6 +119,23 @@ impl HintInput {
             }
             false
         });
+        self.guard_debug_transition(output)
+    }
+
+    fn guard_debug_transition(&mut self, mut output: Vec<HintInputEvent>) -> Vec<HintInputEvent> {
+        let keys = &self.shortcuts.keys;
+        if output.contains(&HintInputEvent::Key(keys.debug, 1)) {
+            // A chord timeout can release a buffered label in the same batch
+            // as debug. Do not let that label click before the view changes.
+            output.retain(|event| match event {
+                HintInputEvent::Key(key, _) => {
+                    [keys.debug, keys.cancel, K::KEY_ESC, keys.toggle_background].contains(key)
+                }
+                HintInputEvent::Shortcut(_) => true,
+            });
+            self.shortcuts.pending.clear();
+            self.shortcuts.deadline = None;
+        }
         output
     }
 }
@@ -130,6 +147,25 @@ mod tests {
 
     fn plain() -> HintInput {
         HintInput::new(&Config::default()).unwrap()
+    }
+
+    #[test]
+    fn debug_keys_and_remappings_do_not_replay_pending_clicks() {
+        let config = Config::parse("[hints.keys]\ndebug = 'f9'\n[remap.main]\n'x+y' = 'f9'").unwrap();
+        let mut input = HintInput::new(&config).unwrap();
+        input.begin([]);
+        assert!(input.key(K::KEY_I, 1).is_empty());
+        assert_eq!(input.key(K::KEY_F9, 1), [Key(K::KEY_F9, 1)]);
+        assert!(input.key(K::KEY_F9, 2).is_empty());
+        assert!(input.advance(Duration::from_millis(50)).is_empty());
+        input.key(K::KEY_F9, 0);
+        assert_eq!(press(&mut input, &[K::KEY_X, K::KEY_Y]), [Key(K::KEY_F9, 1)]);
+        assert_eq!(input.key(K::KEY_Y, 0), [Key(K::KEY_F9, 0)]);
+        input.begin([]);
+        assert_eq!(input.key(K::KEY_F8, 1), [Key(K::KEY_F8, 1)]);
+        let mut defaults = plain();
+        defaults.begin([]);
+        assert_eq!(defaults.key(K::KEY_F8, 1), [Key(K::KEY_F8, 1)]);
     }
 
     fn home_row() -> HintInput {
@@ -402,6 +438,11 @@ impl Shortcuts {
         }
         if value != 1 || !self.held.insert(key) {
             return Vec::new();
+        }
+        if key == self.keys.debug {
+            self.pending.clear();
+            self.deadline = None;
+            return vec![HintInputEvent::Key(key, value)];
         }
         for (chord, click) in [
             (&self.keys.left, ClickKind::Left),

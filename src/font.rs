@@ -151,6 +151,16 @@ fn blend(dst: &mut [u8], src: [u8; 4]) {
 
 fn glyph_rows(ch: char) -> Option<[u8; 7]> {
     Some(match ch.to_ascii_lowercase() {
+        '0' => [14, 17, 19, 21, 25, 17, 14],
+        '1' => [4, 12, 4, 4, 4, 4, 14],
+        '2' => [14, 17, 1, 2, 4, 8, 31],
+        '3' => [30, 1, 1, 14, 1, 1, 30],
+        '4' => [2, 6, 10, 18, 31, 2, 2],
+        '5' => [31, 16, 16, 30, 1, 1, 30],
+        '6' => [14, 16, 16, 30, 17, 17, 14],
+        '7' => [31, 1, 2, 4, 8, 8, 8],
+        '8' => [14, 17, 17, 14, 17, 17, 14],
+        '9' => [14, 17, 17, 15, 1, 1, 14],
         'a' => [
             0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
         ],
@@ -236,6 +246,13 @@ fn glyph_rows(ch: char) -> Option<[u8; 7]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_digits_have_visible_glyphs() {
+        for digit in '0'..='9' {
+            assert!(glyph_rows(digit).unwrap().iter().any(|row| *row != 0));
+        }
+    }
 
     #[test]
     fn parses_rgb_and_rgba_hex_colors() {

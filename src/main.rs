@@ -438,6 +438,7 @@ fn validate_input_keys(
     }
     for (action, key) in [
         ("hints.keys.cancel", config.hints.keys.cancel),
+        ("hints.keys.debug", config.hints.keys.debug),
         (
             "hints.keys.toggle_background",
             config.hints.keys.toggle_background,
@@ -880,10 +881,18 @@ mod tests {
             .chain(config.hints.keys.right.iter().copied())
             .chain([
                 config.hints.keys.cancel,
+                config.hints.keys.debug,
                 config.hints.keys.toggle_background,
             ])
             .collect();
         assert!(validate_input_keys(&supported, &config).is_ok());
+        let mut without_debug = supported.clone();
+        without_debug.remove(config.hints.keys.debug);
+        assert!(validate_input_keys(&without_debug, &config)
+            .unwrap_err().contains("hints.keys.debug"));
+        let remapped_debug = Config::parse("[remap.main]\ncapslock = 'f8'").unwrap();
+        without_debug.insert(KeyCode::KEY_CAPSLOCK);
+        assert!(validate_input_keys(&without_debug, &remapped_debug).is_ok());
         config.keycast.enabled = true;
         assert!(validate_input_keys(&supported, &config)
             .unwrap_err()
@@ -1063,6 +1072,7 @@ mod tests {
             .chain(config.hints.keys.right.iter().copied())
             .chain([
                 config.hints.keys.cancel,
+                config.hints.keys.debug,
                 config.hints.keys.toggle_background,
             ])
             .collect();

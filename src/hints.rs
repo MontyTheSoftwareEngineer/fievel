@@ -1,6 +1,6 @@
 use crate::{
     config::Hints,
-    detect::{self, DetectionLimits, Rect},
+    detect::{self, DetectionLimits, DetectionTrace, Outcome, Rect},
     font::{Canvas, Color},
     label::{AppendResult, LabelAlphabet, LabelSelection},
 };
@@ -61,6 +61,24 @@ struct HintBackground {
     hidden: bool,
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+enum DebugView {
+    #[default]
+    Normal,
+    Edges,
+    Components,
+}
+
+impl DebugView {
+    fn next(self) -> Self {
+        match self {
+            Self::Normal => Self::Edges,
+            Self::Edges => Self::Components,
+            Self::Components => Self::Normal,
+        }
+    }
+}
+
 impl HintBackground {
     fn handle_key(&mut self, key: K, value: i32, config: &Hints) -> bool {
         if key != config.keys.toggle_background || !matches!(value, 0 | 1) {
@@ -103,9 +121,16 @@ impl ActiveHints {
             .map_err(|error| format!("hints.label_symbols: {error}"))?;
         let mut backend = WaylandHints::connect()?;
         let raw_regions = backend.capture_regions(config)?;
-        if raw_regions.is_empty() {
-            return Err("detected no hint targets on any Wayland output".into());
-        }
+        Self::from_capture(config, click, alphabet, backend, raw_regions)
+    }
+
+    fn from_capture(
+        config: &Hints,
+        click: ClickKind,
+        alphabet: LabelAlphabet,
+        mut backend: WaylandHints,
+        raw_regions: Vec<(usize, Rect)>,
+    ) -> Result<Self, Box<dyn Error>> {
         let selection = LabelSelection::new(alphabet.clone(), raw_regions.len());
         let mut regions = Vec::with_capacity(raw_regions.len());
         for (index, (output_index, rect)) in raw_regions.into_iter().enumerate() {
@@ -154,6 +179,16 @@ impl ActiveHints {
             return Ok(HintResult::Cancelled);
         }
         if self.background.hidden {
+            return Ok(HintResult::Continue);
+        }
+        if key == config.keys.debug {
+            self.backend.debug_view = self.backend.debug_view.next();
+            self.backend.redraw(config, &self.regions, &self.selection, false)?;
+            return Ok(HintResult::Continue);
+        }
+        // Diagnostic rectangles have no labels. Never resolve an invisible
+        // selection, and preserve its prefix until the normal view is restored.
+        if self.backend.debug_view != DebugView::Normal || self.regions.is_empty() {
             return Ok(HintResult::Continue);
         }
         if key == K::KEY_BACKSPACE {
@@ -211,6 +246,7 @@ struct WaylandHints {
     qh: QueueHandle<State>,
     state: State,
     sync_serial: u64,
+    debug_view: DebugView,
 }
 
 #[derive(Default)]
@@ -265,6 +301,7 @@ struct OverlayState {
     pixels: Vec<u8>,
     configured: bool,
     closed: bool,
+    trace: Option<DetectionTrace>,
 }
 
 impl Default for OutputState {
@@ -289,6 +326,7 @@ impl WaylandHints {
             qh,
             state: State::default(),
             sync_serial: 0,
+            debug_view: DebugView::Normal,
         };
         this.sync(STARTUP_TIMEOUT)?;
         this.state
@@ -382,7 +420,7 @@ impl WaylandHints {
                 output.transform,
             )?;
             let (width, height) = transformed_size(capture.width, capture.height, output.transform);
-            let overlay = &self.state.overlays[capture.output_index];
+            let overlay = &mut self.state.overlays[capture.output_index];
             let luma = detect::resize_luma(
                 &luma,
                 width,
@@ -390,7 +428,7 @@ impl WaylandHints {
                 overlay.logical_width,
                 overlay.logical_height,
             );
-            let rects = detect::detect_regions_from_luma(
+            let detection = detect::detect_with_trace(
                 &luma,
                 overlay.logical_width,
                 overlay.logical_height,
@@ -402,12 +440,23 @@ impl WaylandHints {
                     max_height: config.max_height as f64,
                 },
             );
-            for rect in rects {
+            overlay.trace = Some(detection.trace);
+            for rect in detection.regions {
                 regions.push((capture.output_index, rect));
             }
             if let Some(buffer) = capture.buffer.take() {
                 buffer.destroy();
             }
+        }
+        // Release failed-capture buffers too. Frame events already destroy
+        // their proxies; retain geometry metadata, never raw capture pixels.
+        for capture in &mut self.state.captures {
+            if let Some(buffer) = capture.buffer.take() {
+                buffer.destroy();
+            }
+        }
+        if self.state.overlays.iter().all(|overlay| overlay.trace.is_none()) {
+            return Err("failed to capture any Wayland output".into());
         }
         Ok(regions)
     }
@@ -484,6 +533,7 @@ impl WaylandHints {
                 pixels,
                 configured: false,
                 closed: false,
+                trace: None,
             });
         }
         self.pump_until(
@@ -548,6 +598,7 @@ impl WaylandHints {
             canvas.clear(Color::rgba(0, 0, 0, 0));
             for (index, region) in regions.iter().enumerate() {
                 if hidden
+                    || self.debug_view != DebugView::Normal
                     || region.output_index != overlay.output_index
                     || !selection.matches_index(index)
                 {
@@ -588,6 +639,22 @@ impl WaylandHints {
                     config.label_color,
                 );
             }
+            if !hidden {
+                if self.debug_view != DebugView::Normal {
+                    Self::draw_diagnostics(
+                        &mut canvas, overlay.trace.as_ref(), self.debug_view,
+                        overlay.width, overlay.height,
+                    );
+                }
+                if self.debug_view != DebugView::Normal
+                    || !regions.iter().any(|region| region.output_index == overlay.output_index)
+                {
+                    Self::draw_debug_legend(
+                        &mut canvas, overlay.trace.as_ref(), self.debug_view,
+                        config, overlay.width,
+                    );
+                }
+            }
             write_all_at(&overlay.file, &overlay.pixels, 0)?;
             overlay.surface.attach(Some(&overlay.buffer), 0, 0);
             overlay.surface.damage(
@@ -600,6 +667,103 @@ impl WaylandHints {
         }
         self.flush()?;
         Ok(())
+    }
+
+    fn outcome_color(outcome: Outcome) -> Color {
+        match outcome {
+            Outcome::Accepted => Color::rgba(80, 255, 120, 255),
+            Outcome::InsufficientEdges => Color::rgba(100, 190, 255, 255),
+            Outcome::TooSmall => Color::rgba(255, 215, 70, 255),
+            Outcome::TooLarge => Color::rgba(255, 90, 90, 255),
+            Outcome::NestedOrDuplicate => Color::rgba(220, 130, 255, 255),
+        }
+    }
+
+    fn draw_diagnostics(
+        canvas: &mut Canvas<'_>,
+        trace: Option<&DetectionTrace>,
+        view: DebugView,
+        width: u32,
+        height: u32,
+    ) {
+        canvas.clear(Color::rgba(12, 16, 20, 240));
+        let Some(trace) = trace else { return };
+        let edge_color = if view == DebugView::Edges {
+            Color::rgba(210, 235, 255, 255)
+        } else {
+            Color::rgba(90, 100, 110, 255)
+        };
+        for y in 0..trace.height.min(height) {
+            for x in 0..trace.width.min(width) {
+                if trace.edges[(y * trace.width + x) as usize] != 0 {
+                    canvas.fill_rect(x as i32, y as i32, 1, 1, edge_color);
+                }
+            }
+        }
+        if view == DebugView::Components {
+            for component in &trace.components {
+                let rect = component.bounds;
+                canvas.stroke_rect(
+                    rect.x as i32, rect.y as i32, rect.width as i32, rect.height as i32,
+                    Self::outcome_color(component.outcome),
+                );
+            }
+        }
+    }
+
+    fn key_caption(key: K) -> String {
+        format!("{key:?}").trim_start_matches("KEY_").replace('_', " ")
+    }
+
+    fn draw_debug_legend(
+        canvas: &mut Canvas<'_>,
+        trace: Option<&DetectionTrace>,
+        view: DebugView,
+        config: &Hints,
+        width: u32,
+    ) {
+        let white = Color::rgba(255, 255, 255, 255);
+        let title = match view {
+            DebugView::Normal => "NO TARGETS",
+            DebugView::Edges => "EDGES AFTER HYSTERESIS",
+            DebugView::Components => "GROUPED COMPONENT BOUNDS",
+        };
+        let mut lines = vec![(title.to_owned(), white)];
+        if let Some(trace) = trace {
+            lines.push((format!("COMPONENTS {}  EDGE PIXELS {}",
+                trace.components.len(), trace.components.iter().map(|c| c.edge_pixels).sum::<usize>()), white));
+            for (outcome, label) in [
+                (Outcome::Accepted, "ACCEPTED"),
+                (Outcome::TooSmall, "TOO SMALL"),
+                (Outcome::TooLarge, "TOO LARGE"),
+                (Outcome::InsufficientEdges, "INSUFFICIENT EDGES"),
+                (Outcome::NestedOrDuplicate, "NESTED OR DUPLICATE"),
+            ] {
+                let count = trace.components.iter().filter(|c| c.outcome == outcome).count();
+                lines.push((format!("{label} {count}"), Self::outcome_color(outcome)));
+            }
+        } else {
+            lines.push(("CAPTURE UNAVAILABLE".to_owned(), white));
+        }
+        lines.push((format!("{} NEXT VIEW  ESC EXIT", Self::key_caption(config.keys.debug)), white));
+        lines.push((format!("HOLD {} TO PEEK", Self::key_caption(config.keys.toggle_background)), white));
+        if view != DebugView::Normal {
+            lines.push(("SELECTION PAUSED  SAME SNAPSHOT".to_owned(), white));
+        }
+        let longest = lines.iter().map(|(text, _)| text.len()).max().unwrap_or(1) as i32;
+        let scale = if longest * 12 + 16 <= width as i32 { 2 } else { 1 };
+        let columns = ((width as i32 - 16) / (6 * scale)).max(1) as usize;
+        let mut y = 8;
+        for (text, color) in lines {
+            // Key names and captions are ASCII; wrap even custom long key names.
+            for chunk in text.as_bytes().chunks(columns) {
+                let text = std::str::from_utf8(chunk).unwrap();
+                canvas.fill_rect(4, y - 3, (text.len() as i32 * 6 + 1) * scale + 8,
+                    10 * scale, Color::rgba(12, 16, 20, 255));
+                canvas.draw_text(8, y, text, scale, color);
+                y += 10 * scale;
+            }
+        }
     }
 
     fn click(&mut self, region: &HintRegion, click: ClickKind) -> Result<(), Box<dyn Error>> {
@@ -1356,6 +1520,11 @@ mod tests {
             );
             let oriented = transformed_size(capture.width, capture.height, output.transform);
             let count = regions.iter().filter(|(index, _)| *index == i).count();
+            let trace = overlay.trace.as_ref().expect("successful capture has diagnostics");
+            assert_eq!((trace.width, trace.height), (overlay.width, overlay.height));
+            assert_eq!(trace.components.iter().filter(|c| c.outcome == Outcome::Accepted).count(), count);
+            assert_eq!(trace.edges.len(), (overlay.width * overlay.height) as usize);
+            assert!(capture.file.is_none() && capture.buffer.is_none(), "raw capture resources retained");
             eprintln!(
                 "output {i}: mode={}x{}, capture={}x{}, oriented={}x{}, logical={}x{}, wl_scale={}, actual_scale={:.3}x{:.3}, transform={:?}, targets={count}",
                 output.pixel_width, output.pixel_height, capture.width, capture.height,
@@ -1752,6 +1921,95 @@ mod click_protocol_tests {
             vec![Sync(1), LayerDestroyed, SurfaceDestroyed, Sync(2)]
         );
         assert!(elapsed < INPUT_TIMEOUT * 3);
+    }
+
+    #[test]
+    fn debug_cycles_zero_targets_and_selection_without_clicking_and_peek_restores() {
+        for count in [0, 27] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let server = thread::spawn(move || serve(server, None));
+            let mut backend =
+                WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
+            backend.prepare_overlays().unwrap();
+            let config = crate::config::Config::parse(include_str!("../homerow.config")).unwrap();
+            let mut luma = vec![255; 640 * 480];
+            for index in 0..count {
+                let x = 10 + index % 9 * 60;
+                let y = 280 + index / 9 * 50;
+                for yy in y..y + 20 {
+                    for xx in x..x + 30 {
+                        luma[yy * 640 + xx] = 0;
+                    }
+                }
+            }
+            let detection = detect::detect_with_trace(&luma, 640, 480, 1.0, DetectionLimits::default());
+            assert_eq!(detection.regions.len(), count);
+            backend.state.overlays[0].trace = Some(detection.trace);
+            let mut hints = ActiveHints::from_capture(
+                &config.hints, ClickKind::Left,
+                LabelAlphabet::new(&config.hints.label_symbols).unwrap(),
+                backend, detection.regions.into_iter().map(|rect| (0, rect)).collect(),
+            ).unwrap();
+            if count > 0 {
+                hints.handle_key(K::KEY_A, 1, &config.hints).unwrap();
+            }
+            let selection = hints.selection.clone();
+            let normal = hints.backend.state.overlays[0].pixels.clone();
+            assert!(normal.iter().any(|byte| *byte != 0), "zero targets must still be visible");
+            for view in [DebugView::Edges, DebugView::Components] {
+                hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
+                hints.handle_key(config.hints.keys.debug, 2, &config.hints).unwrap();
+                assert_eq!(hints.backend.debug_view, view);
+                let visible = hints.backend.state.overlays[0].pixels.clone();
+                for key in [K::KEY_A, K::KEY_Z, K::KEY_BACKSPACE] {
+                    assert!(matches!(hints.handle_key(key, 1, &config.hints).unwrap(), HintResult::Continue));
+                }
+                assert_eq!(hints.selection, selection);
+                let mut input = crate::hint_input::HintInput::new(&config).unwrap();
+                input.begin([]);
+                let mut mode = Some(hints);
+                for (key, value) in [(K::KEY_S, 1), (K::KEY_D, 1)] {
+                    crate::handle_hint_input(input.key(key, value), &mut mode, &config);
+                }
+                assert!(mode.as_ref().unwrap().backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
+                crate::handle_hint_input(
+                    vec![crate::hint_input::HintInputEvent::Key(config.hints.keys.debug, 1)],
+                    &mut mode, &config,
+                );
+                assert_eq!(mode.as_ref().unwrap().backend.debug_view, view);
+                crate::handle_hint_input(input.key(K::KEY_S, 0), &mut mode, &config);
+                crate::handle_hint_input(input.key(K::KEY_D, 0), &mut mode, &config);
+                hints = mode.unwrap();
+                assert_eq!(hints.backend.debug_view, view);
+                assert_eq!(hints.backend.state.overlays[0].pixels, visible);
+                assert_eq!(hints.selection, selection);
+            }
+            hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
+            assert_eq!(hints.backend.debug_view, DebugView::Normal);
+            assert_eq!(hints.backend.state.overlays[0].pixels, normal);
+            if count == 0 {
+                for key in [K::KEY_A, K::KEY_BACKSPACE] {
+                    assert!(matches!(hints.handle_key(key, 1, &config.hints).unwrap(), HintResult::Continue));
+                }
+            }
+            hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
+            let mut mode = Some(hints);
+            crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Shortcut(ClickKind::Right)],
+                &mut mode, &config);
+            assert_eq!(mode.as_ref().unwrap().click_kind(), ClickKind::Right);
+            assert_eq!(mode.as_ref().unwrap().backend.debug_view, DebugView::Edges);
+            mode.as_mut().unwrap().backend.sync(INPUT_TIMEOUT).unwrap();
+            if count == 0 {
+                crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Key(K::KEY_ESC, 1)],
+                    &mut mode, &config);
+            } else {
+                crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Shortcut(ClickKind::Right)],
+                    &mut mode, &config);
+            }
+            assert!(mode.is_none());
+            let requests = server.join().unwrap();
+            assert!(!requests.iter().any(|request| matches!(request, Request::PointerCreated)));
+        }
     }
 
     #[test]

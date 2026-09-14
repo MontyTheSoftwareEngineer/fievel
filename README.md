@@ -1,17 +1,14 @@
 # fievel
 
-A Linux Rust application for keyboard-driven mouse control and configurable
-**home-row mods**. Keep your hands on the home row with modifier chords,
-navigation layers, and mouse movement, clicking, and scrolling.
-The optional [home-row profile](homerow.config) maps A+S to Super, S+D to Ctrl,
-and D+F to Free Mouse Mode, with timed Caps Lock navigation.
+Never touch the mouse again! A Linux application written in rust to replace 
+mouse movements with keyboard. Includes everythign that I needed to completely
+replace my mouse with keyboard. There is also an included key remapper that
+allows mapping combo's so that you can do home-row style mods on ANY keyboard,
+not just fancy programmable keyboards.
 
 Fievel reads all suitable keyboards through evdev by default and creates two uinput devices:
 `fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
-mouse events. Input handling works below X11/Wayland and does not require
-programmable keyboard firmware or a separate remapping tool.
-No keystrokes are saved or sent anywhere. The opt-in caster overlay holds only
-recent Free Mouse Mode control presses temporarily in memory.
+mouse events. 
 
 ## Quickstart
 
@@ -30,39 +27,29 @@ chmod +x fievel
 Hold **F3** and use **H/J/K/L** to move the mouse. Release F3 to type normally.
 Press **Ctrl+C** to stop. No config file is required to use the defaults.
 
-To customize quickly, download `fievel.config` from the source at the **same
-release tag** (the binary archive does not include it). From the directory
-containing the downloaded config and extracted binary, copy it to the default
-location, edit it, and rerun the binary:
+To customize quickly, copy `fievel.config` from the sources and copy to
+````sh
+~/.config/fievel/fievel.config
+````
+Kill all instances of fievel, and relaunch for it to re-read config file.
 
-```sh
-mkdir -p ~/.config/fievel
-cp -i fievel.config ~/.config/fievel/fievel.config
-nano ~/.config/fievel/fievel.config
-./fievel
-```
-
-Use your preferred editor instead of `nano` if needed. Stop any running fievel
-with Ctrl+C before restarting; config edits take effect on startup. Use the
-matching release's config to avoid settings unsupported by an older binary.
 See [Configuration](#configuration) for all settings.
-
-For home-row mods, download [`homerow.config`](homerow.config) from the same
-release tag and run `./fievel --config homerow.config` instead. See
-[Home-row mods and navigation layers](#home-row-mods-and-navigation-layers)
-for the bindings and timing behavior.
 
 ## Controls
 
-https://github.com/user-attachments/assets/cdcef352-618e-4b6a-afa2-5eb3f40cdee6
-
-By default, hold **F3** to enter **Free Mouse Mode** and release F3 to leave it.
-With `mode = "toggle"`, press F3 once to enter and again to leave.
+By default, hold **F3** (weird I know, but it was meant for me NOT to press it)
+to enter **Free Mouse Mode** and release F3 to leave it.
+This can be configured by setting `free_mouse = "f3"` to desired key (or chord).
+By default `mode = "hold"` meaning the Free Mouse Mode button needs to be held.
+With `mode = "toggle"`, you can press the Free Mouse Mode button once to enter
+Free Mouse Mode, and pressing it again will exit Free Mouse Mode.
 By default, a faint **fievel** rectangle remains at the bottom-left while Free
-Mouse Mode is active (Wayland/Hyprland/Sway; see [Mode indicator](#mode-indicator)).
+Mouse Mode is active. You can hide this by setting `notify = false`.
+
 Press **Super+Space** to enter hint mode for a left click or **Super+I** for a
 right click: fievel captures the visible wlroots output, draws labeled target
 boxes, and clicks as soon as you type a full label.
+
 Press the same activation shortcut again to cancel without clicking. Press the
 other shortcut to switch the click button without losing your selection.
 Hints have a dark grey fill by default. Hold **Left Ctrl** to temporarily hide
@@ -79,41 +66,12 @@ all hint boxes and labels; release to restore them.
 | S | Hold for fast movement and scrolling; release for normal speed |
 | A | Hold for slow movement and scrolling; release for normal speed |
 
-Movement and scrolling ease toward their configured speeds, independently of
-keyboard repeat. Movement has normalized diagonal target speeds (not faster
-than horizontal/vertical movement). Opposite directions cancel the target
-velocity. Releasing direction keys gently slows movement/scrolling to a stop;
-changing directions produces smooth turns. Scrolling uses high-resolution wheel
-events (1/120 notch) to ease smoothly from rest without an initial full-notch jump.
-Leaving Free Mouse Mode immediately stops movement/scrolling and releases both mouse buttons,
-even if Space or I is still held. F3 itself never reaches applications.
-Other keys work normally, including modifiers and Ctrl+C.
-Speed changes also ease toward the new target. Slow takes priority if A
-and S are both held; releasing A while S remains held returns to fast speed.
-These modifiers affect both pointer movement and scrolling, with separately
-configurable rates. Outside Free Mouse
-Mode, A and S type normally unless used in a configured modifier chord.
-All bindings and speeds can be changed in the config.
 
 Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
 Hold the configured scroll up+down keys together to send Home, or scroll
-left+right to send End, in either press order. Each chord sends one key tap, not autorepeats; release and
-repress either member to fire again. A jump immediately clears scrolling momentum
-on both axes and suppresses scrolling from all currently held scroll keys until
-they are released, so releasing the chord cannot scroll away from the page edge.
-Press a scroll key again after releasing it to resume normal scrolling.
-Set `home_end_enabled = false` to disable
-these shortcuts (opposite directions still cancel scrolling). Movement keys do
-not trigger these shortcuts. These are ordinary
-Home/End key events sent to the focused application; in text fields they may
-move the caret rather than scroll the page, and held modifiers still apply.
+left+right to send End, in either press order.
+Set `home_end_enabled = false` to disable these shortcuts.
 
-Mouse-control keys already held when F3 is pressed transfer to mouse control.
-Keys used in mouse mode stay suppressed until released, so leaving the mode
-does not accidentally type a held key. Bindings use Linux keycodes, not
-desktop-layout-translated characters. Native keyboard mappings are applied
-before mouse handling; while mouse mode is active, new mouse-control presses
-take precedence over those mappings.
 
 ## Build and run
 
@@ -341,6 +299,7 @@ left = "leftmeta + space"
 right = "leftmeta + i"
 cancel = "enter"
 toggle_background = "leftctrl"
+debug = "f8"
 ```
 
 All settings are optional; omitted values keep their defaults. If the default
@@ -404,6 +363,29 @@ The old `fill_color` setting is accepted for compatibility but no longer control
 hint rendering; use `readability_color` for the default fill.
 The hold key cannot use a hint-label
 letter, Escape, Backspace, or the configured cancel key.
+
+While hints are active, press **F8** to cycle **normal hints → snapshot edges →
+grouped component bounds → normal hints**. The diagnostic legend shows per-output
+counts and color-coded acceptance/rejection reasons: green accepted, yellow too
+small, red too large, blue insufficient edges, and purple nested/duplicate.
+Components are grouped using dilation, but their boxes bound the original edges.
+Even an output with no accepted targets has a visible no-targets/debug prompt.
+
+Debug views pause label selection and Backspace; returning to normal restores
+the typed prefix. Escape/cancel and activation shortcuts still exit or switch
+click mode. Ctrl (including remapped S+D) hides the **entire** diagnostic overlay
+while held and restores the same view on release. F8 is ignored while hidden.
+Customize the single key with `hints.keys.debug`; it cannot conflict with labels,
+Escape, Backspace, cancel, peek, or any mouse/hint activation chord member.
+Mappings that produce the debug key remain available inside hint mode.
+
+Diagnostics use the **same activation snapshot**, with no recapture, screenshot
+files, or uploads. Only an in-memory logical edge mask and component metadata
+are retained; debug starts off and its pixels are drawn on demand. This adds
+about one byte per logical pixel plus component metadata while hints are active.
+It is not live recognition: underlying windows can change after capture, and
+the top-left legend can cover some geometry. See
+[HINT-DETECTION.md](HINT-DETECTION.md#local-debug-view) for stages and limitations.
 Hint activation shortcuts are recognized after Fievel's remapping, so a
 home-row chord mapped to Super works with Space/I just like physical Super.
 While hints are active, re-press the same shortcut to cancel without clicking,
@@ -431,6 +413,9 @@ Captures are oriented and resampled to the compositor-configured logical output
 size; detection, overlay drawing and output-local clicks share those coordinates,
 including fractional scaling and rotated/flipped outputs. No screenshots are saved
 and no OpenCV runtime is required.
+
+See [How hint detection works](HINT-DETECTION.md) for the algorithm, exact
+filters, reasons targets can be missed, tuning options, and proposed improvements.
 
 ### Home-row mods and navigation layers
 

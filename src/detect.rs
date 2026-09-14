@@ -1,4 +1,4 @@
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Rect {
     pub x: u32,
     pub y: u32,
@@ -31,6 +31,36 @@ struct Component {
     edge_pixels: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Outcome {
+    Accepted,
+    InsufficientEdges,
+    TooSmall,
+    TooLarge,
+    NestedOrDuplicate,
+}
+
+#[derive(Clone, Debug)]
+pub struct DiagnosticComponent {
+    pub bounds: Rect,
+    pub edge_pixels: usize,
+    pub outcome: Outcome,
+}
+
+#[derive(Default)]
+pub struct DetectionTrace {
+    pub width: u32,
+    pub height: u32,
+    pub edges: Vec<u8>,
+    pub components: Vec<DiagnosticComponent>,
+}
+
+pub struct Detection {
+    pub regions: Vec<Rect>,
+    pub trace: DetectionTrace,
+}
+
+#[cfg(test)]
 pub fn detect_regions_from_luma(
     luma: &[u8],
     width: u32,
@@ -38,13 +68,23 @@ pub fn detect_regions_from_luma(
     scale: f64,
     limits: DetectionLimits,
 ) -> Vec<Rect> {
+    detect_with_trace(luma, width, height, scale, limits).regions
+}
+
+pub fn detect_with_trace(
+    luma: &[u8],
+    width: u32,
+    height: u32,
+    scale: f64,
+    limits: DetectionLimits,
+) -> Detection {
     if width == 0
         || height == 0
         || !scale.is_finite()
         || scale <= 0.0
         || luma.len() < (width as usize).saturating_mul(height as usize)
     {
-        return Vec::new();
+        return Detection { regions: Vec::new(), trace: DetectionTrace::default() };
     }
     // Work in logical pixels so morphology and size limits behave identically
     // on integer and fractional-scale outputs.
@@ -65,25 +105,46 @@ pub fn detect_regions_from_luma(
         logical_width as usize,
         logical_height as usize,
     );
-    let rects: Vec<Rect> = components
-        .into_iter()
-        .filter(|component| component.edge_pixels >= 8)
-        .map(|component| component.bounds)
-        .filter(|rect| {
-            let width = rect.width as f64;
-            let height = rect.height as f64;
-            width >= limits.min_width
-                && width <= limits.max_width
-                && height >= limits.min_height
-                && height <= limits.max_height
-        })
-        .collect();
-    let mut rects = filter_nested(rects, 1.0);
+    let (mut rects, components) = classify_components(components, limits);
     rects.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
-    rects
+    let regions = rects
         .into_iter()
         .map(|rect| map_rect(rect, logical_width, logical_height, width, height))
-        .collect()
+        .collect();
+    Detection {
+        regions,
+        trace: DetectionTrace { width: logical_width, height: logical_height, edges, components },
+    }
+}
+
+fn classify_components(
+    components: Vec<Component>,
+    limits: DetectionLimits,
+) -> (Vec<Rect>, Vec<DiagnosticComponent>) {
+    let mut components: Vec<_> = components.into_iter().map(|component| {
+        let rect = component.bounds;
+        let outcome = if component.edge_pixels < 8 {
+            Outcome::InsufficientEdges
+        } else if (rect.width as f64) < limits.min_width || (rect.height as f64) < limits.min_height {
+            Outcome::TooSmall
+        } else if rect.width as f64 > limits.max_width || rect.height as f64 > limits.max_height {
+            Outcome::TooLarge
+        } else {
+            Outcome::Accepted
+        };
+        DiagnosticComponent { bounds: rect, edge_pixels: component.edge_pixels, outcome }
+    }).collect();
+    let rects = filter_nested(
+        components.iter().filter(|c| c.outcome == Outcome::Accepted).map(|c| c.bounds).collect(),
+        1.0,
+    );
+    let mut accepted: std::collections::HashSet<_> = rects.iter().copied().collect();
+    for component in &mut components {
+        if component.outcome == Outcome::Accepted && !accepted.remove(&component.bounds) {
+            component.outcome = Outcome::NestedOrDuplicate;
+        }
+    }
+    (rects, components)
 }
 
 pub fn map_rect(rect: Rect, from_w: u32, from_h: u32, to_w: u32, to_h: u32) -> Rect {
@@ -340,6 +401,64 @@ fn center(rect: &Rect) -> (f64, f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn diagnostic_outcomes_follow_filter_order_and_deduplication() {
+        let component = |x, y, width, height, edge_pixels| Component {
+            bounds: Rect { x, y, width, height }, edge_pixels,
+        };
+        let (regions, trace) = classify_components(vec![
+            component(10, 10, 30, 30, 100),
+            component(20, 20, 10, 10, 30),
+            component(10, 10, 30, 30, 100),
+            component(100, 10, 2, 2, 7),
+            component(110, 10, 7, 10, 20),
+            component(150, 10, 500, 20, 1000),
+        ], DetectionLimits::default());
+        assert_eq!(trace.iter().map(|c| c.outcome).collect::<Vec<_>>(), [
+            Outcome::Accepted, Outcome::NestedOrDuplicate, Outcome::NestedOrDuplicate,
+            Outcome::InsufficientEdges, Outcome::TooSmall, Outcome::TooLarge,
+        ]);
+        assert_eq!(regions, [trace[0].bounds]);
+    }
+
+    #[test]
+    fn snapshot_edges_components_and_targets_are_consistent() {
+        let mut pixels = image(200, 120);
+        stroke_rect(&mut pixels, 200, 10, 10, 30, 20);
+        stroke_rect(&mut pixels, 200, 70, 10, 50, 70);
+        let detection = detect_with_trace(&pixels, 200, 120, 1.0, DetectionLimits::default());
+        let trace = detection.trace;
+        assert_eq!((trace.width, trace.height, trace.edges.len()), (200, 120, 24000));
+        assert_eq!(trace.edges.iter().map(|v| *v as usize).sum::<usize>(),
+            trace.components.iter().map(|c| c.edge_pixels).sum::<usize>());
+        assert_eq!(trace.components.len(), 2);
+        assert_eq!(detection.regions.len(), 1);
+        assert_eq!(trace.components.iter().filter(|c| c.outcome == Outcome::Accepted)
+            .map(|c| c.bounds).collect::<Vec<_>>(), detection.regions);
+        assert!(trace.components.iter().any(|c| c.outcome == Outcome::TooLarge));
+        let blank = detect_with_trace(&image(20, 20), 20, 20, 1.0, DetectionLimits::default());
+        assert!(blank.regions.is_empty());
+        assert!(blank.trace.components.is_empty());
+        assert_eq!(blank.trace.edges, vec![0; 400]);
+    }
+
+    #[test]
+    #[ignore = "synthetic activation timing; run in release mode with nocapture"]
+    fn diagnostic_snapshot_cost() {
+        let mut pixels = image(1920, 1080);
+        for y in (10..1000).step_by(40) {
+            for x in (10..1800).step_by(100) {
+                stroke_rect(&mut pixels, 1920, x, y, 70, 20);
+            }
+        }
+        let start = std::time::Instant::now();
+        let detection = detect_with_trace(&pixels, 1920, 1080, 1.0, DetectionLimits::default());
+        eprintln!("1920x1080 diagnostic detection {:?}; {} targets; retained mask {} bytes; component metadata {} bytes",
+            start.elapsed(), detection.regions.len(), detection.trace.edges.len(),
+            detection.trace.components.capacity() * std::mem::size_of::<DiagnosticComponent>());
+        assert_eq!(detection.regions.len(), 450);
+    }
 
     fn image(width: usize, height: usize) -> Vec<u8> {
         vec![255; width * height]

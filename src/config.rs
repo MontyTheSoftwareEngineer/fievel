@@ -247,6 +247,8 @@ pub struct HintKeys {
     pub cancel: K,
     #[serde(deserialize_with = "deserialize_key")]
     pub toggle_background: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub debug: K,
 }
 
 impl Default for HintKeys {
@@ -256,6 +258,7 @@ impl Default for HintKeys {
             right: vec![K::KEY_LEFTMETA, K::KEY_I],
             cancel: K::KEY_ENTER,
             toggle_background: K::KEY_LEFTCTRL,
+            debug: K::KEY_F8,
         }
     }
 }
@@ -391,6 +394,17 @@ impl Config {
             );
         }
         validate_limits(self.hints.min_width, self.hints.max_width, "width")?;
+        let debug = self.hints.keys.debug;
+        if [K::KEY_RESERVED, K::KEY_UNKNOWN, K::KEY_ESC, K::KEY_BACKSPACE,
+            self.hints.keys.cancel, toggle].contains(&debug)
+            || self.hints.keys.left.contains(&debug)
+            || self.hints.keys.right.contains(&debug)
+            || self.keys.free_mouse.contains(&debug)
+            || self.hints.label_symbols.chars()
+                .any(|symbol| parse_key(&symbol.to_string()) == Ok(debug))
+        {
+            return Err("hints.keys.debug conflicts with reserved, label, cancel, peek, or activation keys".to_owned());
+        }
         validate_limits(self.hints.min_height, self.hints.max_height, "height")?;
         let mut assigned = BTreeMap::new();
         for (name, key) in self.keys.named() {
@@ -496,6 +510,26 @@ fn validate_limits(min: u32, max: u32, axis: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn debug_key_defaults_customization_and_conflicts() {
+        assert_eq!(Config::parse("").unwrap().hints.keys.debug, K::KEY_F8);
+        assert_eq!(Config::parse("[hints.keys]\ndebug = 'f9'").unwrap().hints.keys.debug, K::KEY_F9);
+        for key in ["reserved", "unknown", "not-a-key", "esc", "enter", "backspace",
+            "leftctrl", "leftmeta", "space", "i", "z", "f3", "f8+f9"] {
+            assert!(Config::parse(&format!("[hints.keys]\ndebug = '{key}'")).is_err(), "{key}");
+        }
+        for text in [
+            "[hints.keys]\ndebug = 'f9'\ncancel = 'f9'",
+            "[hints.keys]\ndebug = 'f9'\ntoggle_background = 'f9'",
+            "[hints.keys]\ndebug = 'f9'\nleft = 'f9'",
+            "[hints.keys]\ndebug = 'f9'\nright = 'leftmeta+f9'",
+            "[hints.keys]\ndebugg = 'f9'",
+        ] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+        assert_eq!(Config::parse(include_str!("../fievel.config")).unwrap().hints.keys.debug, K::KEY_F8);
+    }
 
     #[test]
     fn example_matches_defaults() {
@@ -657,6 +691,7 @@ mod tests {
         assert_eq!(config.hints.keys.right, vec![K::KEY_LEFTMETA, K::KEY_I]);
         assert_eq!(config.hints.keys.cancel, K::KEY_ENTER);
         assert_eq!(config.hints.keys.toggle_background, K::KEY_LEFTCTRL);
+        assert_eq!(config.hints.keys.debug, K::KEY_F8);
         assert_eq!(config.hints.readability_color, Color::rgba(64, 64, 64, 230));
         assert_eq!(config.hints.label_symbols, "abcdefghijklmnopqrstuvwxyz");
         for text in [
