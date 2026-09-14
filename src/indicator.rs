@@ -98,7 +98,11 @@ impl Worker {
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => {
-                if !self.thread.as_ref().is_some_and(|thread| thread.is_finished()) {
+                if !self
+                    .thread
+                    .as_ref()
+                    .is_some_and(|thread| thread.is_finished())
+                {
                     eprintln!("fievel: indicator wakeup failed: {error}");
                 }
             }
@@ -491,10 +495,7 @@ mod tests {
             ] {
                 engine.key(key, value);
                 indicator.set_active(engine.active());
-                assert_eq!(
-                    shared.active.load(Ordering::SeqCst),
-                    engine.active(),
-                );
+                assert_eq!(shared.active.load(Ordering::SeqCst), engine.active(),);
             }
             engine.release_all();
             indicator.set_active(engine.active());
@@ -557,7 +558,13 @@ mod tests {
         for _ in 0..2 {
             indicator.set_active(true);
             thread::sleep(Duration::from_secs(2));
-            assert!(indicator.0.as_ref().unwrap().state.mapped.load(Ordering::SeqCst));
+            assert!(indicator
+                .0
+                .as_ref()
+                .unwrap()
+                .state
+                .mapped
+                .load(Ordering::SeqCst));
             assert!(!indicator
                 .0
                 .as_ref()
@@ -568,7 +575,13 @@ mod tests {
                 .is_finished());
             indicator.set_active(false);
             thread::sleep(Duration::from_secs(1));
-            assert!(!indicator.0.as_ref().unwrap().state.mapped.load(Ordering::SeqCst));
+            assert!(!indicator
+                .0
+                .as_ref()
+                .unwrap()
+                .state
+                .mapped
+                .load(Ordering::SeqCst));
         }
     }
 }

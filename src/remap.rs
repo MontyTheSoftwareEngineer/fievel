@@ -301,6 +301,44 @@ impl Remapper {
         })
     }
 
+    pub fn for_shortcuts(config: RemapConfig, keys: &[K]) -> Result<Self, String> {
+        fn relevant(action: &Action, keys: &[K], layers: &BTreeSet<String>) -> bool {
+            match action {
+                Action::Key(key) => keys.contains(key),
+                Action::Layer(name) => layers.contains(name),
+                Action::Timeout(short, _, held) => {
+                    relevant(short, keys, layers) || relevant(held, keys, layers)
+                }
+                Action::Mouse => false,
+            }
+        }
+
+        let mut remapper = Self::new(config)?;
+        let mut layers = BTreeSet::new();
+        loop {
+            let previous = layers.len();
+            for (name, mappings) in &remapper.config.layers {
+                if mappings
+                    .iter()
+                    .any(|mapping| relevant(&mapping.action, keys, &layers))
+                {
+                    layers.insert(name.clone());
+                }
+            }
+            if layers.len() == previous {
+                break;
+            }
+        }
+        remapper
+            .config
+            .main
+            .retain(|mapping| relevant(&mapping.action, keys, &layers));
+        for mappings in remapper.config.layers.values_mut() {
+            mappings.retain(|mapping| relevant(&mapping.action, keys, &layers));
+        }
+        Ok(remapper)
+    }
+
     pub fn set_mouse_controls(&mut self, keys: Vec<K>) {
         self.mouse_controls = keys.into_iter().collect();
     }
