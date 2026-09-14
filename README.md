@@ -129,9 +129,12 @@ fievel
 ```
 
 Use **Ctrl+C** to stop and release the keyboards. Escape passes through normally;
-Ctrl+Z exits rather than suspending. Restart fievel to pick up newly connected
-or reconnected keyboards. Unplugging one keyboard releases its held keys without
-interrupting the others; fievel exits if all selected keyboards disconnect.
+Ctrl+Z exits rather than suspending. In automatic mode, newly connected or
+reconnected keyboards are discovered about every two seconds in the background,
+without pausing typing or mouse updates. Unplugging one keyboard releases its
+held keys without interrupting the others; fievel waits for reconnection even
+if all keyboards disconnect. With `--device PATH`, fievel exits when that
+keyboard disconnects and must be restarted.
 No service is installed or started automatically.
 
 ### Movement odometer
