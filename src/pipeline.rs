@@ -1,16 +1,52 @@
-use std::time::Duration;
+use std::{collections::BTreeSet, time::Duration};
 
 use evdev::KeyCode;
 
 use crate::{
-    config::Config,
+    config::{Config, HintKeys},
     engine::{Engine, Output},
+    hints::ClickKind,
     remap::{Event, Remapper},
 };
 
 pub struct InputEngine {
     remapper: Remapper,
     mouse: Engine,
+    hints: HintActivation,
+}
+
+struct HintActivation {
+    keys: HintKeys,
+    held: BTreeSet<KeyCode>,
+    pending: Option<ClickKind>,
+}
+
+impl HintActivation {
+    fn key(&mut self, key: KeyCode, value: i32) -> bool {
+        let left_before = self.chord_held(&self.keys.left);
+        let right_before = self.chord_held(&self.keys.right);
+        match value {
+            1 => {
+                self.held.insert(key);
+            }
+            0 => {
+                self.held.remove(&key);
+            }
+            _ => return false,
+        }
+        if value == 1 {
+            if !left_before && self.chord_held(&self.keys.left) {
+                self.pending = Some(ClickKind::Left);
+            } else if !right_before && self.chord_held(&self.keys.right) {
+                self.pending = Some(ClickKind::Right);
+            }
+        }
+        self.pending.is_some()
+    }
+
+    fn chord_held(&self, chord: &[KeyCode]) -> bool {
+        chord.iter().all(|key| self.held.contains(key))
+    }
 }
 
 impl InputEngine {
@@ -19,6 +55,11 @@ impl InputEngine {
         remapper.set_mouse_controls(config.keys.controls().to_vec());
         Ok(Self {
             remapper,
+            hints: HintActivation {
+                keys: config.hints.keys.clone(),
+                held: BTreeSet::new(),
+                pending: None,
+            },
             mouse: Engine::new(config),
         })
     }
@@ -30,26 +71,59 @@ impl InputEngine {
     pub fn key(&mut self, key: KeyCode, value: i32) -> Output {
         let mut output = Output::default();
         let mouse = &mut self.mouse;
-        self.remapper
-            .key_with(key, value, &mut |event| dispatch(mouse, &mut output, event));
+        let hints = &mut self.hints;
+        self.remapper.key_with(key, value, &mut |event| {
+            dispatch(mouse, hints, &mut output, event)
+        });
+        self.clear_hint_inputs();
         output
     }
 
     pub fn advance(&mut self, elapsed: Duration) -> Output {
         let mut output = self.mouse.advance(elapsed);
         let mouse = &mut self.mouse;
-        self.remapper
-            .advance_with(elapsed, &mut |event| dispatch(mouse, &mut output, event));
+        let hints = &mut self.hints;
+        self.remapper.advance_with(elapsed, &mut |event| {
+            dispatch(mouse, hints, &mut output, event)
+        });
+        self.clear_hint_inputs();
         output
+    }
+
+    fn clear_hint_inputs(&mut self) {
+        if self.hints.pending.is_some() {
+            self.remapper.clear();
+            self.hints.held.clear();
+        }
+    }
+
+    pub fn take_hint_request(&mut self) -> Option<ClickKind> {
+        self.hints.pending.take()
     }
 
     pub fn release_all(&mut self) -> Output {
         self.remapper.clear();
+        self.hints.held.clear();
+        self.hints.pending = None;
         self.mouse.release_all()
     }
 }
 
-fn dispatch(mouse: &mut Engine, output: &mut Output, event: Event) -> bool {
+fn dispatch(
+    mouse: &mut Engine,
+    hints: &mut HintActivation,
+    output: &mut Output,
+    event: Event,
+) -> bool {
+    if hints.pending.is_some() {
+        return false;
+    }
+    if let Event::Key(key, value) = event {
+        if hints.key(key, value) {
+            append(output, mouse.release_all());
+            return false;
+        }
+    }
     append(
         output,
         match event {
@@ -72,8 +146,7 @@ mod tests {
     use evdev::{InputEvent, KeyCode as K, RelativeAxisCode as R};
 
     fn config() -> Config {
-        let mut config =
-            Config::parse(include_str!("../homerow.config")).unwrap();
+        let mut config = Config::parse(include_str!("../homerow.config")).unwrap();
         config.easing.movement = 0.0;
         config.easing.scroll = 0.0;
         config
@@ -84,6 +157,88 @@ mod tests {
             .iter()
             .map(|event| (K(event.code()), event.value()))
             .collect()
+    }
+
+    #[test]
+    fn physical_hint_shortcuts_release_modifiers_and_consume_completing_key() {
+        for (key, click) in [
+            (K::KEY_SPACE, ClickKind::Left),
+            (K::KEY_I, ClickKind::Right),
+        ] {
+            let mut engine = InputEngine::new(Config::default()).unwrap();
+            assert_eq!(
+                keys(&engine.key(K::KEY_LEFTMETA, 1).keyboard),
+                [(K::KEY_LEFTMETA, 1)]
+            );
+            let output = engine.key(key, 1);
+            assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
+            assert!(output.mouse.is_empty());
+            assert_eq!(engine.take_hint_request(), Some(click));
+            assert_eq!(engine.take_hint_request(), None);
+            assert!(!engine.active());
+            for (key, value) in [(key, 2), (key, 0), (K::KEY_LEFTMETA, 0)] {
+                engine.key(key, value);
+                assert_eq!(engine.take_hint_request(), None);
+            }
+        }
+    }
+
+    #[test]
+    fn remapped_super_enters_native_hints_instead_of_forwarding_desktop_shortcut() {
+        for (first, second) in [
+            (K::KEY_A, K::KEY_S),
+            (K::KEY_S, K::KEY_A),
+            (K::KEY_U, K::KEY_I),
+            (K::KEY_I, K::KEY_U),
+        ] {
+            let mut engine = InputEngine::new(config()).unwrap();
+            assert!(engine.key(first, 1).keyboard.is_empty());
+            assert_eq!(
+                keys(&engine.key(second, 1).keyboard),
+                [(K::KEY_LEFTMETA, 1)]
+            );
+            let output = engine.key(K::KEY_SPACE, 1);
+            assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
+            assert!(output.mouse.is_empty());
+            assert_eq!(engine.take_hint_request(), Some(ClickKind::Left));
+            for key in [first, second, K::KEY_SPACE] {
+                assert!(engine.key(key, 0).keyboard.is_empty());
+            }
+            assert_eq!(keys(&engine.key(K::KEY_Z, 1).keyboard), [(K::KEY_Z, 1)]);
+        }
+    }
+
+    #[test]
+    fn buffered_remapped_right_hint_shortcut_activates_on_timer() {
+        let mut engine = InputEngine::new(config()).unwrap();
+        engine.key(K::KEY_A, 1);
+        engine.key(K::KEY_S, 1);
+        assert!(engine.key(K::KEY_I, 1).keyboard.is_empty());
+        assert_eq!(engine.take_hint_request(), None);
+        let output = engine.advance(Duration::from_millis(30));
+        assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
+        assert_eq!(engine.take_hint_request(), Some(ClickKind::Right));
+        assert!(engine.release_all().keyboard.is_empty());
+    }
+
+    #[test]
+    fn hint_shortcuts_accept_reverse_order_and_custom_remapped_modifiers() {
+        let mut engine = InputEngine::new(Config::default()).unwrap();
+        engine.key(K::KEY_SPACE, 1);
+        let output = engine.key(K::KEY_LEFTMETA, 1);
+        assert_eq!(keys(&output.keyboard), [(K::KEY_SPACE, 0)]);
+        assert_eq!(engine.take_hint_request(), Some(ClickKind::Left));
+
+        let config =
+            Config::parse("[hints.keys]\nleft = 'leftctrl+space'\n[remap.main]\n'a+s' = 'ctrl'")
+                .unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        engine.key(K::KEY_A, 1);
+        engine.key(K::KEY_S, 1);
+        let output = engine.key(K::KEY_SPACE, 1);
+        assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTCTRL, 0)]);
+        engine.release_all();
+        assert_eq!(engine.take_hint_request(), None);
     }
 
     #[test]
