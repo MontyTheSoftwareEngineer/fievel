@@ -154,7 +154,7 @@ mod tests {
     use evdev::{InputEvent, KeyCode as K, RelativeAxisCode as R};
 
     fn config() -> Config {
-        let mut config = Config::parse(include_str!("../homerow.config")).unwrap();
+        let mut config = Config::parse(include_str!("../fievel.config")).unwrap();
         config.easing.movement = 0.0;
         config.easing.scroll = 0.0;
         config

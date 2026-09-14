@@ -169,7 +169,7 @@ mod tests {
     }
 
     fn home_row() -> HintInput {
-        HintInput::new(&Config::parse(include_str!("../homerow.config")).unwrap()).unwrap()
+        HintInput::new(&Config::parse(include_str!("../fievel.config")).unwrap()).unwrap()
     }
 
     fn press(input: &mut HintInput, keys: &[K]) -> Vec<HintInputEvent> {

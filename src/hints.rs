@@ -1931,7 +1931,7 @@ mod click_protocol_tests {
             let mut backend =
                 WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
             backend.prepare_overlays().unwrap();
-            let config = crate::config::Config::parse(include_str!("../homerow.config")).unwrap();
+            let config = crate::config::Config::parse(include_str!("../fievel.config")).unwrap();
             let mut luma = vec![255; 640 * 480];
             for index in 0..count {
                 let x = 10 + index % 9 * 60;

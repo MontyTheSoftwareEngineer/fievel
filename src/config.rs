@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn example_matches_defaults() {
+    fn example_matches_defaults_with_home_row_remappings() {
         let config = Config::parse(include_str!("../fievel.config")).unwrap();
         let default = Config::default();
         assert_eq!(config.mode, Mode::Hold);
@@ -544,6 +544,10 @@ mod tests {
         assert_eq!(config.keycast.timeout, 3.0);
         assert_eq!(config.keys.named(), default.keys.named());
         assert_eq!(config.hints, default.hints);
+        assert!(default.remap.main.is_empty());
+        assert!(default.remap.layers.is_empty());
+        assert_eq!(config.remap.main["d+f"], "free_mouse");
+        assert_eq!(config.remap.layers["nav"]["h"], "left");
         assert_eq!(config.easing.movement, 0.2);
         assert_eq!(config.easing.scroll, 0.3);
         for speeds in [
