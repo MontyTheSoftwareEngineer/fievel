@@ -55,11 +55,6 @@ impl Keycast {
         self.keys.clear();
         self.idle = Duration::ZERO;
     }
-
-    pub fn reset(&mut self) {
-        self.on = false;
-        self.clear();
-    }
 }
 
 #[cfg(test)]
@@ -106,8 +101,8 @@ mod tests {
         assert_eq!(caster.keys(), [K::KEY_L]);
         caster.advance(Duration::MAX);
         assert!(caster.keys().is_empty());
-        caster.reset();
+        caster.clear();
         caster.press(K::KEY_K);
-        assert!(caster.keys().is_empty());
+        assert_eq!(caster.keys(), [K::KEY_K]);
     }
 }

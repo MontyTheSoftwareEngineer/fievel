@@ -197,7 +197,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_hints_clears_keycast_and_mouse_mode() {
+    fn entering_hints_clears_history_and_mouse_mode_but_preserves_keycast_toggle() {
         for mode in ["hold", "toggle"] {
             let config = Config::parse(&format!(
                 "mode = '{mode}'\n[keycast]\nenabled = true",
@@ -221,6 +221,30 @@ mod tests {
             assert!(engine.keycast_keys().is_empty());
             assert_eq!(engine.speed_mode(), crate::engine::SpeedMode::Normal);
             assert!(engine.advance(Duration::from_millis(20)).mouse.is_empty());
+
+            engine.key(K::KEY_F3, 0);
+            engine.key(K::KEY_L, 0);
+            engine.key(K::KEY_S, 0);
+            engine.key(K::KEY_SPACE, 0);
+            engine.key(K::KEY_LEFTMETA, 0);
+            engine.key(K::KEY_F3, 1);
+            engine.key(K::KEY_L, 1);
+            assert_eq!(engine.keycast_keys(), [K::KEY_L]);
+
+            engine.key(K::KEY_ESC, 1);
+            engine.key(K::KEY_ESC, 0);
+            assert!(engine.keycast_keys().is_empty());
+            engine.key(K::KEY_LEFTMETA, 1);
+            engine.key(K::KEY_I, 1);
+            assert_eq!(engine.take_hint_request(), Some(ClickKind::Right));
+            assert!(!engine.active());
+            engine.key(K::KEY_F3, 0);
+            engine.key(K::KEY_L, 0);
+            engine.key(K::KEY_I, 0);
+            engine.key(K::KEY_LEFTMETA, 0);
+            engine.key(K::KEY_F3, 1);
+            engine.key(K::KEY_L, 1);
+            assert!(engine.keycast_keys().is_empty());
         }
     }
 

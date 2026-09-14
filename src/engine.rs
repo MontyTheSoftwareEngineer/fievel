@@ -412,7 +412,7 @@ impl Engine {
         self.scroll_reserved.clear();
         self.toggled = false;
         self.direct_mouse_held = false;
-        self.keycast.reset();
+        self.keycast.clear();
         self.reset_motion();
         out
     }
@@ -669,6 +669,12 @@ mod tests {
         assert!(e.keycast_keys().is_empty());
         e.key(K::KEY_F3, 1);
         e.key(K::KEY_K, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_K]);
+        e.key(K::KEY_ESC, 1);
+        assert!(e.keycast_keys().is_empty());
+        e.release_all();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
         assert!(e.keycast_keys().is_empty());
     }
 

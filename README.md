@@ -596,7 +596,8 @@ the oldest when full. The whole history clears after **3 seconds** without a
 new control press; `timeout` accepts seconds greater than zero and at most 60,
 including fractions. Long histories wrap. Toggling casting off or leaving Free
 Mouse Mode immediately clears the display. The casting toggle is remembered
-between Free Mouse Mode sessions, but starts off each time fievel launches.
+between Free Mouse Mode sessions, including when entering Hint Mode, until you
+toggle it off. It starts off each time fievel launches.
 
 The hotkey is a configurable single key and, when enabled, must differ from
 every mouse control and activation-chord member. It is consumed only in Free
