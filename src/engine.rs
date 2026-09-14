@@ -8,6 +8,14 @@ use crate::config::{Config, Mode};
 
 const WHEEL_UNITS_PER_NOTCH: i32 = 120;
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpeedMode {
+    #[default]
+    Normal,
+    Fast,
+    Slow,
+}
+
 #[derive(Default)]
 pub struct Output {
     pub keyboard: Vec<InputEvent>,
@@ -28,6 +36,7 @@ pub struct Engine {
     velocity: [f64; 2],
     scroll_velocity: [f64; 2],
     legacy_scroll: [i32; 2],
+    keycast: crate::keycast::Keycast,
     config: Config,
 }
 
@@ -47,6 +56,7 @@ impl Engine {
             velocity: [0.0; 2],
             scroll_velocity: [0.0; 2],
             legacy_scroll: [0; 2],
+            keycast: crate::keycast::Keycast::new(&config.keycast),
             config,
         }
     }
@@ -56,6 +66,10 @@ impl Engine {
             Mode::Hold => self.chord_held() || self.direct_mouse_held,
             Mode::Toggle => self.toggled,
         }
+    }
+
+    pub fn keycast_keys(&self) -> &[K] {
+        self.keycast.keys()
     }
 
     fn chord_held(&self) -> bool {
@@ -83,12 +97,20 @@ impl Engine {
     }
 
     fn mode_speed(&self, normal: f64, slow: f64, fast: f64) -> f64 {
+        match self.speed_mode() {
+            SpeedMode::Normal => normal,
+            SpeedMode::Fast => fast,
+            SpeedMode::Slow => slow,
+        }
+    }
+
+    pub fn speed_mode(&self) -> SpeedMode {
         if self.active() && self.control_held(self.config.keys.slow) {
-            slow
+            SpeedMode::Slow
         } else if self.active() && self.control_held(self.config.keys.fast) {
-            fast
+            SpeedMode::Fast
         } else {
-            normal
+            SpeedMode::Normal
         }
     }
 
@@ -151,6 +173,7 @@ impl Engine {
         let was_active = self.active();
         let was_chord_held = self.chord_held();
         let was_direct_held = self.direct_mouse_held;
+        let fresh_press = matches!(input, Input::Key(key, 1) if !self.held.contains(&key));
         match input {
             Input::Key(key, 0) => {
                 self.held.remove(&key);
@@ -184,7 +207,7 @@ impl Engine {
 
         if self.active() && !was_active {
             // Transfer already-held controls from the keyboard to the mouse.
-            for control in self.config.keys.controls() {
+            for control in self.config.mouse_controls() {
                 if self.forwarded.remove(&control) {
                     out.keyboard.push(key_event(control, 0));
                 }
@@ -195,9 +218,19 @@ impl Engine {
         }
 
         if let Input::Key(key, value) = input {
+            let keycast_hotkey = self.config.keycast.enabled && key == self.config.keycast.hotkey;
+            if fresh_press && was_active && keycast_hotkey {
+                self.keycast.toggle();
+            } else if fresh_press
+                && self.active()
+                && self.config.keys.controls().contains(&key)
+                && !self.activation_keys.contains(&key)
+            {
+                self.keycast.press(key);
+            }
             let consume = self.config.keys.free_mouse.as_slice() == [key]
                 || self.suppressed.contains(&key)
-                || (self.active() && self.config.keys.controls().contains(&key));
+                || (self.active() && (self.config.keys.controls().contains(&key) || keycast_hotkey));
             if consume {
                 if value == 0 {
                     self.suppressed.remove(&key);
@@ -257,6 +290,7 @@ impl Engine {
 
         if !self.active() {
             self.reset_motion();
+            self.keycast.clear();
         }
         if instant(self.config.easing.movement) && self.motion_direction() != old_motion {
             self.motion = [0.0; 2];
@@ -276,6 +310,7 @@ impl Engine {
     }
 
     pub fn advance(&mut self, elapsed: Duration) -> Output {
+        self.keycast.advance(elapsed);
         let mut out = Output::default();
         // Do not jump across the screen after a suspended or stalled process.
         let seconds = elapsed.min(Duration::from_millis(50)).as_secs_f64();
@@ -364,6 +399,7 @@ impl Engine {
         self.scroll_reserved.clear();
         self.toggled = false;
         self.direct_mouse_held = false;
+        self.keycast.reset();
         self.reset_motion();
         out
     }
@@ -472,6 +508,215 @@ mod tests {
         config.easing.movement = 0.0;
         config.easing.scroll = 0.0;
         config
+    }
+
+    #[test]
+    fn speed_mode_tracks_custom_bindings_releases_and_slow_priority() {
+        let mut config = instant_config();
+        config.keys.fast = K::KEY_F8;
+        config.keys.slow = K::KEY_F9;
+        let mut e = Engine::new(config);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_F8, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_F3, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Fast);
+        e.key(K::KEY_F9, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Slow);
+        e.key(K::KEY_F9, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::Fast);
+        e.key(K::KEY_F8, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_F9, 1);
+        e.key(K::KEY_F3, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+    }
+
+    #[test]
+    fn speed_mode_excludes_reserved_activation_keys() {
+        let mut config = instant_config();
+        config.keys.free_mouse = vec![K::KEY_LEFTALT, K::KEY_S];
+        let mut e = Engine::new(config);
+        e.key(K::KEY_LEFTALT, 1);
+        e.key(K::KEY_S, 1);
+        assert!(e.active());
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_A, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Slow);
+    }
+
+    #[test]
+    fn keycast_is_opt_in_and_hotkey_passes_through_outside_mouse_mode() {
+        for enabled in [false, true] {
+            let mut config = instant_config();
+            config.keycast.enabled = enabled;
+            let mut e = Engine::new(config);
+            for value in [1, 2, 0] {
+                assert_eq!(
+                    events(&e.key(K::KEY_ESC, value).keyboard),
+                    events(&[key_event(K::KEY_ESC, value)]),
+                );
+            }
+            e.key(K::KEY_F3, 1);
+            for value in [1, 2, 0] {
+                let out = e.key(K::KEY_ESC, value);
+                if enabled {
+                    assert!(out.keyboard.is_empty());
+                } else {
+                    assert_eq!(
+                        events(&out.keyboard),
+                        events(&[key_event(K::KEY_ESC, value)]),
+                    );
+                }
+            }
+            e.key(K::KEY_K, 1);
+            assert_eq!(
+                e.keycast_keys(),
+                if enabled { &[K::KEY_K][..] } else { &[] },
+            );
+        }
+    }
+
+    #[test]
+    fn keycast_shows_only_control_presses_without_affecting_mouse_actions() {
+        for mode in [Mode::Hold, Mode::Toggle] {
+            let mut config = instant_config();
+            config.mode = mode;
+            config.keycast.enabled = true;
+            config.keycast.max_keys = 32;
+            let controls = config.keys.controls();
+            let mut e = Engine::new(config.clone());
+            config.keycast.enabled = false;
+            let mut baseline = Engine::new(config);
+            e.key(K::KEY_F3, 1);
+            baseline.key(K::KEY_F3, 1);
+            e.key(K::KEY_ESC, 1);
+            // Repeated downs and Linux autorepeats must not toggle or add entries.
+            e.key(K::KEY_ESC, 1);
+            e.key(K::KEY_ESC, 2);
+            e.key(K::KEY_ESC, 0);
+            for key in controls {
+                for value in [1, 1, 2, 0] {
+                    let actual = e.key(key, value);
+                    let expected = baseline.key(key, value);
+                    assert_eq!(events(&actual.keyboard), events(&expected.keyboard));
+                    assert_eq!(events(&actual.mouse), events(&expected.mouse));
+                }
+            }
+            assert_eq!(e.keycast_keys(), controls);
+            assert_eq!(
+                events(&e.key(K::KEY_Q, 1).keyboard),
+                events(&[key_event(K::KEY_Q, 1)]),
+            );
+            e.key(K::KEY_Q, 0);
+            assert_eq!(e.keycast_keys(), controls);
+            e.advance(Duration::from_secs(3));
+            assert!(e.keycast_keys().is_empty());
+            e.key(K::KEY_K, 1);
+            e.key(K::KEY_L, 1);
+            assert_eq!(e.keycast_keys(), [K::KEY_K, K::KEY_L]);
+            let movement = e.advance(Duration::from_millis(20));
+            assert!(movement.mouse.iter().any(|event| {
+                event.code() == R::REL_X.0 && event.value() > 0
+            }));
+            assert!(movement.mouse.iter().any(|event| {
+                event.code() == R::REL_Y.0 && event.value() < 0
+            }));
+            e.key(K::KEY_ESC, 1);
+            assert!(e.active());
+            assert!(e.keycast_keys().is_empty());
+        }
+    }
+
+    #[test]
+    fn keycast_clears_on_exit_keeps_toggle_and_suppresses_hotkey_until_release() {
+        let mut config = instant_config();
+        config.keycast.enabled = true;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_K, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_K]);
+        e.key(K::KEY_F3, 0);
+        assert!(e.keycast_keys().is_empty());
+        assert!(e.key(K::KEY_ESC, 2).keyboard.is_empty());
+        assert!(e.key(K::KEY_ESC, 0).keyboard.is_empty());
+        assert!(e.key(K::KEY_K, 0).keyboard.is_empty());
+        e.key(K::KEY_L, 1);
+        e.key(K::KEY_L, 0);
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_L]);
+        e.release_all();
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_K, 1);
+        assert!(e.keycast_keys().is_empty());
+    }
+
+    #[test]
+    fn keycast_hotkey_held_before_activation_does_not_toggle_or_stick() {
+        let mut config = instant_config();
+        config.keycast.enabled = true;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_ESC, 1);
+        assert_eq!(
+            events(&e.key(K::KEY_F3, 1).keyboard),
+            events(&[key_event(K::KEY_ESC, 0)]),
+        );
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_ESC, 2);
+        assert!(e.key(K::KEY_ESC, 0).keyboard.is_empty());
+        e.key(K::KEY_K, 1);
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_L, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_L]);
+    }
+
+    #[test]
+    fn keycast_repeat_release_and_typing_do_not_extend_timeout() {
+        let mut config = instant_config();
+        config.keycast.enabled = true;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_ESC, 0);
+        e.key(K::KEY_K, 1);
+        e.advance(Duration::from_secs(2));
+        e.key(K::KEY_K, 1);
+        e.key(K::KEY_K, 2);
+        e.key(K::KEY_K, 0);
+        e.key(K::KEY_Q, 1);
+        e.key(K::KEY_Q, 0);
+        assert_eq!(e.keycast_keys(), [K::KEY_K]);
+        e.advance(Duration::from_secs(1));
+        assert!(e.keycast_keys().is_empty());
+    }
+
+    #[test]
+    fn keycast_never_records_activation_chord_members() {
+        let mut config = instant_config();
+        config.mode = Mode::Toggle;
+        config.keycast.enabled = true;
+        config.keys.free_mouse = vec![K::KEY_LEFTALT, K::KEY_SPACE];
+        let mut e = Engine::new(config);
+        e.key(K::KEY_LEFTALT, 1);
+        e.key(K::KEY_SPACE, 1);
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_ESC, 0);
+        e.key(K::KEY_SPACE, 0);
+        e.key(K::KEY_SPACE, 1);
+        assert!(!e.active());
+        e.key(K::KEY_SPACE, 0);
+        e.key(K::KEY_SPACE, 1);
+        assert!(e.active());
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_LEFTALT, 0);
+        e.key(K::KEY_SPACE, 0);
+        e.key(K::KEY_SPACE, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_SPACE]);
     }
 
     #[test]

@@ -16,7 +16,7 @@ pub struct InputEngine {
 impl InputEngine {
     pub fn new(config: Config) -> Result<Self, String> {
         let mut remapper = Remapper::new(config.remap.clone())?;
-        remapper.set_mouse_controls(config.keys.controls().to_vec());
+        remapper.set_mouse_controls(config.mouse_controls());
         Ok(Self {
             remapper,
             mouse: Engine::new(config),
@@ -25,6 +25,14 @@ impl InputEngine {
 
     pub fn active(&self) -> bool {
         self.mouse.active()
+    }
+
+    pub fn keycast_keys(&self) -> &[KeyCode] {
+        self.mouse.keycast_keys()
+    }
+
+    pub fn speed_mode(&self) -> crate::engine::SpeedMode {
+        self.mouse.speed_mode()
     }
 
     pub fn key(&mut self, key: KeyCode, value: i32) -> Output {
@@ -84,6 +92,35 @@ mod tests {
             .iter()
             .map(|event| (K(event.code()), event.value()))
             .collect()
+    }
+
+    #[test]
+    fn keycast_custom_hotkey_bypasses_remappings_only_in_free_mouse_mode() {
+        let config = Config::parse(
+            "[keycast]\nenabled = true\nhotkey = 'f8'\n\
+             [keys]\nup = 'u'\n\
+             [remap.main]\n'd+f' = 'free_mouse'\nf8 = 'escape'\nu = 'left'",
+        ).unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        assert_eq!(keys(&engine.key(K::KEY_F8, 1).keyboard), [(K::KEY_ESC, 1)]);
+        assert_eq!(keys(&engine.key(K::KEY_F8, 0).keyboard), [(K::KEY_ESC, 0)]);
+        engine.key(K::KEY_D, 1);
+        engine.key(K::KEY_F, 1);
+        assert!(engine.active());
+        assert!(engine.key(K::KEY_F8, 1).keyboard.is_empty());
+        assert!(engine.key(K::KEY_F8, 0).keyboard.is_empty());
+        assert!(engine.key(K::KEY_U, 1).keyboard.is_empty());
+        engine.key(K::KEY_L, 1);
+        assert_eq!(engine.keycast_keys(), [K::KEY_U, K::KEY_L]);
+        engine.key(K::KEY_U, 0);
+        engine.advance(Duration::from_secs(3));
+        assert!(engine.keycast_keys().is_empty());
+        engine.key(K::KEY_U, 1);
+        assert_eq!(engine.keycast_keys(), [K::KEY_U]);
+        engine.key(K::KEY_D, 0);
+        assert!(!engine.active());
+        assert!(engine.keycast_keys().is_empty());
+        engine.release_all();
     }
 
     #[test]
