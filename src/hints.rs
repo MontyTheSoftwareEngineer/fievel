@@ -58,7 +58,7 @@ struct HintRegion {
 
 #[derive(Default)]
 struct HintBackground {
-    visible: bool,
+    hidden: bool,
 }
 
 impl HintBackground {
@@ -66,20 +66,12 @@ impl HintBackground {
         if key != config.keys.toggle_background || !matches!(value, 0 | 1) {
             return false;
         }
-        let visible = value == 1;
-        if self.visible == visible {
+        let hidden = value == 1;
+        if self.hidden == hidden {
             return false;
         }
-        self.visible = visible;
+        self.hidden = hidden;
         true
-    }
-
-    fn color(&self, config: &Hints) -> Color {
-        if self.visible {
-            config.readability_color
-        } else {
-            config.fill_color
-        }
     }
 }
 
@@ -125,7 +117,7 @@ impl ActiveHints {
         }
         backend.create_overlays(config, &regions)?;
         let background = HintBackground::default();
-        backend.redraw(config, &regions, &selection, background.color(config))?;
+        backend.redraw(config, &regions, &selection, background.hidden)?;
         Ok(Self {
             alphabet,
             selection,
@@ -149,7 +141,7 @@ impl ActiveHints {
                     config,
                     &self.regions,
                     &self.selection,
-                    self.background.color(config),
+                    self.background.hidden,
                 )?;
             }
             return Ok(HintResult::Continue);
@@ -161,6 +153,9 @@ impl ActiveHints {
             self.cancel();
             return Ok(HintResult::Cancelled);
         }
+        if self.background.hidden {
+            return Ok(HintResult::Continue);
+        }
         if key == K::KEY_BACKSPACE {
             if !self.selection.backspace() {
                 self.cancel();
@@ -170,7 +165,7 @@ impl ActiveHints {
                 config,
                 &self.regions,
                 &self.selection,
-                self.background.color(config),
+                self.background.hidden,
             )?;
             return Ok(HintResult::Continue);
         }
@@ -192,7 +187,7 @@ impl ActiveHints {
                     config,
                     &self.regions,
                     &self.selection,
-                    self.background.color(config),
+                    self.background.hidden,
                 )?;
             }
             AppendResult::Full | AppendResult::Overflow => {}
@@ -427,7 +422,7 @@ impl WaylandHints {
             config,
             regions,
             &LabelSelection::new(LabelAlphabet::new(&config.label_symbols)?, regions.len()),
-            config.fill_color,
+            false,
         )
     }
 
@@ -538,7 +533,7 @@ impl WaylandHints {
         config: &Hints,
         regions: &[HintRegion],
         selection: &LabelSelection,
-        fill_color: Color,
+        hidden: bool,
     ) -> Result<(), Box<dyn Error>> {
         for overlay in &mut self.state.overlays {
             if overlay.closed
@@ -552,7 +547,10 @@ impl WaylandHints {
             let mut canvas = Canvas::new(&mut overlay.pixels, overlay.width, overlay.height);
             canvas.clear(Color::rgba(0, 0, 0, 0));
             for (index, region) in regions.iter().enumerate() {
-                if region.output_index != overlay.output_index || !selection.matches_index(index) {
+                if hidden
+                    || region.output_index != overlay.output_index
+                    || !selection.matches_index(index)
+                {
                     continue;
                 }
                 let rect = region.rect;
@@ -561,7 +559,7 @@ impl WaylandHints {
                     rect.y as i32,
                     rect.width as i32,
                     rect.height as i32,
-                    fill_color,
+                    config.readability_color,
                 );
                 canvas.stroke_rect(
                     rect.x as i32,
@@ -1178,24 +1176,24 @@ mod tests {
     fn background_is_held_and_only_changes_on_transitions() {
         let config = Hints::default();
         let mut background = HintBackground::default();
-        assert_eq!(background.color(&config), config.fill_color);
+        assert!(!background.hidden);
         assert!(!background.handle_key(K::KEY_LEFTCTRL, 0, &config));
         assert!(!background.handle_key(K::KEY_LEFTCTRL, 2, &config));
         assert!(!background.handle_key(K::KEY_RIGHTCTRL, 1, &config));
         assert!(background.handle_key(K::KEY_LEFTCTRL, 1, &config));
-        assert_eq!(background.color(&config), config.readability_color);
+        assert!(background.hidden);
         for value in [1, 2, 2, -1] {
             assert!(!background.handle_key(K::KEY_LEFTCTRL, value, &config));
-            assert_eq!(background.color(&config), config.readability_color);
+            assert!(background.hidden);
         }
         assert!(!background.handle_key(K::KEY_RIGHTCTRL, 0, &config));
         assert!(background.handle_key(K::KEY_LEFTCTRL, 0, &config));
-        assert_eq!(background.color(&config), config.fill_color);
+        assert!(!background.hidden);
         assert!(!background.handle_key(K::KEY_LEFTCTRL, 0, &config));
         assert!(!background.handle_key(K::KEY_LEFTCTRL, 2, &config));
         assert!(background.handle_key(K::KEY_LEFTCTRL, 1, &config));
-        assert_eq!(background.color(&config), config.readability_color);
-        assert!(!HintBackground::default().visible);
+        assert!(background.hidden);
+        assert!(!HintBackground::default().hidden);
     }
 
     #[test]
@@ -1206,9 +1204,11 @@ mod tests {
         let mut background = HintBackground::default();
         assert!(!background.handle_key(K::KEY_LEFTCTRL, 1, &config));
         assert!(background.handle_key(K::KEY_RIGHTCTRL, 1, &config));
+        assert!(background.hidden);
+        assert!(background.handle_key(K::KEY_RIGHTCTRL, 0, &config));
         let mut pixels = vec![0; 20 * 20 * 4];
         let mut canvas = Canvas::new(&mut pixels, 20, 20);
-        canvas.fill_rect(1, 1, 18, 18, background.color(&config));
+        canvas.fill_rect(1, 1, 18, 18, config.readability_color);
         canvas.stroke_rect(1, 1, 18, 18, Color::rgba(0, 255, 0, 255));
         canvas.draw_text(5, 5, "a", 1, Color::rgba(255, 255, 255, 255));
         assert_eq!(
@@ -1218,8 +1218,7 @@ mod tests {
         assert_eq!(&pixels[(20 + 1) * 4..(20 + 2) * 4], &[0, 255, 0, 255],);
         assert!(pixels.chunks_exact(4).any(|pixel| pixel == [255; 4]));
         assert_eq!(&pixels[..4], &[0; 4]);
-        assert!(background.handle_key(K::KEY_RIGHTCTRL, 0, &config));
-        assert_eq!(background.color(&config), config.fill_color);
+        assert!(!background.hidden);
     }
 
     #[test]
@@ -1449,6 +1448,7 @@ mod tests {
         };
         let mut backend = WaylandHints::connect().unwrap();
         backend.capture_regions(&config).unwrap();
+        let unobscured = screenshot(&mut backend);
         let alphabet = LabelAlphabet::new(&config.label_symbols).unwrap();
         let selection = LabelSelection::new(alphabet.clone(), 1);
         let regions = vec![HintRegion {
@@ -1483,26 +1483,10 @@ mod tests {
         // Probe known logical positions, not merely any repainted screen pixels.
         for (x, y) in [(45, 45), (235, 45), (45, 95), (235, 95)] {
             let index = y * width + x;
-            assert!((i32::from(initial[index]) - 149).abs() <= 3);
-            assert!((i32::from(held[index]) - 64).abs() <= 3);
-            assert!((i32::from(restored[index]) - 149).abs() <= 3);
+            assert!((i32::from(initial[index]) - 64).abs() <= 3);
+            assert!((i32::from(held[index]) - i32::from(unobscured[index])).abs() <= 3);
+            assert!((i32::from(restored[index]) - 64).abs() <= 3);
         }
-        let repainted = initial
-            .iter()
-            .zip(&held)
-            .zip(&restored)
-            .filter(|((before, on), after)| {
-                **before > 120
-                    && **before < 170
-                    && **on >= 61
-                    && **on <= 67
-                    && (i32::from(**after) - i32::from(**before)).abs() <= 3
-            })
-            .count();
-        assert!(
-            repainted > 1000,
-            "expected visible green/grey/green repaint, got {repainted} pixels",
-        );
     }
 }
 
@@ -1771,18 +1755,18 @@ mod click_protocol_tests {
     }
 
     #[test]
-    fn background_release_repaints_and_repeated_events_do_not_redraw_or_select() {
+    fn peek_hold_hides_entire_overlay_and_restores_prefix_without_selecting() {
         let (client, server) = UnixStream::pair().unwrap();
         let server = thread::spawn(move || serve(server, None));
         let mut backend =
             WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
         backend.prepare_overlays().unwrap();
         let mut config = Hints::default();
-        config.keys.toggle_background = K::KEY_A;
+        config.keys.toggle_background = K::KEY_F6;
         config.fill_color = Color::rgba(0, 255, 0, 255);
         config.readability_color = Color::rgba(64, 64, 64, 255);
         let alphabet = LabelAlphabet::new(&config.label_symbols).unwrap();
-        let selection = LabelSelection::new(alphabet.clone(), 1);
+        let selection = LabelSelection::new(alphabet.clone(), 27);
         let mut hints = ActiveHints {
             alphabet,
             regions: vec![HintRegion {
@@ -1801,6 +1785,10 @@ mod click_protocol_tests {
             background: HintBackground::default(),
             backend,
         };
+        hints.handle_key(K::KEY_A, 1, &config).unwrap();
+        let prefix = hints.selection.split_index(0).unwrap();
+        let initial_pixels = hints.backend.state.overlays[0].pixels.clone();
+        assert!(initial_pixels.iter().any(|byte| *byte != 0));
         let probe = (12 * 640 + 12) * 4;
         for (value, visible, redraw) in [
             (1, true, true),
@@ -1812,21 +1800,35 @@ mod click_protocol_tests {
         ] {
             hints.backend.state.overlays[0].pixels[probe..probe + 4].copy_from_slice(&[1, 2, 3, 4]);
             assert!(matches!(
-                hints.handle_key(K::KEY_A, value, &config).unwrap(),
+                hints.handle_key(K::KEY_F6, value, &config).unwrap(),
                 HintResult::Continue
             ));
-            assert_eq!(hints.background.visible, visible);
+            assert_eq!(hints.background.hidden, visible);
             let expected = if !redraw {
                 [1, 2, 3, 4]
             } else if visible {
-                [64, 64, 64, 255]
+                [0; 4]
             } else {
-                [0, 255, 0, 255]
+                [64, 64, 64, 255]
             };
             assert_eq!(
                 hints.backend.state.overlays[0].pixels[probe..probe + 4],
                 expected
             );
+            if visible && redraw {
+                assert!(hints.backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
+                for key in [K::KEY_A, K::KEY_BACKSPACE] {
+                    assert!(matches!(
+                        hints.handle_key(key, 1, &config).unwrap(),
+                        HintResult::Continue
+                    ));
+                }
+                assert!(hints.backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
+            }
+            assert_eq!(hints.selection.split_index(0).unwrap(), prefix);
+            if !visible && redraw {
+                assert_eq!(hints.backend.state.overlays[0].pixels, initial_pixels);
+            }
         }
         hints.cancel();
         hints.backend.sync(INPUT_TIMEOUT).unwrap();

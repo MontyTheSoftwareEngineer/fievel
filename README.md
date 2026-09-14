@@ -65,7 +65,8 @@ right click: fievel captures the visible wlroots output, draws labeled target
 boxes, and clicks as soon as you type a full label.
 Press the same activation shortcut again to cancel without clicking. Press the
 other shortcut to switch the click button without losing your selection.
-Hold **Left Ctrl** for a more opaque background behind hint text; release to hide it.
+Hints have a dark grey fill by default. Hold **Left Ctrl** to temporarily hide
+all hint boxes and labels; release to restore them.
 
 | Key while Free Mouse Mode is active | Action |
 | --- | --- |
@@ -388,16 +389,20 @@ hints are visible, letter keys matching `label_symbols` extend the current
 selection, Backspace deletes one character (or cancels when empty), Enter cancels
 by default, and Escape always cancels. Any matching full label immediately warps
 the pointer to that region's center and emits the configured left or right click.
-`border_color` and `fill_color` control the target box, while `label_color` and
+`border_color` and `readability_color` control the target box, while `label_color` and
 `label_highlight_color` control the untyped and already-typed label text.
-Hold **Left Ctrl** while hints are visible for a more opaque grey fill
-inside the boxes, behind the text. Release it to restore the normal fill.
-The background is hidden unless this key is held. Set
+Hint boxes use the darker grey fill by default. Hold **Left Ctrl** to temporarily
+hide the entire overlay (fills, borders, and labels) so the underlying screen
+is unobstructed. Release it to restore the same hints and typed prefix, without
+recapturing the screen. Letter selection and Backspace are paused while hidden;
+Escape, cancellation, and activation shortcuts remain available. Set
 `hints.readability_color` (`#RRGGBB` or `#RRGGBBAA`, including opacity) and
 `hints.keys.toggle_background` to customize the color and hold key
 (for example, `"rightctrl"`). The existing setting name is retained for config
-compatibility; its behavior is now hold-to-show, not toggle. Autorepeat has no effect.
-The background preserves typed letters and filtering, and cannot use a hint-label
+compatibility; its behavior is now hold-to-hide, not toggle. Autorepeat has no effect.
+The old `fill_color` setting is accepted for compatibility but no longer controls
+hint rendering; use `readability_color` for the default fill.
+The hold key cannot use a hint-label
 letter, Escape, Backspace, or the configured cancel key.
 Hint activation shortcuts are recognized after Fievel's remapping, so a
 home-row chord mapped to Super works with Space/I just like physical Super.
@@ -409,8 +414,8 @@ No compositor keybinding is needed; remove old Super+Space/Super+I bindings
 that launch wl-kbptr to avoid opening its separate overlay when Fievel is not
 handling input. While hints are active, remappings needed for the activation
 shortcuts or readability hold key are applied. For example, holding S+D mapped
-to Ctrl shows the grey background; releasing either key hides it. If another
-Ctrl-producing key or chord is still held, the background stays visible until
+to Ctrl hides the hints; releasing either key restores them. If another
+Ctrl-producing key or chord is still held, the hints stay hidden until
 the last one is released. Ordinary navigation and mouse remappings do not replace
 hint letters. Partial shortcut chords use `remap.chord_timeout`, so a letter
 shared with a shortcut may wait briefly before appearing. Escape and the cancel
