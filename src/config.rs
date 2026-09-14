@@ -12,6 +12,7 @@ pub struct Config {
     pub speeds: Speeds,
     pub easing: Easing,
     pub keys: Keys,
+    pub keycast: Keycast,
     pub hints: Hints,
     pub remap: crate::remap::RemapConfig,
 }
@@ -25,8 +26,30 @@ impl Default for Config {
             speeds: Speeds::default(),
             easing: Easing::default(),
             keys: Keys::default(),
+            keycast: Keycast::default(),
             hints: Hints::default(),
             remap: crate::remap::RemapConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Keycast {
+    pub enabled: bool,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub hotkey: K,
+    pub max_keys: usize,
+    pub timeout: f64,
+}
+
+impl Default for Keycast {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            hotkey: K::KEY_ESC,
+            max_keys: 8,
+            timeout: 3.0,
         }
     }
 }
@@ -288,6 +311,14 @@ pub fn validate_speed(speed: f64) -> Result<(), String> {
 }
 
 impl Config {
+    pub fn mouse_controls(&self) -> Vec<K> {
+        let mut controls = self.keys.controls().to_vec();
+        if self.keycast.enabled {
+            controls.push(self.keycast.hotkey);
+        }
+        controls
+    }
+
     pub fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
         let config: Self = toml::from_str(text)?;
         config.validate()?;
@@ -308,6 +339,20 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), String> {
         self.remap.validate()?;
+        if !(1..=32).contains(&self.keycast.max_keys) {
+            return Err("keycast.max_keys: must be between 1 and 32".to_owned());
+        }
+        if !self.keycast.timeout.is_finite()
+            || self.keycast.timeout <= 0.0
+            || self.keycast.timeout > 60.0
+        {
+            return Err("keycast.timeout: must be finite, greater than zero, and at most 60 seconds".to_owned());
+        }
+        if self.keycast.enabled
+            && self.keys.named().iter().any(|(_, key)| *key == self.keycast.hotkey)
+        {
+            return Err("keycast.hotkey must differ from Free Mouse Mode activation and control keys".to_owned());
+        }
         for (name, value) in [
             ("movement", self.easing.movement),
             ("scroll", self.easing.scroll),
@@ -459,6 +504,10 @@ mod tests {
         assert_eq!(config.mode, Mode::Hold);
         assert!(config.notify);
         assert!(config.home_end_enabled);
+        assert!(!config.keycast.enabled);
+        assert_eq!(config.keycast.hotkey, K::KEY_ESC);
+        assert_eq!(config.keycast.max_keys, 8);
+        assert_eq!(config.keycast.timeout, 3.0);
         assert_eq!(config.keys.named(), default.keys.named());
         assert_eq!(config.hints, default.hints);
         assert_eq!(config.easing.movement, 0.2);
@@ -475,6 +524,31 @@ mod tests {
             assert_eq!(speeds.scroll_slow, 1.5);
             assert_eq!(speeds.scroll_fast, 24.0);
         }
+    }
+
+    #[test]
+    fn keycast_configuration_and_validation() {
+        let config = Config::parse(
+            "[keycast]\nenabled = true\nhotkey = 'F8'\nmax_keys = 6\ntimeout = 2.5",
+        ).unwrap();
+        assert!(config.keycast.enabled);
+        assert_eq!(config.keycast.hotkey, K::KEY_F8);
+        assert_eq!(config.keycast.max_keys, 6);
+        assert_eq!(config.keycast.timeout, 2.5);
+        assert!(config.mouse_controls().contains(&K::KEY_F8));
+        assert!(!Config::default().mouse_controls().contains(&K::KEY_ESC));
+        for text in [
+            "enabled = 'true'", "hotkey = 'not-a-key'", "hotkey = 'a+b'",
+            "max_keys = 0", "max_keys = 33", "max_keys = -1",
+            "timeout = 0", "timeout = -1", "timeout = 61",
+            "timeout = nan", "timeout = inf", "timout = 3",
+            "enabled = true\nhotkey = 'h'", "enabled = true\nhotkey = 'f3'",
+        ] {
+            assert!(Config::parse(&format!("[keycast]\n{text}")).is_err(), "{text}");
+        }
+        assert!(Config::parse(
+            "[keys]\nfree_mouse = 'leftalt+space'\n[keycast]\nenabled = true\nhotkey = 'leftalt'"
+        ).is_err());
     }
 
     #[test]

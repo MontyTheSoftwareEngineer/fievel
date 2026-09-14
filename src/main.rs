@@ -5,6 +5,7 @@ mod font;
 mod hint_input;
 mod hints;
 mod indicator;
+mod keycast;
 mod label;
 mod odometer;
 mod pipeline;
@@ -19,7 +20,7 @@ use evdev::{
 };
 use hint_input::{HintInput, HintInputEvent};
 use hints::{ActiveHints, HintResult};
-use indicator::Indicator;
+use indicator::Overlays as Indicator;
 use pipeline::InputEngine as Engine;
 use std::{
     error::Error,
@@ -343,7 +344,7 @@ fn attach_new_keyboards(
         for key in keys.iter() {
             if held.key(index, key, 1) {
                 outputs.emit(engine.key(key, 1))?;
-                indicator.set_active(engine.active());
+                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
             }
         }
         inputs.push((path, device));
@@ -412,7 +413,11 @@ fn validate_input_keys(
     config: &Config,
 ) -> Result<(), String> {
     let remapped_outputs = config.remap.output_keys()?;
-    for (action, key) in config.keys.named() {
+    let mut bindings = config.keys.named();
+    if config.keycast.enabled {
+        bindings.push(("keycast.hotkey", config.keycast.hotkey));
+    }
+    for (action, key) in bindings {
         if !supported.contains(key) && !remapped_outputs.contains(&key) {
             return Err(format!(
                 "Selected keyboards do not support {action} = {key:?}; choose another input or binding"
@@ -544,7 +549,7 @@ fn event_loop(
         let now = Instant::now();
         if hint_mode.is_none() {
             outputs.emit(engine.advance(now.duration_since(last)))?;
-            indicator.set_active(engine.active());
+            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
             activate_pending_hints(engine, &mut hint_mode, &mut hint_input, held, config);
         } else {
             let actions = hint_input.advance(now.duration_since(last));
@@ -574,7 +579,7 @@ fn event_loop(
                         }
                         if changed {
                             outputs.emit(engine.key(key, value))?;
-                            indicator.set_active(engine.active());
+                            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
                             activate_pending_hints(
                                 engine,
                                 &mut hint_mode,
@@ -617,7 +622,7 @@ fn event_loop(
                         outputs.emit(engine.key(key, 0))?;
                     }
                 }
-                indicator.set_active(engine.active());
+                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
                 if inputs.is_empty() && scanner.is_none() {
                     return Err(io::Error::other(
                         "All keyboards disconnected; restart fievel after reconnecting",
@@ -751,7 +756,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         format!("Cannot create uinput devices: {error}. Check /dev/uinput access")
     })?;
     outputs.odometer = odometer.counter.clone();
-    let mut indicator = Indicator::new(config.notify);
+    let mut indicator = Indicator::new(config.notify, config.keycast.enabled);
     // Keep discovery alive outside the loop so shutdown releases input before
     // waiting for an in-flight scan to finish.
     let mut scanner = KeyboardScanner::default();
@@ -809,7 +814,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             for key in input.get_key_state()?.iter() {
                 if held.key(index, key, 1) {
                     outputs.emit(engine.key(key, 1))?;
-                    indicator.set_active(engine.active());
+                    indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
                 }
             }
         }
@@ -824,7 +829,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             if explicit { None } else { Some(&mut scanner) },
         )
     })();
-    indicator.set_active(false);
+    indicator.clear();
     let release = outputs.emit(engine.release_all());
     let mut ungrab = Ok(());
     for (path, input) in &mut grabbed {
@@ -862,6 +867,30 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keycast_hotkey_capability_is_required_only_when_enabled() {
+        let mut config = Config::default();
+        let mut supported: AttributeSet<KeyCode> = config
+            .keys
+            .named()
+            .into_iter()
+            .map(|(_, key)| key)
+            .chain(config.hints.keys.left.iter().copied())
+            .chain(config.hints.keys.right.iter().copied())
+            .chain([
+                config.hints.keys.cancel,
+                config.hints.keys.toggle_background,
+            ])
+            .collect();
+        assert!(validate_input_keys(&supported, &config).is_ok());
+        config.keycast.enabled = true;
+        assert!(validate_input_keys(&supported, &config)
+            .unwrap_err()
+            .contains("keycast.hotkey"));
+        supported.insert(config.keycast.hotkey);
+        assert!(validate_input_keys(&supported, &config).is_ok());
+    }
 
     #[test]
     fn slow_keyboard_discovery_does_not_block_or_queue_more_scans() {

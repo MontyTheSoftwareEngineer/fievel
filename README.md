@@ -10,7 +10,8 @@ Fievel reads all suitable keyboards through evdev by default and creates two uin
 `fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
 mouse events. Input handling works below X11/Wayland and does not require
 programmable keyboard firmware or a separate remapping tool.
-No keystrokes are recorded or sent anywhere.
+No keystrokes are saved or sent anywhere. The opt-in caster overlay holds only
+recent Free Mouse Mode control presses temporarily in memory.
 
 ## Quickstart
 
@@ -134,7 +135,8 @@ sudo install -m 755 target/release/fievel /usr/local/bin/fievel
 fievel
 ```
 
-Use **Ctrl+C** to stop and release the keyboards. Escape passes through normally;
+Use **Ctrl+C** to stop and release the keyboards. Escape passes through normally
+unless configured as the enabled [caster hotkey](#caster-mode-keycast) in Free Mouse Mode;
 Ctrl+Z exits rather than suspending. In automatic mode, newly connected or
 reconnected keyboards are discovered about every two seconds in the background,
 without pausing typing or mouse updates. Unplugging one keyboard releases its
@@ -315,6 +317,12 @@ scroll_right = "."
 slow = "a"
 fast = "s"
 
+[keycast]
+enabled = false # Opt in to the caster hotkey; casting starts off
+hotkey = "esc"
+max_keys = 8
+timeout = 3 # Seconds of inactivity
+
 [hints]
 label_symbols = "abcdefghijklmnopqrstuvwxyz"
 border_color = "#00ff00e0"
@@ -354,7 +362,7 @@ be held together, in either press order; extra held keys do not prevent
 activation. For a buffered home-row activation chord such as D+F, use a
 `free_mouse` action in `[remap.main]` as shown below.
 The top-level `mode`, `notify`, and `home_end_enabled` settings must appear before any table
-(`[speeds]`, `[easing]`, or `[keys]`).
+(`[speeds]`, `[easing]`, `[keys]`, `[keycast]`, or `[hints]`).
 `"hold"` activates mouse mode only while every activation key is down; releasing
 any chord member leaves the mode. `"toggle"` switches it on/off each time the
 whole chord becomes held; releases and keyboard autorepeat do not toggle it.
@@ -560,6 +568,49 @@ sudo, pass your own config explicitly so it does not look in root's home:
 sudo ./target/release/fievel --config "$HOME/.config/fievel/fievel.config"
 ```
 
+## Caster mode (keycast)
+
+Enable keycast in your configuration, then restart fievel:
+
+```toml
+[keycast]
+enabled = true
+hotkey = "esc"
+max_keys = 8
+timeout = 3
+```
+
+While Free Mouse Mode is active, press **Escape** to toggle casting on or off.
+Then press **K** and **L** to move up-right: `K L` appears at the bottom-right.
+The display shows your configured movement, click, scroll, and speed-control
+bindings in press order, including the scroll keys used for Home/End shortcuts.
+It does not show activation keys, the caster hotkey, normal typing, key releases,
+or keyboard autorepeat. Releasing and pressing a control again adds another entry.
+Bindings are Linux keycode labels, not desktop-layout-translated text.
+The displayed keys are **white** at normal speed, **green** in fast mode, and
+**yellow** in slow mode. The whole history updates as you press or release your
+configured speed keys; slow takes priority when both are held.
+
+`max_keys` keeps the newest **8** presses by default (allowed: 1-32), removing
+the oldest when full. The whole history clears after **3 seconds** without a
+new control press; `timeout` accepts seconds greater than zero and at most 60,
+including fractions. Long histories wrap. Toggling casting off or leaving Free
+Mouse Mode immediately clears the display. The casting toggle is remembered
+between Free Mouse Mode sessions, including when entering Hint Mode, until you
+toggle it off. It starts off each time fievel launches.
+
+The hotkey is a configurable single key and, when enabled, must differ from
+every mouse control and activation-chord member. It is consumed only in Free
+Mouse Mode and takes precedence over native remappings there; outside the mode
+it behaves normally. A hotkey held while leaving the mode remains suppressed
+until released. `enabled = false` (the default) disables the feature completely.
+
+The overlay is click-through, never takes focus, and uses the same Wayland
+layer-shell requirements and compositor-selected monitor behavior as the
+[mode indicator](#mode-indicator). It works independently of `notify`, so you can
+use `notify = false` with keycast enabled. Display failures warn without
+interrupting keyboard or mouse control. No history is written to disk.
+
 ## Mode indicator
 
 `notify = true` (the default) enables a persistent graphical indicator, **not**
@@ -597,8 +648,9 @@ sudo --preserve-env=WAYLAND_DISPLAY,XDG_RUNTIME_DIR ./target/release/fievel \
 ```
 
 Socket access still depends on local permissions and sudo policy. Set the
-top-level `notify = false` for headless operation: no display connection or worker
-is created. `--list` and `--check-config` never initialize the indicator either.
+top-level `notify = false` and leave `keycast.enabled = false` for headless
+operation: no display connection or worker is created. `--list` and
+`--check-config` never initialize either overlay.
 
 ## Disable desktop pointer acceleration
 
