@@ -2,11 +2,19 @@ use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
+use crate::config::{Config, Mode};
 use KeyCode as K;
 use RelativeAxisCode as R;
-use crate::config::{Config, Mode};
 
 const WHEEL_UNITS_PER_NOTCH: i32 = 120;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpeedMode {
+    #[default]
+    Normal,
+    Fast,
+    Slow,
+}
 
 #[derive(Default)]
 pub struct Output {
@@ -16,6 +24,7 @@ pub struct Output {
 
 pub struct Engine {
     toggled: bool,
+    direct_mouse_held: bool,
     held: BTreeSet<K>,
     forwarded: BTreeSet<K>,
     suppressed: BTreeSet<K>,
@@ -27,6 +36,7 @@ pub struct Engine {
     velocity: [f64; 2],
     scroll_velocity: [f64; 2],
     legacy_scroll: [i32; 2],
+    keycast: crate::keycast::Keycast,
     config: Config,
 }
 
@@ -34,6 +44,7 @@ impl Engine {
     pub fn new(config: Config) -> Self {
         Self {
             toggled: false,
+            direct_mouse_held: false,
             held: BTreeSet::new(),
             forwarded: BTreeSet::new(),
             suppressed: BTreeSet::new(),
@@ -45,19 +56,28 @@ impl Engine {
             velocity: [0.0; 2],
             scroll_velocity: [0.0; 2],
             legacy_scroll: [0; 2],
+            keycast: crate::keycast::Keycast::new(&config.keycast),
             config,
         }
     }
 
     pub fn active(&self) -> bool {
         match self.config.mode {
-            Mode::Hold => self.chord_held(),
+            Mode::Hold => self.chord_held() || self.direct_mouse_held,
             Mode::Toggle => self.toggled,
         }
     }
 
+    pub fn keycast_keys(&self) -> &[K] {
+        self.keycast.keys()
+    }
+
     fn chord_held(&self) -> bool {
-        self.config.keys.free_mouse.iter().all(|key| self.held.contains(key))
+        self.config
+            .keys
+            .free_mouse
+            .iter()
+            .all(|key| self.held.contains(key))
     }
 
     fn control_held(&self, key: K) -> bool {
@@ -81,12 +101,20 @@ impl Engine {
     }
 
     fn mode_speed(&self, normal: f64, slow: f64, fast: f64) -> f64 {
+        match self.speed_mode() {
+            SpeedMode::Normal => normal,
+            SpeedMode::Fast => fast,
+            SpeedMode::Slow => slow,
+        }
+    }
+
+    pub fn speed_mode(&self) -> SpeedMode {
         if self.active() && self.control_held(self.config.keys.slow) {
-            slow
+            SpeedMode::Slow
         } else if self.active() && self.control_held(self.config.keys.fast) {
-            fast
+            SpeedMode::Fast
         } else {
-            normal
+            SpeedMode::Normal
         }
     }
 
@@ -131,8 +159,16 @@ impl Engine {
     }
 
     pub fn key(&mut self, key: K, value: i32) -> Output {
+        self.input(Input::Key(key, value))
+    }
+
+    pub fn mouse(&mut self, down: bool) -> Output {
+        self.input(Input::Mouse(down))
+    }
+
+    fn input(&mut self, input: Input) -> Output {
         let mut out = Output::default();
-        if !(0..=2).contains(&value) {
+        if matches!(input, Input::Key(_, value) if !(0..=2).contains(&value)) {
             return out; // Ignore values outside the Linux EV_KEY protocol.
         }
         let old_motion = self.motion_direction();
@@ -140,22 +176,28 @@ impl Engine {
         let old_home_end = self.home_end_chords();
         let was_active = self.active();
         let was_chord_held = self.chord_held();
-        match value {
-            0 => {
+        let was_direct_held = self.direct_mouse_held;
+        let fresh_press = matches!(input, Input::Key(key, 1) if !self.held.contains(&key));
+        match input {
+            Input::Key(key, 0) => {
                 self.held.remove(&key);
                 self.activation_keys.remove(&key);
                 self.scroll_reserved.remove(&key);
             }
-            1 => {
+            Input::Key(key, 1) => {
                 self.held.insert(key);
             }
+            Input::Mouse(down) => self.direct_mouse_held = down,
             _ => {}
         }
 
-        if !was_chord_held && self.chord_held() {
-            if self.config.mode == Mode::Toggle {
-                self.toggled = !self.toggled;
-            }
+        let chord_pressed = !was_chord_held && self.chord_held();
+        if (chord_pressed || (!was_direct_held && self.direct_mouse_held))
+            && self.config.mode == Mode::Toggle
+        {
+            self.toggled = !self.toggled;
+        }
+        if chord_pressed {
             // Release forwarded chord members (especially modifiers) and reserve
             // them until key-up, so activation cannot also click, move, or scroll.
             for member in &self.config.keys.free_mouse {
@@ -169,7 +211,7 @@ impl Engine {
 
         if self.active() && !was_active {
             // Transfer already-held controls from the keyboard to the mouse.
-            for control in self.config.keys.controls() {
+            for control in self.config.mouse_controls() {
                 if self.forwarded.remove(&control) {
                     out.keyboard.push(key_event(control, 0));
                 }
@@ -179,29 +221,41 @@ impl Engine {
             }
         }
 
-        let consume = self.config.keys.free_mouse.as_slice() == [key]
-            || self.suppressed.contains(&key)
-            || (self.active() && self.config.keys.controls().contains(&key));
-        if consume {
-            if value == 0 {
-                self.suppressed.remove(&key);
-                if self.forwarded.remove(&key) {
-                    out.keyboard.push(key_event(key, 0));
+        if let Input::Key(key, value) = input {
+            let keycast_hotkey = self.config.keycast.enabled && key == self.config.keycast.hotkey;
+            if fresh_press && was_active && keycast_hotkey {
+                self.keycast.toggle();
+            } else if fresh_press
+                && self.active()
+                && self.config.keys.controls().contains(&key)
+                && !self.activation_keys.contains(&key)
+            {
+                self.keycast.press(key);
+            }
+            let consume = self.config.keys.free_mouse.as_slice() == [key]
+                || self.suppressed.contains(&key)
+                || (self.active() && (self.config.keys.controls().contains(&key) || keycast_hotkey));
+            if consume {
+                if value == 0 {
+                    self.suppressed.remove(&key);
+                    if self.forwarded.remove(&key) {
+                        out.keyboard.push(key_event(key, 0));
+                    }
+                } else {
+                    self.suppressed.insert(key);
                 }
             } else {
-                self.suppressed.insert(key);
-            }
-        } else {
-            match value {
-                1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
-                0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
-                2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
-                _ => {}
+                match value {
+                    1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
+                    0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
+                    2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
+                    _ => {}
+                }
             }
         }
 
         for (index, down) in self.home_end_chords().into_iter().enumerate() {
-            if value == 1 && down && !old_home_end[index] {
+            if input.is_press() && down && !old_home_end[index] {
                 // A page jump must not be followed by coasting or by the remaining
                 // scroll key when the chord is released one member at a time.
                 self.reset_scroll();
@@ -240,6 +294,7 @@ impl Engine {
 
         if !self.active() {
             self.reset_motion();
+            self.keycast.clear();
         }
         if instant(self.config.easing.movement) && self.motion_direction() != old_motion {
             self.motion = [0.0; 2];
@@ -259,6 +314,7 @@ impl Engine {
     }
 
     pub fn advance(&mut self, elapsed: Duration) -> Output {
+        self.keycast.advance(elapsed);
         let mut out = Output::default();
         // Do not jump across the screen after a suspended or stalled process.
         let seconds = elapsed.min(Duration::from_millis(50)).as_secs_f64();
@@ -291,12 +347,20 @@ impl Engine {
                 target,
                 self.config.easing.scroll,
                 seconds,
-                if stepped { 1.0 } else { 1.0 / f64::from(WHEEL_UNITS_PER_NOTCH) },
+                if stepped {
+                    1.0
+                } else {
+                    1.0 / f64::from(WHEEL_UNITS_PER_NOTCH)
+                },
             );
             if amount != 0 {
                 self.emit_scroll(
                     axis,
-                    if stepped { amount * WHEEL_UNITS_PER_NOTCH } else { amount },
+                    if stepped {
+                        amount * WHEEL_UNITS_PER_NOTCH
+                    } else {
+                        amount
+                    },
                     &mut out,
                 );
             }
@@ -311,7 +375,8 @@ impl Engine {
         let notches = self.legacy_scroll[axis] / WHEEL_UNITS_PER_NOTCH;
         self.legacy_scroll[axis] %= WHEEL_UNITS_PER_NOTCH;
         if notches != 0 {
-            out.mouse.push(relative_event([R::REL_HWHEEL, R::REL_WHEEL][axis], notches));
+            out.mouse
+                .push(relative_event([R::REL_HWHEEL, R::REL_WHEEL][axis], notches));
         }
         out.mouse.push(relative_event(
             [R::REL_HWHEEL_HI_RES, R::REL_WHEEL_HI_RES][axis],
@@ -346,8 +411,22 @@ impl Engine {
         self.activation_keys.clear();
         self.scroll_reserved.clear();
         self.toggled = false;
+        self.direct_mouse_held = false;
+        self.keycast.clear();
         self.reset_motion();
         out
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Input {
+    Key(K, i32),
+    Mouse(bool),
+}
+
+impl Input {
+    fn is_press(self) -> bool {
+        matches!(self, Self::Key(_, 1) | Self::Mouse(true))
     }
 }
 
@@ -418,7 +497,11 @@ mod tests {
             (EventType::RELATIVE.0, axis.0, notches),
             (
                 EventType::RELATIVE.0,
-                if axis == R::REL_WHEEL { R::REL_WHEEL_HI_RES.0 } else { R::REL_HWHEEL_HI_RES.0 },
+                if axis == R::REL_WHEEL {
+                    R::REL_WHEEL_HI_RES.0
+                } else {
+                    R::REL_HWHEEL_HI_RES.0
+                },
                 notches * WHEEL_UNITS_PER_NOTCH,
             ),
         ]
@@ -442,6 +525,221 @@ mod tests {
         config.easing.movement = 0.0;
         config.easing.scroll = 0.0;
         config
+    }
+
+    #[test]
+    fn speed_mode_tracks_custom_bindings_releases_and_slow_priority() {
+        let mut config = instant_config();
+        config.keys.fast = K::KEY_F8;
+        config.keys.slow = K::KEY_F9;
+        let mut e = Engine::new(config);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_F8, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_F3, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Fast);
+        e.key(K::KEY_F9, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Slow);
+        e.key(K::KEY_F9, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::Fast);
+        e.key(K::KEY_F8, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_F9, 1);
+        e.key(K::KEY_F3, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+    }
+
+    #[test]
+    fn speed_mode_excludes_reserved_activation_keys() {
+        let mut config = instant_config();
+        config.keys.free_mouse = vec![K::KEY_LEFTALT, K::KEY_S];
+        let mut e = Engine::new(config);
+        e.key(K::KEY_LEFTALT, 1);
+        e.key(K::KEY_S, 1);
+        assert!(e.active());
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        e.key(K::KEY_A, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::Slow);
+    }
+
+    #[test]
+    fn keycast_is_opt_in_and_hotkey_passes_through_outside_mouse_mode() {
+        for enabled in [false, true] {
+            let mut config = instant_config();
+            config.keycast.enabled = enabled;
+            let mut e = Engine::new(config);
+            for value in [1, 2, 0] {
+                assert_eq!(
+                    events(&e.key(K::KEY_ESC, value).keyboard),
+                    events(&[key_event(K::KEY_ESC, value)]),
+                );
+            }
+            e.key(K::KEY_F3, 1);
+            for value in [1, 2, 0] {
+                let out = e.key(K::KEY_ESC, value);
+                if enabled {
+                    assert!(out.keyboard.is_empty());
+                } else {
+                    assert_eq!(
+                        events(&out.keyboard),
+                        events(&[key_event(K::KEY_ESC, value)]),
+                    );
+                }
+            }
+            e.key(K::KEY_K, 1);
+            assert_eq!(
+                e.keycast_keys(),
+                if enabled { &[K::KEY_K][..] } else { &[] },
+            );
+        }
+    }
+
+    #[test]
+    fn keycast_shows_only_control_presses_without_affecting_mouse_actions() {
+        for mode in [Mode::Hold, Mode::Toggle] {
+            let mut config = instant_config();
+            config.mode = mode;
+            config.keycast.enabled = true;
+            config.keycast.max_keys = 32;
+            let controls = config.keys.controls();
+            let mut e = Engine::new(config.clone());
+            config.keycast.enabled = false;
+            let mut baseline = Engine::new(config);
+            e.key(K::KEY_F3, 1);
+            baseline.key(K::KEY_F3, 1);
+            e.key(K::KEY_ESC, 1);
+            // Repeated downs and Linux autorepeats must not toggle or add entries.
+            e.key(K::KEY_ESC, 1);
+            e.key(K::KEY_ESC, 2);
+            e.key(K::KEY_ESC, 0);
+            for key in controls {
+                for value in [1, 1, 2, 0] {
+                    let actual = e.key(key, value);
+                    let expected = baseline.key(key, value);
+                    assert_eq!(events(&actual.keyboard), events(&expected.keyboard));
+                    assert_eq!(events(&actual.mouse), events(&expected.mouse));
+                }
+            }
+            assert_eq!(e.keycast_keys(), controls);
+            assert_eq!(
+                events(&e.key(K::KEY_Q, 1).keyboard),
+                events(&[key_event(K::KEY_Q, 1)]),
+            );
+            e.key(K::KEY_Q, 0);
+            assert_eq!(e.keycast_keys(), controls);
+            e.advance(Duration::from_secs(3));
+            assert!(e.keycast_keys().is_empty());
+            e.key(K::KEY_K, 1);
+            e.key(K::KEY_L, 1);
+            assert_eq!(e.keycast_keys(), [K::KEY_K, K::KEY_L]);
+            let movement = e.advance(Duration::from_millis(20));
+            assert!(movement.mouse.iter().any(|event| {
+                event.code() == R::REL_X.0 && event.value() > 0
+            }));
+            assert!(movement.mouse.iter().any(|event| {
+                event.code() == R::REL_Y.0 && event.value() < 0
+            }));
+            e.key(K::KEY_ESC, 1);
+            assert!(e.active());
+            assert!(e.keycast_keys().is_empty());
+        }
+    }
+
+    #[test]
+    fn keycast_clears_on_exit_keeps_toggle_and_suppresses_hotkey_until_release() {
+        let mut config = instant_config();
+        config.keycast.enabled = true;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_K, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_K]);
+        e.key(K::KEY_F3, 0);
+        assert!(e.keycast_keys().is_empty());
+        assert!(e.key(K::KEY_ESC, 2).keyboard.is_empty());
+        assert!(e.key(K::KEY_ESC, 0).keyboard.is_empty());
+        assert!(e.key(K::KEY_K, 0).keyboard.is_empty());
+        e.key(K::KEY_L, 1);
+        e.key(K::KEY_L, 0);
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_L]);
+        e.release_all();
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_K, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_K]);
+        e.key(K::KEY_ESC, 1);
+        assert!(e.keycast_keys().is_empty());
+        e.release_all();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        assert!(e.keycast_keys().is_empty());
+    }
+
+    #[test]
+    fn keycast_hotkey_held_before_activation_does_not_toggle_or_stick() {
+        let mut config = instant_config();
+        config.keycast.enabled = true;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_ESC, 1);
+        assert_eq!(
+            events(&e.key(K::KEY_F3, 1).keyboard),
+            events(&[key_event(K::KEY_ESC, 0)]),
+        );
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_ESC, 2);
+        assert!(e.key(K::KEY_ESC, 0).keyboard.is_empty());
+        e.key(K::KEY_K, 1);
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_L, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_L]);
+    }
+
+    #[test]
+    fn keycast_repeat_release_and_typing_do_not_extend_timeout() {
+        let mut config = instant_config();
+        config.keycast.enabled = true;
+        let mut e = Engine::new(config);
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_ESC, 0);
+        e.key(K::KEY_K, 1);
+        e.advance(Duration::from_secs(2));
+        e.key(K::KEY_K, 1);
+        e.key(K::KEY_K, 2);
+        e.key(K::KEY_K, 0);
+        e.key(K::KEY_Q, 1);
+        e.key(K::KEY_Q, 0);
+        assert_eq!(e.keycast_keys(), [K::KEY_K]);
+        e.advance(Duration::from_secs(1));
+        assert!(e.keycast_keys().is_empty());
+    }
+
+    #[test]
+    fn keycast_never_records_activation_chord_members() {
+        let mut config = instant_config();
+        config.mode = Mode::Toggle;
+        config.keycast.enabled = true;
+        config.keys.free_mouse = vec![K::KEY_LEFTALT, K::KEY_SPACE];
+        let mut e = Engine::new(config);
+        e.key(K::KEY_LEFTALT, 1);
+        e.key(K::KEY_SPACE, 1);
+        e.key(K::KEY_ESC, 1);
+        e.key(K::KEY_ESC, 0);
+        e.key(K::KEY_SPACE, 0);
+        e.key(K::KEY_SPACE, 1);
+        assert!(!e.active());
+        e.key(K::KEY_SPACE, 0);
+        e.key(K::KEY_SPACE, 1);
+        assert!(e.active());
+        assert!(e.keycast_keys().is_empty());
+        e.key(K::KEY_LEFTALT, 0);
+        e.key(K::KEY_SPACE, 0);
+        e.key(K::KEY_SPACE, 1);
+        assert_eq!(e.keycast_keys(), [K::KEY_SPACE]);
     }
 
     #[test]
@@ -512,7 +810,11 @@ mod tests {
                     assert_eq!(e.legacy_scroll, [0; 2]);
                     assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
 
-                    let release_second = if release_first == first { second } else { first };
+                    let release_second = if release_first == first {
+                        second
+                    } else {
+                        first
+                    };
                     for key in [release_first, release_second, other] {
                         assert!(e.key(key, 2).mouse.is_empty());
                         assert!(e.key(key, 0).mouse.is_empty());
@@ -566,7 +868,10 @@ mod tests {
             config.home_end_enabled = enabled;
             let mut e = Engine::new(config);
             for key in [K::KEY_M, K::KEY_COMMA, K::KEY_N, K::KEY_DOT] {
-                assert_eq!(events(&e.key(key, 1).keyboard), events(&[key_event(key, 1)]));
+                assert_eq!(
+                    events(&e.key(key, 1).keyboard),
+                    events(&[key_event(key, 1)])
+                );
             }
             e.release_all();
         }
@@ -599,7 +904,10 @@ mod tests {
             );
         }
         for key in [K::KEY_N, K::KEY_M, K::KEY_COMMA, K::KEY_DOT] {
-            assert_eq!(events(&e.key(key, 1).keyboard), events(&[key_event(key, 1)]));
+            assert_eq!(
+                events(&e.key(key, 1).keyboard),
+                events(&[key_event(key, 1)])
+            );
         }
         for key in [K::KEY_H, K::KEY_J, K::KEY_K, K::KEY_L] {
             assert!(e.key(key, 1).keyboard.is_empty());
@@ -609,12 +917,15 @@ mod tests {
     #[test]
     fn home_end_chords_respect_activation_reservations_and_mode_exit() {
         for mode in ["hold", "toggle"] {
-            let config = Config::parse(&format!(
-                "mode = '{mode}'\n[keys]\nfree_mouse = 'm+comma'",
-            )).unwrap();
+            let config =
+                Config::parse(&format!("mode = '{mode}'\n[keys]\nfree_mouse = 'm+comma'",))
+                    .unwrap();
             let mut e = Engine::new(config);
             e.key(K::KEY_M, 1);
-            assert_eq!(events(&e.key(K::KEY_COMMA, 1).keyboard), events(&[key_event(K::KEY_M, 0)]));
+            assert_eq!(
+                events(&e.key(K::KEY_COMMA, 1).keyboard),
+                events(&[key_event(K::KEY_M, 0)])
+            );
             assert!(e.key(K::KEY_M, 2).keyboard.is_empty());
             assert!(e.key(K::KEY_COMMA, 0).keyboard.is_empty());
             assert!(e.key(K::KEY_COMMA, 1).keyboard.is_empty());
@@ -659,8 +970,14 @@ mod tests {
             e.key(target, 1);
             e.key(K::KEY_F3, 1);
             e.key(first, 1);
-            assert_eq!(events(&e.key(second, 1).keyboard), events(&[key_event(target, 2)]));
-            assert_eq!(events(&e.key(target, 0).keyboard), events(&[key_event(target, 0)]));
+            assert_eq!(
+                events(&e.key(second, 1).keyboard),
+                events(&[key_event(target, 2)])
+            );
+            assert_eq!(
+                events(&e.key(target, 0).keyboard),
+                events(&[key_event(target, 0)])
+            );
             assert!(e.release_all().keyboard.is_empty());
         }
     }
@@ -883,10 +1200,9 @@ mod tests {
 
     #[test]
     fn scroll_eases_on_both_axes_without_an_initial_jump_and_preserves_coasting() {
-        for (horizontal, vertical, sign) in [
-            (K::KEY_N, K::KEY_M, -1),
-            (K::KEY_DOT, K::KEY_COMMA, 1),
-        ] {
+        for (horizontal, vertical, sign) in
+            [(K::KEY_N, K::KEY_M, -1), (K::KEY_DOT, K::KEY_COMMA, 1)]
+        {
             let mut e = Engine::new(Config::default());
             e.key(K::KEY_F3, 1);
             e.key(K::KEY_S, 1);
@@ -982,7 +1298,10 @@ mod tests {
         }
         let mut stalled = moving_engine();
         let mut capped = moving_engine();
-        assert_eq!(advance_ticks(&mut stalled, 1, 5000), advance_ticks(&mut capped, 1, 50));
+        assert_eq!(
+            advance_ticks(&mut stalled, 1, 5000),
+            advance_ticks(&mut capped, 1, 50)
+        );
         assert_eq!(stalled.velocity, capped.velocity);
         assert_eq!(stalled.scroll_velocity, capped.scroll_velocity);
         let before = stalled.velocity;
@@ -1016,14 +1335,24 @@ mod tests {
         for easing in [0.2, 0.3] {
             let mut velocity = 0.0;
             let mut remainder = 0.0;
-            advance_axis(&mut remainder, &mut velocity, 300.0, easing, 1.0 / 60.0, 1.0);
+            advance_axis(
+                &mut remainder,
+                &mut velocity,
+                300.0,
+                easing,
+                1.0 / 60.0,
+                1.0,
+            );
             assert!((velocity - 300.0 * easing).abs() < 1e-9);
         }
         for easing in [f64::from_bits(1), 1e-300, 1e-16, 1e-8] {
             let mut velocity = 0.0;
             let mut remainder = 0.0;
             for _ in 0..250 {
-                assert_eq!(advance_axis(&mut remainder, &mut velocity, 300.0, easing, 0.004, 1.0), 0);
+                assert_eq!(
+                    advance_axis(&mut remainder, &mut velocity, 300.0, easing, 0.004, 1.0),
+                    0
+                );
                 assert!(velocity.is_finite() && velocity >= 0.0);
                 assert!(remainder.is_finite() && remainder >= 0.0);
             }
@@ -1088,7 +1417,10 @@ mod tests {
             (K::KEY_S, 0, 3),
         ] {
             assert!(e.key(key, value).keyboard.is_empty());
-            assert_eq!(e.advance(Duration::from_millis(10)).mouse[0].value(), distance);
+            assert_eq!(
+                e.advance(Duration::from_millis(10)).mouse[0].value(),
+                distance
+            );
         }
         assert_eq!(e.key(K::KEY_ESC, 1).keyboard.len(), 1);
         assert!(e.active());
@@ -1105,11 +1437,20 @@ mod tests {
         assert!(!e.active());
         e.key(K::KEY_SPACE, 1);
         let output = e.key(K::KEY_F4, 1);
-        assert_eq!(events(&output.keyboard), vec![(EventType::KEY.0, K::KEY_SPACE.0, 0)]);
-        assert_eq!(events(&output.mouse), vec![(EventType::KEY.0, K::BTN_LEFT.0, 1)]);
+        assert_eq!(
+            events(&output.keyboard),
+            vec![(EventType::KEY.0, K::KEY_SPACE.0, 0)]
+        );
+        assert_eq!(
+            events(&output.mouse),
+            vec![(EventType::KEY.0, K::BTN_LEFT.0, 1)]
+        );
         e.key(K::KEY_F4, 0);
         assert!(e.active());
-        assert_eq!(events(&e.key(K::KEY_SPACE, 0).mouse), vec![(EventType::KEY.0, K::BTN_LEFT.0, 0)]);
+        assert_eq!(
+            events(&e.key(K::KEY_SPACE, 0).mouse),
+            vec![(EventType::KEY.0, K::BTN_LEFT.0, 0)]
+        );
         e.key(K::KEY_F4, 1);
         assert!(!e.active());
     }
@@ -1117,7 +1458,11 @@ mod tests {
     #[test]
     fn ordinary_keys_and_repeats_pass_through() {
         let mut e = engine();
-        for key in crate::config::Keys::default().controls().into_iter().chain([K::KEY_LEFTCTRL]) {
+        for key in crate::config::Keys::default()
+            .controls()
+            .into_iter()
+            .chain([K::KEY_LEFTCTRL])
+        {
             for value in [1, 2, 0] {
                 assert_eq!(
                     events(&e.key(key, value).keyboard),
@@ -1323,7 +1668,10 @@ mod tests {
                 assert_eq!(e.key(first, 1).keyboard.len(), 1);
                 assert!(!e.active());
                 let output = e.key(second, 1);
-                assert_eq!(events(&output.keyboard), vec![(EventType::KEY.0, first.0, 0)]);
+                assert_eq!(
+                    events(&output.keyboard),
+                    vec![(EventType::KEY.0, first.0, 0)]
+                );
                 assert!(output.mouse.is_empty());
                 assert!(e.active());
                 for key in [first, second] {
@@ -1338,7 +1686,10 @@ mod tests {
                 e.key(K::KEY_M, 1);
                 let output = e.key(release_first, 0);
                 assert!(output.keyboard.is_empty());
-                assert_eq!(events(&output.mouse), vec![(EventType::KEY.0, K::BTN_RIGHT.0, 0)]);
+                assert_eq!(
+                    events(&output.mouse),
+                    vec![(EventType::KEY.0, K::BTN_RIGHT.0, 0)]
+                );
                 assert!(!e.active());
                 assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
                 for key in [first, second, K::KEY_I, K::KEY_L, K::KEY_M] {
@@ -1355,7 +1706,8 @@ mod tests {
 
     #[test]
     fn toggle_chord_reserves_members_until_release_and_can_be_repressed() {
-        let config = Config::parse("mode = 'toggle'\n[keys]\nfree_mouse = 'leftalt+space'").unwrap();
+        let config =
+            Config::parse("mode = 'toggle'\n[keys]\nfree_mouse = 'leftalt+space'").unwrap();
         let mut e = Engine::new(config);
         e.key(K::KEY_LEFTALT, 1);
         assert!(e.key(K::KEY_SPACE, 1).mouse.is_empty());
@@ -1382,7 +1734,10 @@ mod tests {
         );
         let output = e.key(K::KEY_LEFTALT, 1);
         assert!(output.keyboard.is_empty());
-        assert_eq!(events(&output.mouse), vec![(EventType::KEY.0, K::BTN_LEFT.0, 0)]);
+        assert_eq!(
+            events(&output.mouse),
+            vec![(EventType::KEY.0, K::BTN_LEFT.0, 0)]
+        );
         assert!(!e.active());
         assert!(e.release_all().keyboard.is_empty());
         assert!(!e.active());
@@ -1392,9 +1747,7 @@ mod tests {
 
     #[test]
     fn chord_members_do_not_also_move_scroll_or_change_speed() {
-        let config = Config::parse(
-            "[keys]\nfree_mouse = 'leftalt+l+m+a+s'",
-        ).unwrap();
+        let config = Config::parse("[keys]\nfree_mouse = 'leftalt+l+m+a+s'").unwrap();
         let mut e = Engine::new(config);
         for key in [K::KEY_L, K::KEY_M, K::KEY_A, K::KEY_S] {
             e.key(key, 1);
@@ -1549,7 +1902,11 @@ mod tests {
                 assert!(output.mouse.is_empty());
                 assert_eq!(
                     events(&e.advance(Duration::from_millis(50)).mouse),
-                    [wheel_events(R::REL_HWHEEL, amount), wheel_events(R::REL_WHEEL, amount)].concat()
+                    [
+                        wheel_events(R::REL_HWHEEL, amount),
+                        wheel_events(R::REL_WHEEL, amount)
+                    ]
+                    .concat()
                 );
             }
         }
@@ -1557,7 +1914,10 @@ mod tests {
 
     #[test]
     fn scroll_speed_changes_preserve_fractional_progress_without_extra_notches() {
-        let config = Config::parse("[easing]\nscroll = 0\n[speeds]\nscroll = 10\nscroll_slow = 5\nscroll_fast = 20").unwrap();
+        let config = Config::parse(
+            "[easing]\nscroll = 0\n[speeds]\nscroll = 10\nscroll_slow = 5\nscroll_fast = 20",
+        )
+        .unwrap();
         let mut e = Engine::new(config);
         e.key(K::KEY_F3, 1);
         e.key(K::KEY_COMMA, 1);
@@ -1636,10 +1996,7 @@ mod tests {
             (K::KEY_B, R::REL_WHEEL, 1),
             (K::KEY_U, R::REL_HWHEEL, 1),
         ] {
-            assert_eq!(
-                events(&e.key(key, 1).mouse),
-                wheel_events(axis, value)
-            );
+            assert_eq!(events(&e.key(key, 1).mouse), wheel_events(axis, value));
             e.key(key, 0);
         }
         e.key(K::KEY_T, 1);
