@@ -410,7 +410,7 @@ impl WaylandHints {
                 offset += read;
             }
             let output = &self.state.outputs[capture.output_index];
-            let luma = normalize_capture(
+            let rgb = normalize_capture_rgb(
                 &data,
                 capture.width,
                 capture.height,
@@ -421,24 +421,18 @@ impl WaylandHints {
             )?;
             let (width, height) = transformed_size(capture.width, capture.height, output.transform);
             let overlay = &mut self.state.overlays[capture.output_index];
-            let luma = detect::resize_luma(
-                &luma,
-                width,
-                height,
-                overlay.logical_width,
-                overlay.logical_height,
-            );
-            let detection = detect::detect_with_trace(
-                &luma,
-                overlay.logical_width,
-                overlay.logical_height,
-                1.0,
+            let detection = detect::detect_rgb_with_trace(
+                &rgb,
+                (width, height),
+                (overlay.logical_width, overlay.logical_height),
                 DetectionLimits {
                     min_width: config.min_width as f64,
                     max_width: config.max_width as f64,
                     min_height: config.min_height as f64,
                     max_height: config.max_height as f64,
                 },
+                config.color_links,
+                config.underline_links,
             );
             overlay.trace = Some(detection.trace);
             for rect in detection.regions {
@@ -676,6 +670,7 @@ impl WaylandHints {
             Outcome::TooSmall => Color::rgba(255, 215, 70, 255),
             Outcome::TooLarge => Color::rgba(255, 90, 90, 255),
             Outcome::NestedOrDuplicate => Color::rgba(220, 130, 255, 255),
+            Outcome::NotTextLike => Color::rgba(255, 150, 70, 255),
         }
     }
 
@@ -698,6 +693,9 @@ impl WaylandHints {
                 if trace.edges[(y * trace.width + x) as usize] != 0 {
                     canvas.fill_rect(x as i32, y as i32, 1, 1, edge_color);
                 }
+                if trace.color_strokes.get((y * trace.width + x) as usize) == Some(&1) {
+                    canvas.fill_rect(x as i32, y as i32, 1, 1, Color::rgba(255, 180, 80, 255));
+                }
             }
         }
         if view == DebugView::Components {
@@ -707,7 +705,15 @@ impl WaylandHints {
                     rect.x as i32, rect.y as i32, rect.width as i32, rect.height as i32,
                     Self::outcome_color(component.outcome),
                 );
+                if component.source == detect::Source::Underline {
+                    canvas.fill_rect(rect.x as i32, rect.y as i32, 3, 3,
+                        Color::rgba(80, 235, 235, 255));
+                }
             }
+        }
+        for line in trace.components.iter().filter_map(|c| c.stroke_bounds) {
+            canvas.stroke_rect(line.x as i32, line.y as i32, line.width as i32,
+                line.height as i32, Color::rgba(80, 235, 235, 255));
         }
     }
 
@@ -725,18 +731,36 @@ impl WaylandHints {
         let white = Color::rgba(255, 255, 255, 255);
         let title = match view {
             DebugView::Normal => "NO TARGETS",
-            DebugView::Edges => "EDGES AFTER HYSTERESIS",
+            DebugView::Edges => "EDGES COLOR AND UNDERLINES",
             DebugView::Components => "GROUPED COMPONENT BOUNDS",
         };
         let mut lines = vec![(title.to_owned(), white)];
         if let Some(trace) = trace {
+            let edge_pixels = trace.components.iter()
+                .filter(|c| c.source == detect::Source::Grayscale).map(|c| c.edge_pixels).sum::<usize>();
             lines.push((format!("COMPONENTS {}  EDGE PIXELS {}",
-                trace.components.len(), trace.components.iter().map(|c| c.edge_pixels).sum::<usize>()), white));
+                trace.components.len(), edge_pixels), white));
+            let color_components = trace.components.iter()
+                .filter(|c| c.source == detect::Source::Color).count();
+            let color_pixels = trace.components.iter()
+                .filter(|c| c.source == detect::Source::Color).map(|c| c.edge_pixels).sum::<usize>();
+            lines.push((format!("COLOR COMPONENTS {color_components}  STROKES {color_pixels}"),
+                Color::rgba(255, 180, 80, 255)));
+            let underlines: Vec<_> = trace.components.iter()
+                .filter(|c| c.source == detect::Source::Underline).collect();
+            lines.push((format!("UNDERLINE {}  ACCEPTED {}  REJECTED {}",
+                underlines.len(),
+                underlines.iter().filter(|c| c.outcome == Outcome::Accepted).count(),
+                underlines.iter().filter(|c| c.outcome != Outcome::Accepted).count()),
+                Color::rgba(80, 235, 235, 255)));
+            lines.push(("CYAN UNDERLINE EXTENT AND SOURCE MARK".to_owned(),
+                Color::rgba(80, 235, 235, 255)));
             for (outcome, label) in [
                 (Outcome::Accepted, "ACCEPTED"),
                 (Outcome::TooSmall, "TOO SMALL"),
                 (Outcome::TooLarge, "TOO LARGE"),
-                (Outcome::InsufficientEdges, "INSUFFICIENT EDGES"),
+                (Outcome::InsufficientEdges, "INSUFFICIENT SAMPLES"),
+                (Outcome::NotTextLike, "NOT TEXT LIKE"),
                 (Outcome::NestedOrDuplicate, "NESTED OR DUPLICATE"),
             ] {
                 let count = trace.components.iter().filter(|c| c.outcome == outcome).count();
@@ -1236,7 +1260,7 @@ fn write_all_at(file: &File, mut bytes: &[u8], mut offset: u64) -> io::Result<()
     Ok(())
 }
 
-fn normalize_capture(
+fn normalize_capture_rgb(
     data: &[u8],
     width: u32,
     height: u32,
@@ -1244,7 +1268,7 @@ fn normalize_capture(
     format: wl_shm::Format,
     y_invert: bool,
     transform: wl_output::Transform,
-) -> Result<Vec<u8>, Box<dyn Error>> {
+) -> Result<Vec<detect::Rgb>, Box<dyn Error>> {
     if width == 0
         || height == 0
         || (stride as usize) < width as usize * 4
@@ -1252,7 +1276,7 @@ fn normalize_capture(
     {
         return Err("invalid screenshot buffer dimensions or stride".into());
     }
-    let mut luma = vec![0; (width * height) as usize];
+    let mut rgb = vec![[0; 3]; (width * height) as usize];
     for y in 0..height as usize {
         let source_y = if y_invert { height as usize - 1 - y } else { y };
         let row =
@@ -1268,11 +1292,19 @@ fn normalize_capture(
                 }
                 _ => return Err(format!("unsupported screenshot format {format:?}").into()),
             };
-            luma[y * width as usize + x] =
-                ((r as u16 * 77 + g as u16 * 150 + b as u16 * 29) / 256) as u8;
+            rgb[y * width as usize + x] = [r, g, b];
         }
     }
-    Ok(transform_luma(&luma, width, height, transform))
+    Ok(transform_pixels(&rgb, width, height, transform))
+}
+
+#[cfg(test)]
+fn normalize_capture(
+    data: &[u8], width: u32, height: u32, stride: u32, format: wl_shm::Format,
+    y_invert: bool, transform: wl_output::Transform,
+) -> Result<Vec<u8>, Box<dyn Error>> {
+    normalize_capture_rgb(data, width, height, stride, format, y_invert, transform)
+        .map(|rgb| detect::luma(&rgb))
 }
 
 fn transformed_size(width: u32, height: u32, transform: wl_output::Transform) -> (u32, u32) {
@@ -1289,14 +1321,14 @@ fn transformed_size(width: u32, height: u32, transform: wl_output::Transform) ->
     }
 }
 
-fn transform_luma(
-    luma: &[u8],
+fn transform_pixels<T: Copy + Default>(
+    pixels: &[T],
     width: u32,
     height: u32,
     transform: wl_output::Transform,
-) -> Vec<u8> {
+) -> Vec<T> {
     let (out_width, out_height) = transformed_size(width, height, transform);
-    let mut out = vec![0; (out_width * out_height) as usize];
+    let mut out = vec![T::default(); (out_width * out_height) as usize];
     for y in 0..out_height {
         for x in 0..out_width {
             let (sx, sy) = match transform {
@@ -1310,7 +1342,7 @@ fn transform_luma(
                 wl_output::Transform::Flipped270 => (width - 1 - y, height - 1 - x),
                 _ => (x, y),
             };
-            out[(y * out_width + x) as usize] = luma[(sy * width + sx) as usize];
+            out[(y * out_width + x) as usize] = pixels[(sy * width + sx) as usize];
         }
     }
     out
@@ -1407,7 +1439,10 @@ mod tests {
             (Flipped270, (2, 3), vec![6, 3, 5, 2, 4, 1]),
         ] {
             assert_eq!(transformed_size(3, 2, transform), size);
-            assert_eq!(transform_luma(&luma, 3, 2, transform), expected);
+            assert_eq!(transform_pixels(&luma, 3, 2, transform), expected);
+            let rgb: Vec<_> = luma.iter().map(|&v| [v, v + 10, v + 20]).collect();
+            let expected_rgb: Vec<_> = expected.iter().map(|&v| [v, v + 10, v + 20]).collect();
+            assert_eq!(transform_pixels(&rgb, 3, 2, transform), expected_rgb);
         }
     }
 
@@ -1468,9 +1503,19 @@ mod tests {
         ];
         for format in [wl_shm::Format::Abgr8888, wl_shm::Format::Xbgr8888] {
             assert_eq!(
+                normalize_capture_rgb(&data, 1, 2, 8, format, true, wl_output::Transform::_90).unwrap(),
+                [[255, 0, 0], [0, 255, 0]],
+            );
+            assert_eq!(
                 normalize_capture(&data, 1, 2, 8, format, true, wl_output::Transform::_90,)
                     .unwrap(),
                 vec![76, 149]
+            );
+        }
+        for format in [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888] {
+            assert_eq!(
+                normalize_capture_rgb(&data, 1, 2, 8, format, true, wl_output::Transform::_90).unwrap(),
+                [[0, 0, 255], [0, 255, 0]],
             );
         }
         assert!(normalize_capture(
@@ -1925,7 +1970,10 @@ mod click_protocol_tests {
 
     #[test]
     fn debug_cycles_zero_targets_and_selection_without_clicking_and_peek_restores() {
-        for count in [0, 27] {
+        for (count, color_links, underline_links) in [
+            (0, false, false), (27, false, false), (27, true, false),
+            (27, false, true), (27, true, true),
+        ] {
             let (client, server) = UnixStream::pair().unwrap();
             let server = thread::spawn(move || serve(server, None));
             let mut backend =
@@ -1942,8 +1990,31 @@ mod click_protocol_tests {
                     }
                 }
             }
-            let detection = detect::detect_with_trace(&luma, 640, 480, 1.0, DetectionLimits::default());
+            let mut detection = detect::detect_with_trace(&luma, 640, 480, 1.0, DetectionLimits::default());
             assert_eq!(detection.regions.len(), count);
+            if color_links || underline_links {
+                let mut pixels: Vec<_> = luma.iter().flat_map(|&v| [v, v, v, 255]).collect();
+                let mut canvas = Canvas::new(&mut pixels, 640, 480);
+                canvas.draw_text(10, 240, "TEXT", 2, Color::rgba(90, 90, 90, 255));
+                let link_color = if color_links { Color::rgba(30, 90, 210, 255) }
+                    else { Color::rgba(90, 90, 90, 255) };
+                canvas.draw_text(58, 240, "LINK", 2, link_color);
+                canvas.draw_text(106, 240, "TEXT", 2, Color::rgba(90, 90, 90, 255));
+                if underline_links {
+                    canvas.fill_rect(58, 256, 46, 1, link_color);
+                }
+                let rgb: Vec<_> = pixels.chunks_exact(4).map(|p| [p[2], p[1], p[0]]).collect();
+                detection = detect::detect_rgb_with_trace(&rgb, (640, 480), (640, 480),
+                    DetectionLimits::default(), color_links, underline_links);
+                assert_eq!(detection.regions.len(), count + 2);
+                assert!(detection.trace.components.iter()
+                    .any(|c| c.source == if color_links { detect::Source::Color }
+                        else { detect::Source::Underline } && c.outcome == Outcome::Accepted));
+                if underline_links {
+                    assert!(detection.trace.components.iter().any(|c|
+                        c.source == detect::Source::Underline && c.stroke_bounds.is_some()));
+                }
+            }
             backend.state.overlays[0].trace = Some(detection.trace);
             let mut hints = ActiveHints::from_capture(
                 &config.hints, ClickKind::Left,
@@ -1961,6 +2032,9 @@ mod click_protocol_tests {
                 hints.handle_key(config.hints.keys.debug, 2, &config.hints).unwrap();
                 assert_eq!(hints.backend.debug_view, view);
                 let visible = hints.backend.state.overlays[0].pixels.clone();
+                if underline_links {
+                    assert!(visible.chunks_exact(4).any(|p| p == [235, 235, 80, 255]));
+                }
                 for key in [K::KEY_A, K::KEY_Z, K::KEY_BACKSPACE] {
                     assert!(matches!(hints.handle_key(key, 1, &config.hints).unwrap(), HintResult::Continue));
                 }

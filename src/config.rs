@@ -201,6 +201,8 @@ impl Keys {
 #[serde(default, deny_unknown_fields)]
 pub struct Hints {
     pub keys: HintKeys,
+    pub color_links: bool,
+    pub underline_links: bool,
     pub label_symbols: String,
     #[serde(deserialize_with = "deserialize_color")]
     pub border_color: Color,
@@ -222,6 +224,8 @@ impl Default for Hints {
     fn default() -> Self {
         Self {
             keys: HintKeys::default(),
+            color_links: true,
+            underline_links: true,
             label_symbols: "abcdefghijklmnopqrstuvwxyz".to_owned(),
             border_color: Color::rgba(0x00, 0xff, 0x00, 0xe0),
             fill_color: Color::rgba(0x00, 0xff, 0x00, 0x18),
@@ -510,6 +514,32 @@ fn validate_limits(min: u32, max: u32, axis: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn color_link_detection_defaults_and_boolean_validation() {
+        assert!(Config::parse("").unwrap().hints.color_links);
+        assert!(Config::parse(include_str!("../fievel.config")).unwrap().hints.color_links);
+        assert!(!Config::parse("[hints]\ncolor_links = false").unwrap().hints.color_links);
+        for text in ["[hints]\ncolor_links = 'false'", "[hints]\ncolor_links = 1",
+            "[hints]\ncolour_links = false"] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
+
+    #[test]
+    fn underline_detection_defaults_validation_and_independent_opt_out() {
+        assert!(Config::parse("").unwrap().hints.underline_links);
+        assert!(Config::parse(include_str!("../fievel.config")).unwrap().hints.underline_links);
+        let off = Config::parse("[hints]\nunderline_links = false").unwrap();
+        assert!(!off.hints.underline_links);
+        assert!(off.hints.color_links);
+        let color_off = Config::parse("[hints]\ncolor_links = false").unwrap();
+        assert!(color_off.hints.underline_links);
+        for text in ["[hints]\nunderline_links = 'false'", "[hints]\nunderline_links = 1",
+            "[hints]\nunderlined_links = false"] {
+            assert!(Config::parse(text).is_err(), "{text}");
+        }
+    }
 
     #[test]
     fn debug_key_defaults_customization_and_conflicts() {
