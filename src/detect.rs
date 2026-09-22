@@ -44,6 +44,7 @@ pub enum Outcome {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
     Grayscale,
+    Icon,
     Color,
     Underline,
 }
@@ -84,6 +85,7 @@ pub fn detect_regions_from_luma(
     detect_with_trace(luma, width, height, scale, limits).regions
 }
 
+#[cfg(test)]
 pub fn detect_with_trace(
     luma: &[u8],
     width: u32,
@@ -104,33 +106,48 @@ pub fn detect_with_trace(
     let logical_width = (width as f64 / scale).round().max(1.0) as u32;
     let logical_height = (height as f64 / scale).round().max(1.0) as u32;
     let normalized = resize_luma(luma, width, height, logical_width, logical_height);
-    let edges = sobel_edges(&normalized, logical_width as usize, logical_height as usize);
+    let mut detection = detect_normalized(
+        &normalized, logical_width, logical_height, limits, None,
+    );
+    for rect in &mut detection.regions {
+        *rect = map_rect(*rect, logical_width, logical_height, width, height);
+    }
+    detection
+}
+
+fn detect_normalized(
+    luma: &[u8], width: u32, height: u32, limits: DetectionLimits, rgb: Option<&[Rgb]>,
+) -> Detection {
+    let (edges, mut strong_edges) = sobel_edges(luma, width as usize, height as usize);
     let dilated = dilate(
         &edges,
-        logical_width as usize,
-        logical_height as usize,
+        width as usize,
+        height as usize,
         3,
         5,
     );
     let components = connected_edge_components(
         &dilated,
         &edges,
-        logical_width as usize,
-        logical_height as usize,
+        width as usize,
+        height as usize,
     );
-    let (mut rects, components) = classify_components(components, limits);
-    rects.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
-    let regions = rects
-        .into_iter()
-        .map(|rect| map_rect(rect, logical_width, logical_height, width, height))
-        .collect();
-    Detection {
-        regions,
+    let (rects, components) = classify_components(components, limits);
+    let mut detection = Detection {
+        regions: rects,
         trace: DetectionTrace {
-            width: logical_width, height: logical_height, edges, components,
+            width, height, edges, components,
             color_strokes: Vec::new(),
         },
+    };
+    add_icon_regions(&mut detection, &strong_edges, limits);
+    if let Some(rgb) = rgb {
+        if separate_chromatic_edges(&mut strong_edges, rgb, width as usize, height as usize) {
+            add_icon_regions(&mut detection, &strong_edges, limits);
+        }
     }
+    detection.regions.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
+    detection
 }
 
 fn classify_components(
@@ -170,6 +187,7 @@ fn size_outcome(rect: Rect, pixels: usize, limits: DetectionLimits) -> Outcome {
     }
 }
 
+#[cfg(test)]
 pub fn map_rect(rect: Rect, from_w: u32, from_h: u32, to_w: u32, to_h: u32) -> Rect {
     let x = (rect.x as u64 * to_w as u64 / from_w as u64) as u32;
     let y = (rect.y as u64 * to_h as u64 / from_h as u64) as u32;
@@ -253,15 +271,15 @@ pub fn detect_rgb_with_trace(
     }
     // Convert before resampling to retain the primary detector's rounding.
     let normalized = resize_luma(&luma(rgb), width, height, out_w, out_h);
-    let mut detection = detect_with_trace(&normalized, out_w, out_h, 1.0, limits);
+    let resized;
+    let normalized_rgb = if size == logical_size {
+        rgb
+    } else {
+        resized = resize_rgb(rgb, width, height, out_w, out_h);
+        &resized
+    };
+    let mut detection = detect_normalized(&normalized, out_w, out_h, limits, Some(normalized_rgb));
     if color_links {
-        let resized;
-        let normalized_rgb = if size == logical_size {
-            rgb
-        } else {
-            resized = resize_rgb(rgb, width, height, out_w, out_h);
-            &resized
-        };
         add_color_regions(&mut detection, normalized_rgb, limits);
     }
     if underline_links {
@@ -425,6 +443,57 @@ fn add_color_regions(detection: &mut Detection, rgb: &[Rgb], limits: DetectionLi
     }
     detection.trace.color_strokes = mask;
     detection.regions.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
+}
+
+fn separate_chromatic_edges(edges: &mut [u8], rgb: &[Rgb], width: usize, height: usize) -> bool {
+    let mut changed = false;
+    for y in 0..height {
+        for x in 0..width {
+            let index = y * width + x;
+            if edges[index] == 0 {
+                continue;
+            }
+            // Sobel samples a 3x3 neighborhood: exclude the whole chromatic
+            // boundary, including neutral pixels just outside a colored badge.
+            if (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|yy|
+                (x.saturating_sub(1)..=(x + 1).min(width - 1)).any(|xx|
+                    chroma(rgb[yy * width + xx]) >= 24))
+            {
+                edges[index] = 0;
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+fn add_icon_regions(detection: &mut Detection, strong_edges: &[u8], limits: DetectionLimits) {
+    let components = connected_edge_components(
+        strong_edges, strong_edges, detection.trace.width as usize, detection.trace.height as usize,
+    );
+    let mut targets = SupplementalTargets::new(&detection.regions);
+    for component in components {
+        let bounds = component.bounds;
+        // Undilated strong contours recover icons joined to badges or nearby
+        // controls by faint backgrounds. Exclude glyphs and thin decorations.
+        if !(16..=48).contains(&bounds.width) || !(16..=48).contains(&bounds.height)
+            || bounds.width > bounds.height * 2 || bounds.height > bounds.width * 2
+        {
+            continue;
+        }
+        let mut outcome = size_outcome(bounds, component.edge_pixels, limits);
+        // Keep same-line glyph clusters inside their existing text target.
+        if outcome == Outcome::Accepted && detection.regions.iter().any(|&parent| {
+            contains(&parent, &bounds)
+                && (parent.height <= bounds.height + 8 || nested_target(parent, bounds, 1.0))
+        }) {
+            outcome = Outcome::NestedOrDuplicate;
+        }
+        targets.record(detection, DiagnosticComponent {
+            bounds, edge_pixels: component.edge_pixels, outcome, source: Source::Icon,
+            stroke_bounds: None,
+        });
+    }
 }
 
 fn thin_stroke(luma: &[u8], width: usize, x: usize, y: usize) -> usize {
@@ -609,12 +678,12 @@ fn text_like(rgb: &[Rgb], width: usize, bounds: Rect, anchor: Rgb) -> bool {
     foreground * 100 <= bounds.width as usize * bounds.height as usize * 70 && split_rows >= 3
 }
 
-fn sobel_edges(luma: &[u8], width: usize, height: usize) -> Vec<u8> {
+fn sobel_edges(luma: &[u8], width: usize, height: usize) -> (Vec<u8>, Vec<u8>) {
     let mut edges = vec![0; width * height];
     let mut weak = vec![false; width * height];
     let mut queue = std::collections::VecDeque::new();
     if width < 3 || height < 3 {
-        return edges;
+        return (edges.clone(), edges);
     }
     let pixel = |x: usize, y: usize| luma[y * width + x] as i32;
     for y in 1..height - 1 {
@@ -635,6 +704,7 @@ fn sobel_edges(luma: &[u8], width: usize, height: usize) -> Vec<u8> {
             }
         }
     }
+    let strong_edges = edges.clone();
     // Hysteresis retains faint antialiased edges connected to strong strokes,
     // without accepting every weak gradient in wallpapers and shadows.
     while let Some((x, y)) = queue.pop_front() {
@@ -648,7 +718,7 @@ fn sobel_edges(luma: &[u8], width: usize, height: usize) -> Vec<u8> {
             }
         }
     }
-    edges
+    (edges, strong_edges)
 }
 
 fn dilate(mask: &[u8], width: usize, height: usize, kernel_h: usize, kernel_w: usize) -> Vec<u8> {
@@ -742,43 +812,28 @@ fn filter_nested(rects: Vec<Rect>, scale: f64) -> Vec<Rect> {
         )
     });
     rects.dedup();
-    let center_limit = 8.0 * scale;
-    let inner_height_limit = 6.0 * scale;
-    let square_limit = 40.0 * scale;
-    let square_delta = 5.0 * scale;
     let mut filtered = vec![false; rects.len()];
     let parents = parent_indices(&rects);
     for (index, rect) in rects.iter().enumerate() {
         let Some(parent_index) = parents[index] else {
             continue;
         };
-        if filtered[parent_index] {
-            filtered[index] = true;
-            continue;
-        }
-        if rect.height as f64 <= inner_height_limit {
-            filtered[index] = true;
-            continue;
-        }
-        let parent = rects[parent_index];
-        let (cx, cy) = center(rect);
-        let (px, py) = center(&parent);
-        if (cx - px).abs() < center_limit && (cy - py).abs() < center_limit {
-            filtered[index] = true;
-            continue;
-        }
-        if ((parent.width as f64) - (parent.height as f64)).abs() < square_delta
-            && parent.width as f64 <= square_limit
-            && parent.height as f64 <= square_limit
-        {
-            filtered[index] = true;
-        }
+        filtered[index] = filtered[parent_index] || nested_target(rects[parent_index], *rect, scale);
     }
     rects
         .into_iter()
         .enumerate()
         .filter_map(|(index, rect)| (!filtered[index]).then_some(rect))
         .collect()
+}
+
+fn nested_target(parent: Rect, rect: Rect, scale: f64) -> bool {
+    let (cx, cy) = center(&rect);
+    let (px, py) = center(&parent);
+    rect.height as f64 <= 6.0 * scale
+        || ((cx - px).abs() < 8.0 * scale && (cy - py).abs() < 8.0 * scale)
+        || ((parent.width as f64 - parent.height as f64).abs() < 5.0 * scale
+            && parent.width as f64 <= 40.0 * scale && parent.height as f64 <= 40.0 * scale)
 }
 
 fn parent_indices(rects: &[Rect]) -> Vec<Option<usize>> {
@@ -1317,11 +1372,13 @@ mod tests {
         stroke_rect(&mut pixels, 200, 10, 10, 30, 20);
         stroke_rect(&mut pixels, 200, 70, 10, 50, 70);
         let detection = detect_with_trace(&pixels, 200, 120, 1.0, DetectionLimits::default());
+        assert_trace_consistent(&detection);
         let trace = detection.trace;
         assert_eq!((trace.width, trace.height, trace.edges.len()), (200, 120, 24000));
         assert_eq!(trace.edges.iter().map(|v| *v as usize).sum::<usize>(),
-            trace.components.iter().map(|c| c.edge_pixels).sum::<usize>());
-        assert_eq!(trace.components.len(), 2);
+            trace.components.iter().filter(|c| c.source == Source::Grayscale)
+                .map(|c| c.edge_pixels).sum::<usize>());
+        assert_eq!(trace.components.iter().filter(|c| c.source == Source::Grayscale).count(), 2);
         assert_eq!(detection.regions.len(), 1);
         assert_eq!(trace.components.iter().filter(|c| c.outcome == Outcome::Accepted)
             .map(|c| c.bounds).collect::<Vec<_>>(), detection.regions);
@@ -1460,6 +1517,159 @@ mod tests {
 
     fn covers(rect: &Rect, x: u32, y: u32) -> bool {
         rect.x <= x && rect.y <= y && rect.x + rect.width > x && rect.y + rect.height > y
+    }
+
+    fn notification_toolbar() -> Vec<Rgb> {
+        let bytes = include_bytes!("../tests/fixtures/notification-toolbar.ppm");
+        let pixels = bytes.strip_prefix(b"P6\n244 56\n255\n").unwrap();
+        assert_eq!(pixels.len(), 244 * 56 * 3);
+        pixels.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect()
+    }
+
+    #[test]
+    fn messages_icon_touching_badge_remains_clickable() {
+        let bytes = include_bytes!("../tests/fixtures/messages-toolbar.ppm");
+        let pixels = bytes.strip_prefix(b"P6\n210 56\n255\n").unwrap();
+        assert_eq!(pixels.len(), 210 * 56 * 3);
+        let screenshot: Vec<Rgb> = pixels.chunks_exact(3).map(|p| [p[0], p[1], p[2]]).collect();
+        let mut padded = vec![[255; 3]; 280 * 100];
+        for y in 1..55 {
+            padded[(y + 19) * 280 + 20..(y + 19) * 280 + 228]
+                .copy_from_slice(&screenshot[y * 210 + 1..y * 210 + 209]);
+        }
+        for (rgb, logical_size, offset) in [
+            (&screenshot, (210, 56), 0),
+            (&padded, (280, 100), 19),
+        ] {
+            for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+                let size = ((logical_size.0 as f64 * scale) as u32,
+                    (logical_size.1 as f64 * scale) as u32);
+                let scaled = resize_rgb(rgb, logical_size.0, logical_size.1, size.0, size.1);
+                for (color, underline) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let detection = detect_rgb_with_trace(
+                        &scaled, size, logical_size, DetectionLimits::default(), color, underline,
+                    );
+                    assert_trace_consistent(&detection);
+                    for x in [32, 80, 128] {
+                        let centers = detection.regions.iter().filter(|rect| {
+                            let (cx, cy) = center(rect);
+                            (cx - (x + offset) as f64).abs() <= 4.0
+                                && (cy - (29 + offset) as f64).abs() <= 4.0
+                        }).count();
+                        assert_eq!(centers, 1,
+                            "x={x}, scale={scale}, offset={offset}: {:?}", detection.regions);
+                    }
+                }
+            }
+        }
+        for limits in [
+            DetectionLimits { max_width: 19.0, ..DetectionLimits::default() },
+            DetectionLimits { max_height: 19.0, ..DetectionLimits::default() },
+            DetectionLimits { min_width: 25.0, ..DetectionLimits::default() },
+            DetectionLimits { min_height: 25.0, ..DetectionLimits::default() },
+        ] {
+            let detection = detect_rgb_with_trace(
+                &screenshot, (210, 56), (210, 56), limits, false, false,
+            );
+            assert_trace_consistent(&detection);
+            assert!(!detection.regions.iter().any(|rect| covers(rect, 80, 29)));
+        }
+    }
+
+    #[test]
+    fn badge_separation_preserves_colored_icons_and_neutral_edges() {
+        let mut neutral = vec![[230; 3]; 80 * 60];
+        for y in 20..40 {
+            for x in 30..50 {
+                neutral[y * 80 + x] = [20; 3];
+            }
+        }
+        let (_, mut edges) = sobel_edges(&luma(&neutral), 80, 60);
+        let original = edges.clone();
+        assert!(!separate_chromatic_edges(&mut edges, &neutral, 80, 60));
+        assert_eq!(edges, original);
+        for pixel in &mut neutral {
+            if *pixel == [20; 3] {
+                *pixel = [160, 20, 20];
+            }
+        }
+        let detection = detect_rgb_with_trace(
+            &neutral, (80, 60), (80, 60), DetectionLimits::default(), false, false,
+        );
+        assert_trace_consistent(&detection);
+        assert_eq!(detection.regions.len(), 1);
+        assert!(covers(&detection.regions[0], 40, 30));
+    }
+
+    #[test]
+    fn notification_bell_has_its_own_click_center_at_all_output_scales() {
+        let screenshot = notification_toolbar();
+        // Also remove the crop border and embed the toolbar in a larger screen:
+        // the old detector accepted a merged bell/avatar with an unclickable center.
+        let mut padded = vec![[255; 3]; 300 * 100];
+        for y in 1..55 {
+            padded[(y + 19) * 300 + 20..(y + 19) * 300 + 262]
+                .copy_from_slice(&screenshot[y * 244 + 1..y * 244 + 243]);
+        }
+        for (rgb, logical_size, offset) in [
+            (&screenshot, (244, 56), 0),
+            (&padded, (300, 100), 19),
+        ] {
+            for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
+                let size = ((logical_size.0 as f64 * scale) as u32,
+                    (logical_size.1 as f64 * scale) as u32);
+                let scaled = resize_rgb(rgb, logical_size.0, logical_size.1, size.0, size.1);
+                for (color, underline) in [(false, false), (true, false), (false, true), (true, true)] {
+                    let detection = detect_rgb_with_trace(
+                        &scaled, size, logical_size, DetectionLimits::default(), color, underline,
+                    );
+                    assert_trace_consistent(&detection);
+                    for x in [60, 108, 156] {
+                        let centers = detection.regions.iter().filter(|rect| {
+                            let (cx, cy) = center(rect);
+                            (cx - (x + offset) as f64).abs() <= 4.0
+                                && (cy - (27 + offset) as f64).abs() <= 4.0
+                        }).count();
+                        assert_eq!(centers, 1,
+                            "x={x}, scale={scale}, offset={offset}: {:?}", detection.regions);
+                    }
+                    assert!(detection.trace.components.iter().any(|component|
+                        component.source == Source::Icon && component.outcome == Outcome::Accepted
+                            && covers(&component.bounds, 156 + offset, 27 + offset)));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn icon_fallback_respects_size_limits_and_does_not_duplicate_standalone_icons() {
+        let screenshot = notification_toolbar();
+        for limits in [
+            DetectionLimits { max_width: 19.0, ..DetectionLimits::default() },
+            DetectionLimits { max_height: 19.0, ..DetectionLimits::default() },
+            DetectionLimits { min_width: 25.0, ..DetectionLimits::default() },
+            DetectionLimits { min_height: 25.0, ..DetectionLimits::default() },
+        ] {
+            let detection = detect_rgb_with_trace(
+                &screenshot, (244, 56), (244, 56), limits, false, false,
+            );
+            assert_trace_consistent(&detection);
+            assert!(!detection.regions.iter().any(|rect| covers(rect, 156, 27)));
+            assert!(detection.trace.components.iter().any(|component|
+                component.source == Source::Icon
+                    && matches!(component.outcome, Outcome::TooSmall | Outcome::TooLarge)
+                    && covers(&component.bounds, 156, 27)));
+        }
+        let mut standalone = vec![[255; 3]; 80 * 60];
+        for y in 14..40 {
+            standalone[y * 80 + 30..y * 80 + 54]
+                .copy_from_slice(&screenshot[y * 244 + 144..y * 244 + 168]);
+        }
+        let detection = detect_rgb_with_trace(
+            &standalone, (80, 60), (80, 60), DetectionLimits::default(), false, false,
+        );
+        assert_trace_consistent(&detection);
+        assert_eq!(detection.regions.len(), 1, "{:?}", detection.regions);
     }
 
     #[test]

@@ -740,6 +740,10 @@ impl WaylandHints {
                 .filter(|c| c.source == detect::Source::Grayscale).map(|c| c.edge_pixels).sum::<usize>();
             lines.push((format!("COMPONENTS {}  EDGE PIXELS {}",
                 trace.components.len(), edge_pixels), white));
+            let icons: Vec<_> = trace.components.iter()
+                .filter(|c| c.source == detect::Source::Icon).collect();
+            lines.push((format!("ICON CONTOURS {}  ACCEPTED {}",
+                icons.len(), icons.iter().filter(|c| c.outcome == Outcome::Accepted).count()), white));
             let color_components = trace.components.iter()
                 .filter(|c| c.source == detect::Source::Color).count();
             let color_pixels = trace.components.iter()

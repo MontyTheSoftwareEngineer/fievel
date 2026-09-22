@@ -67,6 +67,9 @@ Set `home_end_enabled = false` to disable these shortcuts.
 
 Press **Super+Space** for left-click hints or **Super+I** for right-click hints.
 Fievel detects targets on screen and draws green boxes with letter labels.
+Compact, high-contrast icons are also detected separately when faint backgrounds
+merge them with notification badges or neighboring controls. Colored badge edges
+are also separated from neutral icon contours, even when they touch.
 Type a label to click its center. As you type, non-matching hints disappear and
 matching letters are highlighted. **Backspace** removes the last letter.
 
