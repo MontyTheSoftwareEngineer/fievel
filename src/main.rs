@@ -36,7 +36,6 @@ use std::{
 
 const KEYBOARD_NAME: &str = "fievel keyboard";
 const MOUSE_NAME: &str = "fievel pointer";
-const KEYD_KEYBOARD_NAME: &str = "keyd virtual keyboard";
 const TICK: Duration = Duration::from_millis(4);
 
 #[derive(Parser)]
@@ -216,36 +215,19 @@ impl Drop for KeyboardScanner {
     }
 }
 
-fn automatic_input(name: Option<&str>, virtual_device: bool, pointer: bool) -> bool {
+fn automatic_input(name: Option<&str>) -> bool {
     !matches!(name, Some(KEYBOARD_NAME | MOUSE_NAME))
-        && !pointer
-        && (!virtual_device || name == Some(KEYD_KEYBOARD_NAME))
 }
 
 // Returns true if `device` is a keyboard fievel should automatically read, printing a
-// diagnostic and returning false for anything skipped (virtual, combined pointer, etc).
+// diagnostic and returning false for Fievel's own output devices.
 fn is_auto_candidate(path: &Path, device: &Device, quiet: bool) -> bool {
-    let virtual_device = match is_virtual(path) {
-        Ok(value) => value,
-        Err(error) => {
-            if !quiet {
-                eprintln!(
-                    "Skipping {}: cannot classify input: {error}",
-                    path.display()
-                );
-            }
-            return false;
-        }
-    };
-    let pointer = device.supported_events().contains(EventType::RELATIVE)
-        || device.supported_events().contains(EventType::ABSOLUTE);
-    if automatic_input(device.name(), virtual_device, pointer) {
+    if automatic_input(device.name()) {
         true
     } else {
         if !quiet {
             eprintln!(
-                "Skipping {} ({}): virtual or combined keyboard/pointer input; \
-                 use --device PATH to select it explicitly",
+                "Skipping {} ({}): Fievel output device",
                 path.display(),
                 device.name().unwrap_or("unnamed"),
             );
@@ -1016,35 +998,23 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_all_physical_keyboards_and_keyd_output() {
+    fn defaults_to_all_keyboard_devices_except_our_outputs() {
         for name in [
             Some("Laptop keyboard"),
             Some("USB keyboard"),
             Some("Bluetooth keyboard"),
+            Some("other remapper"),
+            Some("Keyboard with touchpad"),
             None,
         ] {
-            assert!(automatic_input(name, false, false));
+            assert!(automatic_input(name));
         }
-        assert!(automatic_input(Some(KEYD_KEYBOARD_NAME), true, false));
     }
 
     #[test]
-    fn automatic_selection_excludes_feedback_and_combined_pointer_inputs() {
-        for name in [
-            Some(KEYBOARD_NAME),
-            Some(MOUSE_NAME),
-            Some("other remapper"),
-            None,
-        ] {
-            assert!(!automatic_input(name, true, false));
-        }
-        assert!(!automatic_input(Some(KEYBOARD_NAME), false, false));
-        assert!(!automatic_input(
-            Some("Keyboard with touchpad"),
-            false,
-            true
-        ));
-        assert!(!automatic_input(Some(KEYD_KEYBOARD_NAME), true, true));
+    fn automatic_selection_excludes_feedback_outputs() {
+        assert!(!automatic_input(Some(KEYBOARD_NAME)));
+        assert!(!automatic_input(Some(MOUSE_NAME)));
     }
 
     #[test]
