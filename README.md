@@ -41,6 +41,9 @@ By default, hold **F3** (weird I know, but it was meant for me NOT to press it)
 to enter **Free Mouse Mode** and release F3 to leave it.
 This can be configured by setting `free_mouse = "f3"` to desired key (or chord).
 By default `mode = "hold"` meaning the Free Mouse Mode button needs to be held.
+While holding it, press **Z** to lock Free Mouse Mode, then release the
+activation key. Press the activation key again to unlock it (it remains active
+until released), or press **Z** again to leave Free Mouse Mode.
 With `mode = "toggle"`, you can press the Free Mouse Mode button once to enter
 Free Mouse Mode, and pressing it again will exit Free Mouse Mode.
 By default, a faint **fievel** rectangle remains at the bottom-left while Free
@@ -198,6 +201,7 @@ scroll = 0.3
 
 [keys]
 free_mouse = "f3" # Also accepts chords such as "leftalt + space"
+toggle_hold = "z" # Locks hold mode until pressed again or Free Mouse Mode is pressed
 left = "h"
 down = "j"
 up = "k"
@@ -257,7 +261,10 @@ activation. For a buffered home-row activation chord such as D+F, use a
 The top-level `mode`, `notify`, and `home_end_enabled` settings must appear before any table
 (`[speeds]`, `[easing]`, `[keys]`, `[keycast]`, or `[hints]`).
 `"hold"` activates mouse mode only while every activation key is down; releasing
-any chord member leaves the mode. `"toggle"` switches it on/off each time the
+any chord member leaves the mode. While active in hold mode, `toggle_hold`
+(**Z** by default) locks Free Mouse Mode so the activation key can be released.
+Pressing the activation key unlocks it and keeps the mode active until release;
+pressing `toggle_hold` again exits immediately. `"toggle"` switches it on/off each time the
 whole chord becomes held; releases and keyboard autorepeat do not toggle it.
 Release and repress at least one member to toggle again. Slow/fast and
 mouse-button bindings still use hold behavior in either mode.
@@ -360,5 +367,6 @@ including fractions.
 
 `notify = true` (the default) enables a persistent graphical indicator, **not**
 a desktop notification. While Free Mouse Mode is active, a rectangle labeled 
-`fievel` appears in the bottom left of the screen.
+`fievel` appears in the bottom left of the screen. It changes to `HOLD` while
+hold mode is locked.
 It stays visible for the entire hold or toggled-on interval, with no timer.

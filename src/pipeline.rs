@@ -68,6 +68,10 @@ impl InputEngine {
         self.mouse.active()
     }
 
+    pub fn hold_locked(&self) -> bool {
+        self.mouse.hold_locked()
+    }
+
     pub fn keycast_keys(&self) -> &[KeyCode] {
         self.mouse.keycast_keys()
     }

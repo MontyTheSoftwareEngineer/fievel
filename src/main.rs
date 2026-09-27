@@ -326,7 +326,7 @@ fn attach_new_keyboards(
         for key in keys.iter() {
             if held.key(index, key, 1) {
                 outputs.emit(engine.key(key, 1))?;
-                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode(), engine.hold_locked());
             }
         }
         inputs.push((path, device));
@@ -532,7 +532,7 @@ fn event_loop(
         let now = Instant::now();
         if hint_mode.is_none() {
             outputs.emit(engine.advance(now.duration_since(last)))?;
-            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode(), engine.hold_locked());
             activate_pending_hints(engine, &mut hint_mode, &mut hint_input, held, config);
         } else {
             let actions = hint_input.advance(now.duration_since(last));
@@ -562,7 +562,7 @@ fn event_loop(
                         }
                         if changed {
                             outputs.emit(engine.key(key, value))?;
-                            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+                            indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode(), engine.hold_locked());
                             activate_pending_hints(
                                 engine,
                                 &mut hint_mode,
@@ -605,7 +605,7 @@ fn event_loop(
                         outputs.emit(engine.key(key, 0))?;
                     }
                 }
-                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode(), engine.hold_locked());
                 if inputs.is_empty() && scanner.is_none() {
                     return Err(io::Error::other(
                         "All keyboards disconnected; restart fievel after reconnecting",
@@ -797,7 +797,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             for key in input.get_key_state()?.iter() {
                 if held.key(index, key, 1) {
                     outputs.emit(engine.key(key, 1))?;
-                    indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode());
+                    indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode(), engine.hold_locked());
                 }
             }
         }
@@ -1032,7 +1032,7 @@ mod tests {
 
     #[test]
     fn capabilities_and_bindings_use_the_union_of_input_keys() {
-        let config = Config::parse("[remap.main]\nz = 'f24'").unwrap();
+        let config = Config::parse("[keys]\ntoggle_hold = 'f24'\n[remap.main]\nz = 'f24'").unwrap();
         let first: AttributeSet<KeyCode> = config
             .keys
             .named()

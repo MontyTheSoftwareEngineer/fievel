@@ -108,6 +108,8 @@ pub struct Keys {
     #[serde(deserialize_with = "deserialize_chord")]
     pub free_mouse: Vec<K>,
     #[serde(deserialize_with = "deserialize_key")]
+    pub toggle_hold: K,
+    #[serde(deserialize_with = "deserialize_key")]
     pub left: K,
     #[serde(deserialize_with = "deserialize_key")]
     pub down: K,
@@ -137,6 +139,7 @@ impl Default for Keys {
     fn default() -> Self {
         Self {
             free_mouse: vec![K::KEY_F3],
+            toggle_hold: K::KEY_Z,
             left: K::KEY_H,
             down: K::KEY_J,
             up: K::KEY_K,
@@ -175,6 +178,7 @@ impl Keys {
         self.free_mouse
             .iter()
             .map(|key| ("keys.free_mouse", *key))
+            .chain([("keys.toggle_hold", self.toggle_hold)])
             .chain(self.named_controls())
             .collect()
     }

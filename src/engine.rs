@@ -24,6 +24,7 @@ pub struct Output {
 
 pub struct Engine {
     toggled: bool,
+    hold_locked: bool,
     direct_mouse_held: bool,
     held: BTreeSet<K>,
     forwarded: BTreeSet<K>,
@@ -44,6 +45,7 @@ impl Engine {
     pub fn new(config: Config) -> Self {
         Self {
             toggled: false,
+            hold_locked: false,
             direct_mouse_held: false,
             held: BTreeSet::new(),
             forwarded: BTreeSet::new(),
@@ -63,9 +65,13 @@ impl Engine {
 
     pub fn active(&self) -> bool {
         match self.config.mode {
-            Mode::Hold => self.chord_held() || self.direct_mouse_held,
+            Mode::Hold => self.chord_held() || self.direct_mouse_held || self.hold_locked,
             Mode::Toggle => self.toggled,
         }
+    }
+
+    pub fn hold_locked(&self) -> bool {
+        self.hold_locked
     }
 
     pub fn keycast_keys(&self) -> &[K] {
@@ -192,10 +198,11 @@ impl Engine {
         }
 
         let chord_pressed = !was_chord_held && self.chord_held();
-        if (chord_pressed || (!was_direct_held && self.direct_mouse_held))
-            && self.config.mode == Mode::Toggle
-        {
-            self.toggled = !self.toggled;
+        let activation_pressed = chord_pressed || (!was_direct_held && self.direct_mouse_held);
+        match self.config.mode {
+            Mode::Toggle if activation_pressed => self.toggled = !self.toggled,
+            Mode::Hold if activation_pressed && self.hold_locked => self.hold_locked = false,
+            _ => {}
         }
         if chord_pressed {
             // Release forwarded chord members (especially modifiers) and reserve
@@ -223,7 +230,11 @@ impl Engine {
 
         if let Input::Key(key, value) = input {
             let keycast_hotkey = self.config.keycast.enabled && key == self.config.keycast.hotkey;
-            if fresh_press && was_active && keycast_hotkey {
+            let hold_toggle = self.config.mode == Mode::Hold
+                && key == self.config.keys.toggle_hold;
+            if fresh_press && was_active && hold_toggle {
+                self.hold_locked = !self.hold_locked;
+            } else if fresh_press && was_active && keycast_hotkey {
                 self.keycast.toggle();
             } else if fresh_press
                 && self.active()
@@ -234,6 +245,7 @@ impl Engine {
             }
             let consume = self.config.keys.free_mouse.as_slice() == [key]
                 || self.suppressed.contains(&key)
+                || (was_active && hold_toggle)
                 || (self.active() && (self.config.keys.controls().contains(&key) || keycast_hotkey));
             if consume {
                 if value == 0 {
@@ -411,6 +423,7 @@ impl Engine {
         self.activation_keys.clear();
         self.scroll_reserved.clear();
         self.toggled = false;
+        self.hold_locked = false;
         self.direct_mouse_held = false;
         self.keycast.clear();
         self.reset_motion();
@@ -1378,6 +1391,57 @@ mod tests {
     }
 
     #[test]
+    fn hold_toggle_locks_activation_and_unlocks_with_activation_or_toggle_key() {
+        let mut e = engine();
+        assert_eq!(events(&e.key(K::KEY_Z, 1).keyboard), events(&[key_event(K::KEY_Z, 1)]));
+        assert_eq!(events(&e.key(K::KEY_Z, 0).keyboard), events(&[key_event(K::KEY_Z, 0)]));
+
+        e.key(K::KEY_F3, 1);
+        assert!(e.active());
+        assert!(!e.hold_locked());
+        assert!(e.key(K::KEY_Z, 1).keyboard.is_empty());
+        assert!(e.hold_locked());
+        assert!(e.key(K::KEY_Z, 0).keyboard.is_empty());
+        e.key(K::KEY_F3, 0);
+        assert!(e.active());
+
+        e.key(K::KEY_F3, 1);
+        assert!(e.active());
+        assert!(!e.hold_locked());
+        e.key(K::KEY_F3, 0);
+        assert!(!e.active());
+
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_Z, 1);
+        e.key(K::KEY_Z, 0);
+        e.key(K::KEY_F3, 0);
+        assert!(e.active());
+        assert!(e.key(K::KEY_Z, 1).keyboard.is_empty());
+        assert!(!e.active());
+        assert!(e.key(K::KEY_Z, 0).keyboard.is_empty());
+
+        let mut direct = engine();
+        direct.mouse(true);
+        direct.key(K::KEY_Z, 1);
+        direct.key(K::KEY_Z, 0);
+        direct.mouse(false);
+        assert!(direct.active());
+        direct.mouse(true);
+        assert!(!direct.hold_locked());
+        direct.mouse(false);
+        assert!(!direct.active());
+    }
+
+    #[test]
+    fn hold_toggle_key_remains_a_normal_key_in_toggle_mode() {
+        let mut e = toggle_engine();
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_F3, 0);
+        assert_eq!(events(&e.key(K::KEY_Z, 1).keyboard), events(&[key_event(K::KEY_Z, 1)]));
+        assert_eq!(events(&e.key(K::KEY_Z, 0).keyboard), events(&[key_event(K::KEY_Z, 0)]));
+    }
+
+    #[test]
     fn toggle_off_releases_buttons_stops_motion_and_suppresses_held_controls() {
         let mut e = toggle_engine();
         e.key(K::KEY_F3, 1);
@@ -1944,6 +2008,7 @@ mod tests {
             fast = 2000
             [keys]
             free_mouse = "f4"
+            toggle_hold = "g"
             left = "q"
             down = "e"
             up = "r"
