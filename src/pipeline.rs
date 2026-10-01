@@ -22,7 +22,7 @@ struct HintActivation {
 }
 
 impl HintActivation {
-    fn key(&mut self, key: KeyCode, value: i32) -> bool {
+    fn key(&mut self, key: KeyCode, value: i32, can_activate: bool) -> bool {
         let left_before = self.chord_held(&self.keys.left);
         let right_before = self.chord_held(&self.keys.right);
         match value {
@@ -34,7 +34,7 @@ impl HintActivation {
             }
             _ => return false,
         }
-        if value == 1 {
+        if can_activate && value == 1 {
             if !left_before && self.chord_held(&self.keys.left) {
                 self.pending = Some(ClickKind::Left);
             } else if !right_before && self.chord_held(&self.keys.right) {
@@ -131,7 +131,7 @@ fn dispatch(
         return false;
     }
     if let Event::Key(key, value) = event {
-        if hints.key(key, value) {
+        if hints.key(key, value, !mouse.active()) {
             append(output, mouse.release_all());
             return false;
         }
@@ -201,7 +201,7 @@ mod tests {
     }
 
     #[test]
-    fn entering_hints_clears_history_and_mouse_mode_but_preserves_keycast_toggle() {
+    fn hint_shortcuts_are_disabled_in_mouse_mode_and_preserve_keycast_toggle() {
         for mode in ["hold", "toggle"] {
             let config = Config::parse(&format!(
                 "mode = '{mode}'\n[keycast]\nenabled = true",
@@ -215,6 +215,23 @@ mod tests {
             engine.key(K::KEY_S, 1);
             assert_eq!(engine.keycast_keys(), [K::KEY_L, K::KEY_S]);
             assert_eq!(engine.speed_mode(), crate::engine::SpeedMode::Fast);
+
+            engine.key(K::KEY_LEFTMETA, 1);
+            let output = engine.key(K::KEY_SPACE, 1);
+            assert_eq!(keys(&output.mouse), [(K::BTN_LEFT, 1)]);
+            assert_eq!(engine.take_hint_request(), None);
+            assert!(engine.active());
+            assert_eq!(keys(&engine.key(K::KEY_SPACE, 0).mouse), [(K::BTN_LEFT, 0)]);
+            engine.key(K::KEY_LEFTMETA, 0);
+            engine.key(K::KEY_F3, 0);
+            if mode == "toggle" {
+                engine.key(K::KEY_F3, 1);
+                engine.key(K::KEY_F3, 0);
+            }
+            assert!(!engine.active());
+            assert!(engine.keycast_keys().is_empty());
+            assert_eq!(engine.speed_mode(), crate::engine::SpeedMode::Normal);
+            assert!(engine.advance(Duration::from_millis(20)).mouse.is_empty());
 
             engine.key(K::KEY_LEFTMETA, 1);
             let output = engine.key(K::KEY_SPACE, 1);
@@ -238,6 +255,12 @@ mod tests {
             engine.key(K::KEY_ESC, 1);
             engine.key(K::KEY_ESC, 0);
             assert!(engine.keycast_keys().is_empty());
+            engine.key(K::KEY_F3, 0);
+            if mode == "toggle" {
+                engine.key(K::KEY_F3, 1);
+                engine.key(K::KEY_F3, 0);
+            }
+            assert!(!engine.active());
             engine.key(K::KEY_LEFTMETA, 1);
             engine.key(K::KEY_I, 1);
             assert_eq!(engine.take_hint_request(), Some(ClickKind::Right));
@@ -274,6 +297,35 @@ mod tests {
                 assert_eq!(engine.take_hint_request(), None);
             }
         }
+    }
+
+    #[test]
+    fn hint_shortcuts_do_not_intercept_mouse_clicks_in_free_mouse_mode() {
+        let config = Config::parse("[remap.main]\n'd+f' = 'free_mouse'\n'q+w' = 'super'").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        engine.key(K::KEY_D, 1);
+        engine.key(K::KEY_F, 1);
+        assert!(engine.active());
+
+        assert!(engine.key(K::KEY_Q, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_W, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1)]
+        );
+        assert_eq!(keys(&engine.key(K::KEY_SPACE, 1).mouse), [(K::BTN_LEFT, 1)]);
+        assert_eq!(keys(&engine.key(K::KEY_I, 1).mouse), [(K::BTN_RIGHT, 1)]);
+        assert_eq!(engine.take_hint_request(), None);
+
+        assert_eq!(keys(&engine.key(K::KEY_SPACE, 0).mouse), [(K::BTN_LEFT, 0)]);
+        assert_eq!(keys(&engine.key(K::KEY_I, 0).mouse), [(K::BTN_RIGHT, 0)]);
+        assert_eq!(
+            keys(&engine.key(K::KEY_Q, 0).keyboard),
+            [(K::KEY_LEFTMETA, 0)]
+        );
+        engine.key(K::KEY_W, 0);
+        engine.key(K::KEY_D, 0);
+        engine.key(K::KEY_F, 0);
+        assert!(engine.take_hint_request().is_none());
     }
 
     #[test]

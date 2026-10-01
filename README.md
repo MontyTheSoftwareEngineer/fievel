@@ -82,6 +82,8 @@ matching letters are highlighted. **Backspace** removes the last letter.
 Press the same shortcut again to cancel, or the other shortcut to switch click
 buttons without losing your selection. **Escape** or **Enter** also cancels;
 Backspace cancels when no letters have been typed.
+Hint shortcuts are inactive while Free Mouse Mode is active, so Super+click can
+be used for desktop window actions without opening hints.
 
 Boxes have a dark grey fill. Hold **Left Ctrl** to temporarily hide all hints;
 release to restore them. Remapped modifiers work too, such as **S+D** mapped to
