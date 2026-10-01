@@ -26,6 +26,9 @@ chmod +x fievel
 
 Hold **F3** and use **H/J/K/L** to move the mouse. Release F3 to type normally.
 Press **Ctrl+C** to stop. No config file is required to use the defaults.
+If a keyboard disconnects, fievel releases its keys and keeps running. In the
+default automatic mode, newly connected keyboards are detected and attached;
+with `--device`, it waits for that same event-node path to return.
 
 To customize, copy the source repository's [`fievel.config`](fievel.config) to
 `~/.config/fievel/fievel.config` (create the directory if needed), then stop
@@ -231,7 +234,7 @@ label_highlight_color = "#ffc107ff"
 min_width = 8
 max_width = 499
 min_height = 4
-max_height = 49
+max_height = 96
 
 [hints.keys]
 left = "leftmeta + space"

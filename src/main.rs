@@ -171,15 +171,33 @@ struct KeyboardScanner {
 }
 
 impl KeyboardScanner {
-    fn start(&mut self, excluded: Vec<PathBuf>) -> io::Result<()> {
+    fn start(&mut self, excluded: Vec<PathBuf>, device: Option<PathBuf>) -> io::Result<()> {
         if self.worker.is_none() {
             self.worker = Some(
                 thread::Builder::new()
                     .name("fievel-keyboards".into())
                     .spawn(move || {
-                        let mut devices = keyboards_excluding(&excluded)?;
-                        devices.retain(|(path, device)| is_auto_candidate(path, device, true));
-                        Ok(devices)
+                        if let Some(path) = device {
+                            if excluded.contains(&path) {
+                                return Ok(Vec::new());
+                            }
+                            match Device::open(&path) {
+                                Ok(device)
+                                    if is_keyboard(&device) && !is_ours(&device) =>
+                                {
+                                    Ok(vec![(path, device)])
+                                }
+                                Ok(_) => Ok(Vec::new()),
+                                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                                    Ok(Vec::new())
+                                }
+                                Err(error) => Err(error),
+                            }
+                        } else {
+                            let mut devices = keyboards_excluding(&excluded)?;
+                            devices.retain(|(path, device)| is_auto_candidate(path, device, true));
+                            Ok(devices)
+                        }
                     })?,
             );
         }
@@ -514,6 +532,15 @@ fn keyboard_keys(
 
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
 
+fn is_device_disconnected(error: &io::Error) -> bool {
+    matches!(
+        error.raw_os_error(),
+        Some(code)
+            if code == rustix::io::Errno::NODEV.raw_os_error()
+                || code == rustix::io::Errno::IO.raw_os_error()
+    )
+}
+
 fn event_loop(
     inputs: &mut Vec<(PathBuf, Device)>,
     held: &mut HeldKeys,
@@ -522,7 +549,8 @@ fn event_loop(
     config: &Config,
     stop: &AtomicBool,
     indicator: &mut Indicator,
-    mut scanner: Option<&mut KeyboardScanner>,
+    scanner: &mut KeyboardScanner,
+    device: Option<PathBuf>,
 ) -> io::Result<()> {
     let mut last = Instant::now();
     let mut next_scan = last + RESCAN_INTERVAL;
@@ -582,9 +610,7 @@ fn event_loop(
                 {
                     false
                 }
-                Err(error)
-                    if error.raw_os_error() == Some(rustix::io::Errno::NODEV.raw_os_error()) =>
-                {
+                Err(error) if is_device_disconnected(&error) => {
                     eprintln!("Keyboard disconnected: {}", path.display());
                     true
                 }
@@ -605,11 +631,14 @@ fn event_loop(
                         outputs.emit(engine.key(key, 0))?;
                     }
                 }
-                indicator.update(engine.active(), engine.keycast_keys(), engine.speed_mode(), engine.hold_locked());
-                if inputs.is_empty() && scanner.is_none() {
-                    return Err(io::Error::other(
-                        "All keyboards disconnected; restart fievel after reconnecting",
-                    ));
+                indicator.update(
+                    engine.active(),
+                    engine.keycast_keys(),
+                    engine.speed_mode(),
+                    engine.hold_locked(),
+                );
+                if inputs.is_empty() {
+                    eprintln!("All keyboards disconnected; waiting for a keyboard");
                 }
             } else {
                 index += 1;
@@ -617,14 +646,15 @@ fn event_loop(
         }
         // Retire disconnected handles before attaching replacements: Linux can
         // reuse an event-node path for the newly connected keyboard.
-        if let Some(scanner) = scanner.as_deref_mut() {
-            if let Some(candidates) = scanner.poll() {
-                attach_new_keyboards(candidates, inputs, held, outputs, engine, indicator)?;
-                next_scan = Instant::now() + RESCAN_INTERVAL;
-            }
-            if now >= next_scan {
-                scanner.start(inputs.iter().map(|(path, _)| path.clone()).collect())?;
-            }
+        if let Some(candidates) = scanner.poll() {
+            attach_new_keyboards(candidates, inputs, held, outputs, engine, indicator)?;
+            next_scan = Instant::now() + RESCAN_INTERVAL;
+        }
+        if now >= next_scan {
+            scanner.start(
+                inputs.iter().map(|(path, _)| path.clone()).collect(),
+                device.clone(),
+            )?;
         }
         thread::sleep(TICK.saturating_sub(now.elapsed()));
     }
@@ -716,8 +746,9 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
         println!("Config: {}\n{config:#?}", config_path.display());
         return Ok(());
     }
-    let explicit = args.device.is_some();
-    let inputs = select_devices(args.device)?;
+    let device = args.device.clone();
+    let explicit = device.is_some();
+    let inputs = select_devices(device.clone())?;
     let supported = merge_keys(
         inputs
             .iter()
@@ -809,7 +840,8 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
             &config,
             &stop,
             &mut indicator,
-            if explicit { None } else { Some(&mut scanner) },
+            &mut scanner,
+            device,
         )
     })();
     indicator.clear();
@@ -894,7 +926,7 @@ mod tests {
         };
         let worker_id = scanner.worker.as_ref().unwrap().thread().id();
         assert!(scanner.poll().is_none());
-        scanner.start(Vec::new()).unwrap();
+        scanner.start(Vec::new(), None).unwrap();
         assert_eq!(scanner.worker.as_ref().unwrap().thread().id(), worker_id);
         release.send(()).unwrap();
         assert!(scanner.finish().unwrap().unwrap().is_empty());
@@ -913,6 +945,18 @@ mod tests {
         }
         assert!(scanner.poll().unwrap().unwrap().is_empty());
         assert!(scanner.poll().is_none());
+    }
+
+    #[test]
+    fn disconnected_device_errors_are_recoverable() {
+        for errno in [rustix::io::Errno::NODEV, rustix::io::Errno::IO] {
+            assert!(is_device_disconnected(&io::Error::from_raw_os_error(
+                errno.raw_os_error()
+            )));
+        }
+        assert!(!is_device_disconnected(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 
     #[test]

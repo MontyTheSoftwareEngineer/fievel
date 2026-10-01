@@ -20,7 +20,7 @@ impl Default for DetectionLimits {
             min_width: 8.0,
             max_width: 499.0,
             min_height: 4.0,
-            max_height: 49.0,
+            max_height: 96.0,
         }
     }
 }
@@ -1451,6 +1451,28 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn finds_card_tiles_up_to_the_default_height_limit() {
+        let mut pixels = image(280, 280);
+        for y in [22, 103, 184] {
+            for x in [22, 80, 139, 197] {
+                stroke_rect(&mut pixels, 280, x, y, 51, 72);
+            }
+        }
+
+        let rects = detect_regions_from_luma(&pixels, 280, 280, 1.0, DetectionLimits::default());
+
+        assert_eq!(rects.len(), 12);
+        for (rect, (x, y)) in rects.iter().zip(
+            [22, 103, 184].into_iter().flat_map(|y| [22, 80, 139, 197].into_iter().map(move |x| (x, y))),
+        ) {
+            assert_eq!(
+                *rect,
+                Rect { x: x - 1, y: y - 1, width: 53, height: 74 },
+            );
+        }
     }
 
     #[test]

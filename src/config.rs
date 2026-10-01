@@ -239,7 +239,7 @@ impl Default for Hints {
             min_width: 8,
             max_width: 499,
             min_height: 4,
-            max_height: 49,
+            max_height: 96,
         }
     }
 }
@@ -732,6 +732,7 @@ mod tests {
         assert_eq!(config.hints.keys.debug, K::KEY_F8);
         assert_eq!(config.hints.readability_color, Color::rgba(64, 64, 64, 230));
         assert_eq!(config.hints.label_symbols, "abcdefghijklmnopqrstuvwxyz");
+        assert_eq!(config.hints.max_height, 96);
         for text in [
             "[hints]\nlabel_symbols = 'a'",
             "[hints]\nlabel_symbols = 'abcA'",
