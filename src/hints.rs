@@ -431,8 +431,8 @@ impl WaylandHints {
                     min_height: config.min_height as f64,
                     max_height: config.max_height as f64,
                 },
-                config.color_links,
-                config.underline_links,
+                true,
+                true,
             );
             overlay.trace = Some(detection.trace);
             for rect in detection.regions {
