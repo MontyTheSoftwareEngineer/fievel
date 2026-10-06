@@ -10,6 +10,10 @@ Fievel reads all suitable keyboards through evdev by default and creates two uin
 `fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
 mouse events. 
 
+## Tutorial
+
+[![Watch the Fievel tutorial on YouTube](https://img.youtube.com/vi/uhxbh40br0Q/hqdefault.jpg)](https://youtu.be/uhxbh40br0Q)
+
 ## Quickstart
 
 No Rust toolchain or build is needed: download the Linux x64 binary archive
