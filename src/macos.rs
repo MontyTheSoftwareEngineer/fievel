@@ -89,6 +89,7 @@ unsafe extern "C" {
     fn fievel_mouse_button(right: bool, down: bool) -> bool;
     fn fievel_scroll(vertical: i32, horizontal: i32) -> bool;
     fn fievel_ui_pump();
+    fn fievel_ui_locate_cursor();
 }
 
 fn positive_speed(value: &str) -> Result<f64, String> {
@@ -348,6 +349,9 @@ fn handle_hint_input(
 }
 
 fn emit(output: Output, odometer: &mut odometer::Odometer) -> io::Result<()> {
+    if output.locate {
+        unsafe { fievel_ui_locate_cursor() };
+    }
     for event in &output.keyboard {
         if event.event_type() != EventType::KEY {
             continue;
@@ -496,6 +500,8 @@ fn linux_keycode(keycode: u16) -> Option<K> {
         113 => K::KEY_F15,
         118 => K::KEY_F4,
         114 => K::KEY_INSERT,
+        120 => K::KEY_F2,
+        122 => K::KEY_F1,
         64 => K::KEY_F17,
         65 => K::KEY_KPDOT,
         67 => K::KEY_KPASTERISK,
@@ -676,6 +682,7 @@ mod tests {
             K::KEY_COMMA,
             K::KEY_DOT,
             K::KEY_SPACE,
+            K::KEY_F2,
             K::KEY_F3,
             K::KEY_F8,
             K::KEY_LEFTCTRL,

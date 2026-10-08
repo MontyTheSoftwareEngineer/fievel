@@ -10,6 +10,8 @@ mod pipeline;
 mod remap;
 
 #[cfg(target_os = "linux")]
+mod locator;
+#[cfg(target_os = "linux")]
 #[path = "hints.rs"]
 mod hints;
 #[cfg(target_os = "linux")]

@@ -67,6 +67,8 @@ static bool hints_hidden;
 static bool indicator_visible;
 static bool indicator_locked;
 static NSString *indicator_label;
+static CFTimeInterval cursor_pulse_until;
+static NSPoint cursor_pulse_position;
 static CFMachPortRef event_tap;
 static CFRunLoopSourceRef event_source;
 static pthread_t event_thread;
@@ -158,6 +160,26 @@ static void fievel_release_posted_inputs(void);
         [label
             drawAtPoint:NSMakePoint(NSMinX(rect) + 9, NSMinY(rect) + 6)
             withAttributes:attributes];
+    }
+
+    if (CFAbsoluteTimeGetCurrent() < cursor_pulse_until) {
+        NSPoint window_point = [overlay_window convertPointFromScreen:cursor_pulse_position];
+        NSPoint center = [overlay_view convertPoint:window_point fromView:nil];
+        for (NSDictionary *ring in @[
+            @{ @"radius": @52, @"width": @4, @"alpha": @0.72 },
+            @{ @"radius": @35, @"width": @5, @"alpha": @0.92 },
+            @{ @"radius": @18, @"width": @3, @"alpha": @0.82 },
+        ]) {
+            CGFloat radius = [ring[@"radius"] doubleValue];
+            NSBezierPath *path = [NSBezierPath bezierPathWithOvalInRect:
+                NSMakeRect(center.x - radius, center.y - radius, radius * 2, radius * 2)];
+            path.lineWidth = [ring[@"width"] doubleValue];
+            [[NSColor colorWithCalibratedRed:1.0
+                green:0.12
+                blue:0.12
+                alpha:[ring[@"alpha"] doubleValue]] setStroke];
+            [path stroke];
+        }
     }
 }
 @end
@@ -269,6 +291,10 @@ void fievel_ui_clear_hints(void) {
 void fievel_ui_pump(void) {
     @autoreleasepool {
         fievel_ui_ensure();
+        if (cursor_pulse_until > 0 && CFAbsoluteTimeGetCurrent() >= cursor_pulse_until) {
+            cursor_pulse_until = 0;
+            [overlay_view setNeedsDisplay:YES];
+        }
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:0];
         NSEvent *event;
         while ((event = [NSApp nextEventMatchingMask:NSEventMaskAny
@@ -278,6 +304,16 @@ void fievel_ui_pump(void) {
             [NSApp sendEvent:event];
         }
         [NSApp updateWindows];
+    }
+}
+
+void fievel_ui_locate_cursor(void) {
+    @autoreleasepool {
+        fievel_ui_ensure();
+        cursor_pulse_position = NSEvent.mouseLocation;
+        cursor_pulse_until = CFAbsoluteTimeGetCurrent() + 0.75;
+        [overlay_window orderFrontRegardless];
+        [overlay_view setNeedsDisplay:YES];
     }
 }
 
