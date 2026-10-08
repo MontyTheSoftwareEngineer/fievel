@@ -7,6 +7,7 @@ mod hints;
 mod indicator;
 mod keycast;
 mod label;
+mod locator;
 mod odometer;
 mod pipeline;
 mod remap;
@@ -464,6 +465,7 @@ struct Outputs {
     keyboard: VirtualDevice,
     mouse: VirtualDevice,
     odometer: odometer::Counter,
+    locator: locator::Locator,
 }
 
 impl Outputs {
@@ -497,10 +499,12 @@ impl Outputs {
             keyboard,
             mouse,
             odometer: odometer::Counter::default(),
+            locator: locator::Locator::new()?,
         })
     }
 
     fn emit(&mut self, output: Output) -> io::Result<()> {
+        let locate = output.locate;
         // Attempt both writes even if one device fails, especially during cleanup.
         let keyboard = if output.keyboard.is_empty() {
             Ok(())
@@ -515,7 +519,12 @@ impl Outputs {
         if mouse.is_ok() {
             self.odometer.record(&output.mouse);
         }
-        keyboard.and(mouse)
+        let locator = if locate {
+            self.locator.trigger()
+        } else {
+            Ok(())
+        };
+        keyboard.and(mouse).and(locator)
     }
 }
 

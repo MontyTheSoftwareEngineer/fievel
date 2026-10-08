@@ -133,6 +133,8 @@ pub struct Keys {
     pub slow: K,
     #[serde(deserialize_with = "deserialize_key")]
     pub fast: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub locate: K,
 }
 
 impl Default for Keys {
@@ -152,6 +154,7 @@ impl Default for Keys {
             scroll_right: K::KEY_DOT,
             slow: K::KEY_A,
             fast: K::KEY_S,
+            locate: K::KEY_Q,
         }
     }
 }
@@ -183,7 +186,7 @@ impl Keys {
             .collect()
     }
 
-    fn named_controls(&self) -> [(&'static str, K); 12] {
+    fn named_controls(&self) -> [(&'static str, K); 13] {
         [
             ("keys.left", self.left),
             ("keys.down", self.down),
@@ -197,6 +200,7 @@ impl Keys {
             ("keys.scroll_right", self.scroll_right),
             ("keys.slow", self.slow),
             ("keys.fast", self.fast),
+            ("keys.locate", self.locate),
         ]
     }
 }
@@ -320,6 +324,7 @@ pub fn validate_speed(speed: f64) -> Result<(), String> {
 impl Config {
     pub fn mouse_controls(&self) -> Vec<K> {
         let mut controls = self.keys.controls().to_vec();
+        controls.push(self.keys.locate);
         if self.keycast.enabled {
             controls.push(self.keycast.hotkey);
         }
@@ -554,6 +559,7 @@ mod tests {
         assert_eq!(config.keycast.hotkey, K::KEY_ESC);
         assert_eq!(config.keycast.max_keys, 8);
         assert_eq!(config.keycast.timeout, 3.0);
+        assert_eq!(config.keys.locate, K::KEY_Q);
         assert_eq!(config.keys.named(), default.keys.named());
         assert_eq!(config.hints, default.hints);
         assert!(default.remap.main.is_empty());
@@ -586,6 +592,7 @@ mod tests {
         assert_eq!(config.keycast.max_keys, 6);
         assert_eq!(config.keycast.timeout, 2.5);
         assert!(config.mouse_controls().contains(&K::KEY_F8));
+        assert!(Config::default().mouse_controls().contains(&K::KEY_Q));
         assert!(!Config::default().mouse_controls().contains(&K::KEY_ESC));
         for text in [
             "enabled = 'true'", "hotkey = 'not-a-key'", "hotkey = 'a+b'",
@@ -631,6 +638,23 @@ mod tests {
     }
 
     #[test]
+    fn cursor_locator_key_defaults_to_q_and_must_not_conflict_with_controls() {
+        assert_eq!(Config::parse("").unwrap().keys.locate, K::KEY_Q);
+        assert_eq!(
+            Config::parse("[keys]\nlocate = 'f9'").unwrap().keys.locate,
+            K::KEY_F9
+        );
+        for binding in ["h", "f3", "z", "space"] {
+            assert!(
+                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_err(),
+                "{binding}"
+            );
+        }
+        assert!(Config::parse("[keys]\nlocater = 'f9'").is_err());
+        assert!(Config::parse("[keys]\nleft = 'q'").is_err());
+    }
+
+    #[test]
     fn indicator_defaults_on_and_accepts_only_booleans() {
         assert!(Config::default().notify);
         assert!(Config::parse("").unwrap().notify);
@@ -664,7 +688,7 @@ mod tests {
     #[test]
     fn partial_configs_keep_unspecified_defaults() {
         let config = Config::parse(
-            "[speeds]\nnormal = 900\n[keys]\nfree_mouse = 'KEY_F4'\nleft = 'q'\n[hints.keys]\nleft = 'leftmeta+j'",
+            "[speeds]\nnormal = 900\n[keys]\nfree_mouse = 'KEY_F4'\nleft = 'q'\nlocate = 'f7'\n[hints.keys]\nleft = 'leftmeta+j'",
         )
         .unwrap();
         assert_eq!(config.speeds.normal, 900.0);

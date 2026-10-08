@@ -8,6 +8,7 @@ use evdev::KeyCode as K;
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::fs::{memfd_create, MemfdFlags};
 use std::{
+    collections::VecDeque,
     error::Error,
     fs::File,
     io,
@@ -35,11 +36,20 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(3);
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
 const INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 const HINT_NAMESPACE: &str = "fievel-hints";
+const CURSOR_PULSE_DURATION: Duration = Duration::from_millis(750);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickKind {
     Left,
     Right,
+}
+
+pub fn locate_cursor() -> Result<(), Box<dyn Error>> {
+    let mut backend = WaylandHints::connect_for_locator()?;
+    let (output_index, center) = backend.capture_cursor_position()?;
+    backend.draw_cursor_pulse(output_index, center)?;
+    std::thread::sleep(CURSOR_PULSE_DURATION);
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -274,6 +284,7 @@ struct OutputState {
 
 struct CaptureState {
     output_index: usize,
+    overlay_cursor: bool,
     frame: zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
     format: Option<wl_shm::Format>,
     width: u32,
@@ -286,6 +297,31 @@ struct CaptureState {
     y_invert: bool,
     file: Option<File>,
     buffer: Option<wl_buffer::WlBuffer>,
+}
+
+impl CaptureState {
+    fn new(
+        output_index: usize,
+        overlay_cursor: bool,
+        frame: zwlr_screencopy_frame_v1::ZwlrScreencopyFrameV1,
+    ) -> Self {
+        Self {
+            output_index,
+            overlay_cursor,
+            frame,
+            format: None,
+            width: 0,
+            height: 0,
+            stride: 0,
+            buffer_done: false,
+            copy_requested: false,
+            ready: false,
+            failed: false,
+            y_invert: false,
+            file: None,
+            buffer: None,
+        }
+    }
 }
 
 struct OverlayState {
@@ -316,7 +352,19 @@ impl WaylandHints {
         Self::from_connection(connection)
     }
 
+    fn connect_for_locator() -> Result<Self, Box<dyn Error>> {
+        let connection = Connection::connect_to_env()?;
+        Self::from_connection_with_virtual_pointer(connection, false)
+    }
+
     fn from_connection(connection: Connection) -> Result<Self, Box<dyn Error>> {
+        Self::from_connection_with_virtual_pointer(connection, true)
+    }
+
+    fn from_connection_with_virtual_pointer(
+        connection: Connection,
+        require_virtual_pointer: bool,
+    ) -> Result<Self, Box<dyn Error>> {
         let queue = connection.new_event_queue::<State>();
         let qh = queue.handle();
         connection.display().get_registry(&qh, ());
@@ -342,18 +390,20 @@ impl WaylandHints {
             .screencopy
             .as_ref()
             .ok_or("compositor does not support zwlr_screencopy_manager_v1")?;
-        let virtual_pointer = this
-            .state
-            .virtual_pointer
-            .as_ref()
-            .ok_or("compositor does not support zwlr_virtual_pointer_manager_v1")?;
-        if virtual_pointer.version() < 2 {
-            return Err("zwlr_virtual_pointer_manager_v1 version 2 is required".into());
+        if require_virtual_pointer {
+            let virtual_pointer = this
+                .state
+                .virtual_pointer
+                .as_ref()
+                .ok_or("compositor does not support zwlr_virtual_pointer_manager_v1")?;
+            if virtual_pointer.version() < 2 {
+                return Err("zwlr_virtual_pointer_manager_v1 version 2 is required".into());
+            }
+            this.state.seat.as_ref().ok_or("missing wl_seat")?;
         }
         if this.state.outputs.is_empty() {
             return Err("Wayland compositor reported no outputs".into());
         }
-        this.state.seat.as_ref().ok_or("missing wl_seat")?;
         Ok(this)
     }
 
@@ -365,21 +415,9 @@ impl WaylandHints {
         let screencopy = self.state.screencopy.as_ref().unwrap().clone();
         for (output_index, output) in self.state.outputs.iter().enumerate() {
             let frame = screencopy.capture_output(0, &output.output, &self.qh, ());
-            self.state.captures.push(CaptureState {
-                output_index,
-                frame,
-                format: None,
-                width: 0,
-                height: 0,
-                stride: 0,
-                buffer_done: false,
-                copy_requested: false,
-                ready: false,
-                failed: false,
-                y_invert: false,
-                file: None,
-                buffer: None,
-            });
+            self.state
+                .captures
+                .push(CaptureState::new(output_index, false, frame));
         }
         self.pump_until(
             CAPTURE_TIMEOUT,
@@ -453,6 +491,138 @@ impl WaylandHints {
             return Err("failed to capture any Wayland output".into());
         }
         Ok(regions)
+    }
+
+    fn capture_cursor_position(&mut self) -> Result<(usize, (i32, i32)), Box<dyn Error>> {
+        self.prepare_overlays()?;
+        self.state.captures.clear();
+        let screencopy = self.state.screencopy.as_ref().unwrap().clone();
+        for (output_index, output) in self.state.outputs.iter().enumerate() {
+            let frame = screencopy.capture_output(0, &output.output, &self.qh, ());
+            self.state.captures.push(CaptureState::new(
+                output_index,
+                false,
+                frame,
+            ));
+
+            let frame = screencopy.capture_output(1, &output.output, &self.qh, ());
+            self.state.captures.push(CaptureState::new(
+                output_index,
+                true,
+                frame,
+            ));
+        }
+        self.pump_until(
+            CAPTURE_TIMEOUT,
+            "timed out waiting for cursor screenshot capture",
+            |state| {
+                state
+                    .captures
+                    .iter()
+                    .all(|capture| capture.ready || capture.failed)
+            },
+        )?;
+
+        let mut best = None;
+        let mut valid_pairs = 0;
+        for output_index in 0..self.state.outputs.len() {
+            let output = &self.state.outputs[output_index];
+            let before_index = output_index * 2;
+            let after_index = before_index + 1;
+            if self.state.captures[before_index].overlay_cursor
+                || !self.state.captures[after_index].overlay_cursor
+            {
+                continue;
+            }
+            let before = read_capture_rgb(&mut self.state.captures[before_index], output)?;
+            let after = read_capture_rgb(&mut self.state.captures[after_index], output)?;
+            let (Some((before, width, height)), Some((after, after_width, after_height))) =
+                (before, after)
+            else {
+                continue;
+            };
+            if (width, height) != (after_width, after_height) {
+                continue;
+            }
+            valid_pairs += 1;
+            let Some((rect, score)) = cursor_difference(&before, &after, width, height) else {
+                continue;
+            };
+            let overlay = &self.state.overlays[output_index];
+            let center_x = rect.x + rect.width / 2;
+            let center_y = rect.y + rect.height / 2;
+            let logical_x = (center_x as f64 * overlay.logical_width as f64
+                / width as f64)
+                .round() as i32;
+            let logical_y = (center_y as f64 * overlay.logical_height as f64
+                / height as f64)
+                .round() as i32;
+            if best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score) {
+                best = Some((score, output_index, (logical_x, logical_y)));
+            }
+        }
+        for capture in &mut self.state.captures {
+            if let Some(buffer) = capture.buffer.take() {
+                buffer.destroy();
+            }
+        }
+        if valid_pairs == 0 {
+            return Err("failed to capture cursor screenshots from any output".into());
+        }
+        best.map(|(_, output_index, center)| (output_index, center))
+            .ok_or_else(|| "cursor was not visible in the Wayland screencopy frames".into())
+    }
+
+    fn draw_cursor_pulse(
+        &mut self,
+        output_index: usize,
+        center: (i32, i32),
+    ) -> Result<(), Box<dyn Error>> {
+        let overlay = self
+            .state
+            .overlays
+            .get_mut(output_index)
+            .ok_or("cursor output disappeared before drawing the locator")?;
+        if overlay.closed
+            || !overlay.configured
+            || (overlay.width, overlay.height) != (overlay.logical_width, overlay.logical_height)
+        {
+            return Err("cursor output geometry changed while locating the pointer".into());
+        }
+        let mut canvas = Canvas::new(&mut overlay.pixels, overlay.width, overlay.height);
+        canvas.clear(Color::rgba(0, 0, 0, 0));
+        canvas.stroke_circle(
+            center.0,
+            center.1,
+            52,
+            4,
+            Color::rgba(255, 32, 32, 150),
+        );
+        canvas.stroke_circle(
+            center.0,
+            center.1,
+            34,
+            5,
+            Color::rgba(255, 32, 32, 220),
+        );
+        canvas.stroke_circle(
+            center.0,
+            center.1,
+            18,
+            3,
+            Color::rgba(255, 32, 32, 190),
+        );
+        write_all_at(&overlay.file, &overlay.pixels, 0)?;
+        overlay.surface.attach(Some(&overlay.buffer), 0, 0);
+        overlay.surface.damage(
+            0,
+            0,
+            overlay.logical_width as i32,
+            overlay.logical_height as i32,
+        );
+        overlay.surface.commit();
+        self.flush()?;
+        Ok(())
     }
 
     fn create_overlays(
@@ -1264,6 +1434,116 @@ fn write_all_at(file: &File, mut bytes: &[u8], mut offset: u64) -> io::Result<()
     Ok(())
 }
 
+fn read_capture_rgb(
+    capture: &mut CaptureState,
+    output: &OutputState,
+) -> Result<Option<(Vec<detect::Rgb>, u32, u32)>, Box<dyn Error>> {
+    if capture.failed || !capture.ready {
+        return Ok(None);
+    }
+    let Some(file) = capture.file.take() else {
+        return Ok(None);
+    };
+    let len = (capture.stride * capture.height) as usize;
+    let mut data = vec![0; len];
+    let mut offset = 0;
+    while offset < len {
+        let read = file.read_at(&mut data[offset..], offset as u64)?;
+        if read == 0 {
+            return Err("screenshot buffer ended unexpectedly".into());
+        }
+        offset += read;
+    }
+    let rgb = normalize_capture_rgb(
+        &data,
+        capture.width,
+        capture.height,
+        capture.stride,
+        capture.format.ok_or("screenshot format missing")?,
+        capture.y_invert,
+        output.transform,
+    )?;
+    let (width, height) = transformed_size(capture.width, capture.height, output.transform);
+    Ok(Some((rgb, width, height)))
+}
+
+fn cursor_difference(
+    before: &[detect::Rgb],
+    after: &[detect::Rgb],
+    width: u32,
+    height: u32,
+) -> Option<(Rect, f64)> {
+    let pixel_count = (width as usize).checked_mul(height as usize)?;
+    if width == 0 || height == 0 || before.len() != pixel_count || after.len() != pixel_count {
+        return None;
+    }
+    let changed = |index: usize| {
+        before[index]
+            .iter()
+            .zip(after[index])
+            .map(|(a, b)| a.abs_diff(b) as u16)
+            .sum::<u16>()
+            >= 48
+    };
+    let width = width as usize;
+    let height = height as usize;
+    let mut visited = vec![false; pixel_count];
+    let mut queue = VecDeque::new();
+    let mut best = None;
+
+    for start in 0..pixel_count {
+        if visited[start] || !changed(start) {
+            continue;
+        }
+        visited[start] = true;
+        queue.push_back(start);
+        let (mut min_x, mut min_y) = (width, height);
+        let (mut max_x, mut max_y) = (0, 0);
+        let mut count = 0usize;
+        while let Some(index) = queue.pop_front() {
+            let (x, y) = (index % width, index / width);
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            count += 1;
+            for next_y in y.saturating_sub(1)..=(y + 1).min(height - 1) {
+                for next_x in x.saturating_sub(1)..=(x + 1).min(width - 1) {
+                    let next = next_y * width + next_x;
+                    if !visited[next] && changed(next) {
+                        visited[next] = true;
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+        let bounds_width = max_x - min_x + 1;
+        let bounds_height = max_y - min_y + 1;
+        if count < 8
+            || bounds_width > 256
+            || bounds_height > 256
+            || bounds_width * 3 >= width
+            || bounds_height * 3 >= height
+        {
+            continue;
+        }
+        let density = count as f64 / (bounds_width * bounds_height) as f64;
+        let score = count as f64 * density.sqrt();
+        if best.as_ref().map_or(true, |(_, best_score)| score > *best_score) {
+            best = Some((
+                Rect {
+                    x: min_x as u32,
+                    y: min_y as u32,
+                    width: bounds_width as u32,
+                    height: bounds_height as u32,
+                },
+                score,
+            ));
+        }
+    }
+    best
+}
+
 fn normalize_capture_rgb(
     data: &[u8],
     width: u32,
@@ -1501,6 +1781,41 @@ mod tests {
     }
 
     #[test]
+    fn cursor_difference_prefers_a_compact_cursor_over_sparse_screen_changes() {
+        let (width, height) = (48, 32);
+        let before = vec![[0, 0, 0]; width * height];
+        let mut after = before.clone();
+        for y in 10..17 {
+            for x in 20..26 {
+                after[y * width + x] = [255, 255, 255];
+            }
+        }
+        after[2 * width + 2] = [255, 255, 255];
+        after[3 * width + 3] = [255, 255, 255];
+
+        let (bounds, _) = cursor_difference(&before, &after, width as u32, height as u32).unwrap();
+        assert_eq!(
+            bounds,
+            Rect {
+                x: 20,
+                y: 10,
+                width: 6,
+                height: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn cursor_difference_rejects_empty_and_large_changes() {
+        let (width, height) = (32, 24);
+        let before = vec![[0, 0, 0]; width * height];
+        assert!(cursor_difference(&before, &before, width as u32, height as u32).is_none());
+
+        let after = vec![[255, 255, 255]; width * height];
+        assert!(cursor_difference(&before, &after, width as u32, height as u32).is_none());
+    }
+
+    #[test]
     fn capture_normalization_honors_padding_inversion_and_format() {
         let data = [
             255, 0, 0, 255, 11, 22, 33, 44, 0, 255, 0, 255, 55, 66, 77, 88,
@@ -1610,21 +1925,10 @@ mod tests {
                 &backend.qh,
                 (),
             );
-            backend.state.captures.push(CaptureState {
-                output_index: 0,
-                frame,
-                format: None,
-                width: 0,
-                height: 0,
-                stride: 0,
-                buffer_done: false,
-                copy_requested: false,
-                ready: false,
-                failed: false,
-                y_invert: false,
-                file: None,
-                buffer: None,
-            });
+            backend
+                .state
+                .captures
+                .push(CaptureState::new(0, false, frame));
             backend
                 .pump_until(CAPTURE_TIMEOUT, "test screenshot timed out", |state| {
                     state

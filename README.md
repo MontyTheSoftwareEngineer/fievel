@@ -62,7 +62,13 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | N / M / , / . | Scroll left / down / up / right |
 | S | Hold for fast movement and scrolling; release for normal speed |
 | A | Hold for slow movement and scrolling; release for normal speed |
+| Q | Show a brief red pulse around the cursor |
 
+The cursor locator compares consecutive Wayland screencopy frames with and
+without the cursor. It requires `wlr-screencopy` cursor-overlay support; if the
+compositor does not include the cursor in captures, Fievel reports that the
+locator could not find it. The position is inferred by comparing the frames,
+so rapidly changing screen content can occasionally confuse detection.
 
 Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
 Hold the configured scroll up+down keys together to send Home, or scroll
@@ -219,6 +225,7 @@ scroll_up = ","
 scroll_right = "."
 slow = "a"
 fast = "s"
+locate = "q"
 
 [keycast]
 enabled = false # Opt in to the caster hotkey; casting starts off

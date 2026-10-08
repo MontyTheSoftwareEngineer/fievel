@@ -20,6 +20,7 @@ pub enum SpeedMode {
 pub struct Output {
     pub keyboard: Vec<InputEvent>,
     pub mouse: Vec<InputEvent>,
+    pub locate: bool,
 }
 
 pub struct Engine {
@@ -232,6 +233,9 @@ impl Engine {
             let keycast_hotkey = self.config.keycast.enabled && key == self.config.keycast.hotkey;
             let hold_toggle = self.config.mode == Mode::Hold
                 && key == self.config.keys.toggle_hold;
+            if fresh_press && self.active() && key == self.config.keys.locate {
+                out.locate = true;
+            }
             if fresh_press && was_active && hold_toggle {
                 self.hold_locked = !self.hold_locked;
             } else if fresh_press && was_active && keycast_hotkey {
@@ -246,7 +250,10 @@ impl Engine {
             let consume = self.config.keys.free_mouse.as_slice() == [key]
                 || self.suppressed.contains(&key)
                 || (was_active && hold_toggle)
-                || (self.active() && (self.config.keys.controls().contains(&key) || keycast_hotkey));
+                || (self.active()
+                    && (self.config.keys.controls().contains(&key)
+                        || key == self.config.keys.locate
+                        || keycast_hotkey));
             if consume {
                 if value == 0 {
                     self.suppressed.remove(&key);
@@ -541,6 +548,24 @@ mod tests {
     }
 
     #[test]
+    fn cursor_locator_key_is_consumed_and_triggers_only_in_free_mouse_mode() {
+        let mut e = engine();
+        assert!(!e.key(K::KEY_Q, 1).locate);
+        assert_eq!(
+            events(&e.key(K::KEY_Q, 0).keyboard),
+            events(&[key_event(K::KEY_Q, 0)]),
+        );
+
+        e.key(K::KEY_F3, 1);
+        let locate = e.key(K::KEY_Q, 1);
+        assert!(locate.locate);
+        assert!(locate.keyboard.is_empty());
+        assert!(!e.key(K::KEY_Q, 1).locate);
+        assert!(e.key(K::KEY_Q, 0).keyboard.is_empty());
+        e.key(K::KEY_F3, 0);
+    }
+
+    #[test]
     fn speed_mode_tracks_custom_bindings_releases_and_slow_priority() {
         let mut config = instant_config();
         config.keys.fast = K::KEY_F8;
@@ -635,10 +660,10 @@ mod tests {
             }
             assert_eq!(e.keycast_keys(), controls);
             assert_eq!(
-                events(&e.key(K::KEY_Q, 1).keyboard),
-                events(&[key_event(K::KEY_Q, 1)]),
+                events(&e.key(K::KEY_W, 1).keyboard),
+                events(&[key_event(K::KEY_W, 1)]),
             );
-            e.key(K::KEY_Q, 0);
+            e.key(K::KEY_W, 0);
             assert_eq!(e.keycast_keys(), controls);
             e.advance(Duration::from_secs(3));
             assert!(e.keycast_keys().is_empty());
@@ -724,8 +749,8 @@ mod tests {
         e.key(K::KEY_K, 1);
         e.key(K::KEY_K, 2);
         e.key(K::KEY_K, 0);
-        e.key(K::KEY_Q, 1);
-        e.key(K::KEY_Q, 0);
+        e.key(K::KEY_W, 1);
+        e.key(K::KEY_W, 0);
         assert_eq!(e.keycast_keys(), [K::KEY_K]);
         e.advance(Duration::from_secs(1));
         assert!(e.keycast_keys().is_empty());
@@ -2010,6 +2035,7 @@ mod tests {
             free_mouse = "f4"
             toggle_hold = "g"
             left = "q"
+            locate = "f7"
             down = "e"
             up = "r"
             right = "t"
