@@ -95,7 +95,10 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | N / M / , / . | Scroll left / down / up / right |
 | S | Hold for fast movement and scrolling; release for normal speed |
 | A | Hold for slow movement and scrolling; release for normal speed |
+| Q | Show a brief red pulse around the cursor |
 
+The locator key is configurable with `keys.locate` and defaults to Q.
+It is consumed only while Free Mouse Mode is active.
 
 Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
 Hold the configured scroll up+down keys together to send Home, or scroll
