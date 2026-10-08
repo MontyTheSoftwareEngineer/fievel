@@ -1,14 +1,15 @@
 # fievel
 
-Never touch the mouse again! A Linux application written in rust to replace 
-mouse movements with keyboard. Includes everythign that I needed to completely
+Never touch the mouse again! A Linux and macOS application written in Rust to replace
+mouse movements with keyboard. Includes everything needed to completely
 replace my mouse with keyboard. There is also an included key remapper that
 allows mapping combo's so that you can do home-row style mods on ANY keyboard,
 not just fancy programmable keyboards.
 
-Fievel reads all suitable keyboards through evdev by default and creates two uinput devices:
+On Linux, Fievel reads keyboards through evdev and creates two uinput devices:
 `fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
-mouse events. 
+mouse events. On macOS 14 or later, it uses a Quartz event tap, synthesized
+CoreGraphics events, and native AppKit overlays.
 
 ## Tutorial
 
@@ -41,6 +42,34 @@ and restart Fievel to reload it. This example also enables
 including **D+F** for Free Mouse Mode alongside **F3**.
 
 See [Configuration](#configuration) for all settings.
+
+### macOS
+
+Build on macOS 14 or later with Rust and Cargo:
+
+```sh
+cargo build --release
+./target/release/fievel
+```
+
+On first launch, allow **Input Monitoring** and **Accessibility** for the
+terminal or app running Fievel in **System Settings → Privacy & Security**.
+Quit and restart Fievel after granting access. Hint mode also needs **Screen
+Recording**; macOS requests it the first time **Super+Space** or **Super+I** is
+used. Grant it to the same terminal/app and restart Fievel before trying hints
+again. Fievel does not need root access.
+
+Some terminal apps enable **Secure Keyboard Entry**, which prevents global
+keyboard capture while that terminal is focused. If keys type into the terminal
+instead of activating Fievel, turn Secure Keyboard Entry off in the terminal's
+menu or focus another app while using Fievel.
+
+The macOS backend listens to the system keyboard rather than individual device
+nodes, so `--device` and `--list` are Linux-only. It uses the same configuration
+and key names; `super` is Command and `alt` is Option. Keys are matched by their
+physical ANSI keyboard position. The default F3 activation works when macOS
+delivers F3 as a standard function key; depending on keyboard settings, you may
+need to press **Fn+F3**.
 
 ## Controls
 
@@ -98,9 +127,11 @@ Configure shortcuts under `[hints.keys]` and colors under `[hints]`.
 key despite its name. **F8** (`debug`) cycles normal hints, detected edges, and
 color-coded accepted/rejected targets. Clicking is paused in debug views.
 
-Requires a Wayland compositor with wlr layer-shell, screencopy, and virtual-pointer
-support, such as Hyprland or Sway. Detection is visual, so it can miss controls
-or label non-clickable text. Exit and re-enter after scrolling or changing the
+On Linux, hint mode requires a Wayland compositor with wlr layer-shell,
+screencopy, and virtual-pointer support, such as Hyprland or Sway. On macOS 14
+or later, it uses ScreenCaptureKit and a native transparent overlay and requires
+Screen Recording permission. Detection is visual, so it can miss controls or
+label non-clickable text. Exit and re-enter after scrolling or changing the
 screen. See [Hint detection](HINT-DETECTION.md) for tuning and debug details.
 
 
@@ -142,8 +173,9 @@ fievel --reset-odometer
 
 This permanently clears both counters. 
 Distances are displayed in **estimated miles**, using a reference scale of
-**96 raw input units per inch** (6,082,560 units per mile).
-The default is a conventional reference, not detected device DPI.
+**96 units per inch** (6,082,560 units per mile). Linux units are raw input
+units; macOS units are display points. This is a conventional reference, not
+detected device DPI or physical distance.
 You can choose a different reference scale when reporting:
 
 ```sh
@@ -151,10 +183,12 @@ fievel --odometer --odometer-units-per-inch 800
 ```
 
 
-Totals are stored in `$XDG_STATE_HOME/fievel/odometer.toml`, or
-`~/.local/state/fievel/odometer.toml` when `XDG_STATE_HOME` is unset or not absolute.
+Totals are stored in `$XDG_STATE_HOME/fievel/odometer.toml` when that variable
+is set to an absolute path. Linux otherwise uses
+`~/.local/state/fievel/odometer.toml`; macOS uses
+`~/Library/Application Support/Fievel/odometer.toml`.
 
-### Device permissions
+### Linux device permissions
 
 To run without sudo, fievel needs read access to each keyboard's input device and
 write access to `/dev/uinput`. On distributions that grant input-device access
@@ -259,7 +293,7 @@ Easing values must be finite numbers between 0 and 1. Hint labels must use 2-26
 unique lowercase ASCII letters, and hint size limits must stay positive with
 max >= min.
 
-Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
+Key names are case-insensitive Linux keycodes on both platforms: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
 are accepted. Controls must use distinct single keys. `free_mouse` and
 `[hints.keys]` activators accept either a single distinct key or a `+`-separated

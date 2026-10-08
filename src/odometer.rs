@@ -1,11 +1,15 @@
+#[cfg(target_os = "linux")]
 use evdev::{
-    raw_stream::RawDevice, AbsoluteAxisCode as A, EventType, InputEvent, KeyCode as K, PropType,
-    RelativeAxisCode as R, SynchronizationCode as S,
+    raw_stream::RawDevice, AbsoluteAxisCode as A, KeyCode as K, PropType, SynchronizationCode as S,
 };
-use rustix::fs::{flock, FlockOperation, OFlags};
+use evdev::{EventType, InputEvent, RelativeAxisCode as R};
+#[cfg(target_os = "linux")]
+use rustix::fs::OFlags;
+use rustix::fs::{flock, FlockOperation};
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
+use std::collections::{BTreeMap, BTreeSet};
 use std::{
-    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     os::unix::{
@@ -22,6 +26,7 @@ use std::{
 };
 
 const SAVE_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
 const SCAN_INTERVAL: Duration = Duration::from_secs(2);
 
 #[derive(Debug, Default, Deserialize, Serialize, PartialEq)]
@@ -41,6 +46,9 @@ fn state_path() -> io::Result<PathBuf> {
     let home = std::env::var_os("HOME")
         .filter(|s| !s.is_empty())
         .ok_or_else(|| io::Error::other("HOME is unset; set HOME or an absolute XDG_STATE_HOME"))?;
+    #[cfg(target_os = "macos")]
+    return Ok(PathBuf::from(home).join("Library/Application Support/Fievel/odometer.toml"));
+    #[cfg(target_os = "linux")]
     Ok(PathBuf::from(home).join(".local/state/fievel/odometer.toml"))
 }
 
@@ -94,8 +102,16 @@ pub fn report(units_per_inch: f64) -> io::Result<()> {
         "Physical mouse/trackpad:  {:.6} miles (estimated)",
         miles(totals.physical_input_units, units_per_inch)
     );
+    #[cfg(target_os = "linux")]
     println!("\nTotals since reset while Fievel is running; saved every second.");
+    #[cfg(target_os = "macos")]
+    println!("\nTotals since reset while Fievel is running; saved every second.");
+    #[cfg(target_os = "linux")]
     println!("Reference scale: {units_per_inch} input units/inch; not measured physical or screen distance.");
+    #[cfg(target_os = "macos")]
+    println!(
+        "Reference scale: {units_per_inch} macOS points/inch; not measured physical distance."
+    );
     println!("State: {}", path.display());
     Ok(())
 }
@@ -218,6 +234,16 @@ impl Counter {
         }
         let distance = delta[0].hypot(delta[1]);
         if distance != 0.0 {
+            self.record_distance(distance);
+        }
+    }
+
+    pub fn record_pointer_motion(&self, dx: f64, dy: f64) {
+        self.record_distance(dx.hypot(dy));
+    }
+
+    fn record_distance(&self, distance: f64) {
+        if distance != 0.0 {
             self.0
                 .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |bits| {
                     Some((f64::from_bits(bits) + distance).to_bits())
@@ -233,15 +259,65 @@ impl Counter {
 
 pub struct Odometer {
     pub counter: Counter,
+    pub physical_counter: Counter,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<io::Result<()>>>,
 }
 
 impl Odometer {
     pub fn start(stop: Arc<AtomicBool>) -> io::Result<Self> {
+        #[cfg(target_os = "macos")]
+        {
+            return Self::start_macos(stop);
+        }
+        #[cfg(target_os = "linux")]
         Self::start_at(state_path()?, stop, PathBuf::from("/dev/input"))
     }
 
+    #[cfg(target_os = "macos")]
+    fn start_macos(application_stop: Arc<AtomicBool>) -> io::Result<Self> {
+        let path = state_path()?;
+        let lock = writer_lock(&path)?;
+        flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+            io::Error::other(format!(
+                "Cannot lock odometer: {error}. Is Fievel already running? Use --odometer to read totals."
+            ))
+        })?;
+        let totals = load(&path)?;
+        save(&path, &totals)?;
+        let reset_listener = ResetListener::bind(&path)?;
+        let counter = Counter::default();
+        let physical_counter = Counter::default();
+        let worker_counter = counter.clone();
+        let worker_physical_counter = physical_counter.clone();
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        let worker = thread::Builder::new()
+            .name("odometer".into())
+            .spawn(move || {
+                let _lock = lock;
+                let result = monitor_macos(
+                    &path,
+                    totals,
+                    &worker_counter,
+                    &worker_physical_counter,
+                    &worker_stop,
+                    &reset_listener,
+                );
+                if result.is_err() {
+                    application_stop.store(true, Ordering::Relaxed);
+                }
+                result
+            })?;
+        Ok(Self {
+            counter,
+            physical_counter,
+            stop,
+            worker: Some(worker),
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     fn start_at(
         path: PathBuf,
         application_stop: Arc<AtomicBool>,
@@ -280,6 +356,7 @@ impl Odometer {
             })?;
         Ok(Self {
             counter,
+            physical_counter: Counter::default(),
             stop,
             worker: Some(worker),
         })
@@ -296,6 +373,46 @@ impl Odometer {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn monitor_macos(
+    path: &Path,
+    mut totals: Totals,
+    counter: &Counter,
+    physical_counter: &Counter,
+    stop: &AtomicBool,
+    reset_listener: &ResetListener,
+) -> io::Result<()> {
+    let mut fievel_base = totals.fievel_input_units;
+    let mut physical_base = totals.physical_input_units;
+    let mut fievel_origin = counter.total();
+    let mut physical_origin = physical_counter.total();
+    let mut last_save = Instant::now();
+    while !stop.load(Ordering::Acquire) {
+        if let Some(mut request) = reset_listener.accept_reset()? {
+            totals = Totals::default();
+            fievel_base = 0.0;
+            physical_base = 0.0;
+            fievel_origin = counter.total();
+            physical_origin = physical_counter.total();
+            save(path, &totals)?;
+            request.write_all(b"O")?;
+            last_save = Instant::now();
+        }
+        if last_save.elapsed() >= SAVE_INTERVAL {
+            totals.fievel_input_units = fievel_base + (counter.total() - fievel_origin).max(0.0);
+            totals.physical_input_units =
+                physical_base + (physical_counter.total() - physical_origin).max(0.0);
+            save(path, &totals)?;
+            last_save = Instant::now();
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    totals.fievel_input_units = fievel_base + (counter.total() - fievel_origin).max(0.0);
+    totals.physical_input_units =
+        physical_base + (physical_counter.total() - physical_origin).max(0.0);
+    save(path, &totals)
+}
+
 impl Drop for Odometer {
     fn drop(&mut self) {
         if let Err(error) = self.finish() {
@@ -304,12 +421,14 @@ impl Drop for Odometer {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy, Default)]
 struct Contact {
     position: [Option<i32>; 2],
     previous: Option<[i32; 2]>,
 }
 
+#[cfg(target_os = "linux")]
 impl Contact {
     fn distance(&mut self) -> f64 {
         let [Some(x), Some(y)] = self.position else {
@@ -324,6 +443,7 @@ impl Contact {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 enum Kind {
     Mouse,
@@ -331,6 +451,7 @@ enum Kind {
     Multitouch,
 }
 
+#[cfg(target_os = "linux")]
 struct Motion {
     kind: Kind,
     relative: [f64; 2],
@@ -343,6 +464,7 @@ struct Motion {
     dropped: bool,
 }
 
+#[cfg(target_os = "linux")]
 impl Motion {
     fn new(kind: Kind) -> Self {
         Self {
@@ -470,6 +592,7 @@ impl Motion {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn pointer_kind(device: &RawDevice) -> Option<Kind> {
     if device
         .supported_relative_axes()
@@ -506,17 +629,20 @@ fn pointer_kind(device: &RawDevice) -> Option<Kind> {
     }
 }
 
+#[cfg(target_os = "linux")]
 struct Pointer {
     device: RawDevice,
     motion: Motion,
 }
 
+#[cfg(target_os = "linux")]
 fn is_virtual_pointer(sys_path: &Path) -> bool {
     // Bluetooth hardware can live under virtual/misc/uhid. Only parentless
     // virtual input devices (uinput/remappers) must be excluded here.
     sys_path.starts_with("/sys/devices/virtual/input")
 }
 
+#[cfg(target_os = "linux")]
 fn discover(
     devices: &mut BTreeMap<PathBuf, Pointer>,
     warned: &mut BTreeSet<PathBuf>,
@@ -577,6 +703,7 @@ fn discover(
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 fn monitor(
     path: &Path,
     mut totals: Totals,
@@ -651,7 +778,7 @@ fn monitor(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 

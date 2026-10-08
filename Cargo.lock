@@ -176,6 +176,7 @@ dependencies = [
 name = "fievel"
 version = "1.2.0"
 dependencies = [
+ "cc",
  "clap",
  "evdev",
  "rustix",

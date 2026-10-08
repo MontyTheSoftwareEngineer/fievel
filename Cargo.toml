@@ -2,7 +2,7 @@
 name = "fievel"
 version = "1.2.0"
 edition = "2021"
-description = "Hold F3 for keyboard-driven mouse control on Linux"
+description = "Keyboard remapping and mouse control for Linux and macOS"
 license = "MIT"
 
 [dependencies]
@@ -11,9 +11,14 @@ evdev = "0.13.2"
 signal-hook = "0.3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+rustix = { version = "1", features = ["event", "fs"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
-rustix = { version = "1", features = ["event", "fs"] }
+
+[build-dependencies]
+cc = "1"
 
 [profile.release]
 lto = true
