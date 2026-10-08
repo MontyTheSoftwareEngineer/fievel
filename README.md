@@ -99,6 +99,10 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 
 The locator key is configurable with `keys.locate` and defaults to Q.
 It is consumed only while Free Mouse Mode is active.
+On Linux, the locator compares Wayland screencopy frames with and without the
+cursor. It requires `wlr-screencopy` cursor-overlay support, and rapidly
+changing screen content can occasionally confuse detection. On macOS, it draws
+a brief pulse at the current cursor position using the native overlay.
 
 Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
 Hold the configured scroll up+down keys together to send Home, or scroll
@@ -260,6 +264,7 @@ scroll_up = ","
 scroll_right = "."
 slow = "a"
 fast = "s"
+locate = "q"
 
 [keycast]
 enabled = false # Opt in to the caster hotkey; casting starts off

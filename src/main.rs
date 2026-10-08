@@ -20,9 +20,6 @@ mod indicator;
 #[cfg(target_os = "linux")]
 mod indicator_render;
 #[cfg(target_os = "linux")]
-#[path = "odometer.rs"]
-mod odometer;
-#[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod platform;
 

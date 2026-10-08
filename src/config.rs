@@ -638,6 +638,23 @@ mod tests {
     }
 
     #[test]
+    fn cursor_locator_key_defaults_to_q_and_must_not_conflict_with_controls() {
+        assert_eq!(Config::parse("").unwrap().keys.locate, K::KEY_Q);
+        assert_eq!(
+            Config::parse("[keys]\nlocate = 'f9'").unwrap().keys.locate,
+            K::KEY_F9
+        );
+        for binding in ["h", "f3", "z", "space"] {
+            assert!(
+                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_err(),
+                "{binding}"
+            );
+        }
+        assert!(Config::parse("[keys]\nlocater = 'f9'").is_err());
+        assert!(Config::parse("[keys]\nleft = 'q'").is_err());
+    }
+
+    #[test]
     fn indicator_defaults_on_and_accepts_only_booleans() {
         assert!(Config::default().notify);
         assert!(Config::parse("").unwrap().notify);

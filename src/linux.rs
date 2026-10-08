@@ -1,14 +1,16 @@
 use clap::Parser;
-use config::Config;
-use engine::Output;
+use crate::{
+    config::{self, Config},
+    engine::Output,
+    hint_input::{HintInput, HintInputEvent},
+    hints::{ActiveHints, HintResult},
+    indicator::Overlays as Indicator,
+    pipeline::InputEngine as Engine,
+};
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
     RelativeAxisCode,
 };
-use hint_input::{HintInput, HintInputEvent};
-use hints::{ActiveHints, HintResult};
-use indicator::Overlays as Indicator;
-use pipeline::InputEngine as Engine;
 use std::{
     error::Error,
     fs, io,
@@ -20,6 +22,9 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
+#[path = "odometer.rs"]
+mod odometer;
 
 const KEYBOARD_NAME: &str = "fievel keyboard";
 const MOUSE_NAME: &str = "fievel pointer";
@@ -724,7 +729,7 @@ fn handle_hint_input(
     }
 }
 
-fn run(args: Args) -> Result<(), Box<dyn Error>> {
+fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
     if args.odometer {
         odometer::report(args.odometer_units_per_inch)?;
         return Ok(());
@@ -886,7 +891,7 @@ fn run(args: Args) -> Result<(), Box<dyn Error>> {
 }
 
 pub fn run() {
-    if let Err(error) = run(Args::parse()) {
+    if let Err(error) = run_with_args(Args::parse()) {
         eprintln!("fievel: {error}");
         std::process::exit(1);
     }

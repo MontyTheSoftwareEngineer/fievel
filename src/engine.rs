@@ -548,6 +548,24 @@ mod tests {
     }
 
     #[test]
+    fn cursor_locator_key_is_consumed_and_triggers_only_in_free_mouse_mode() {
+        let mut e = engine();
+        assert!(!e.key(K::KEY_Q, 1).locate);
+        assert_eq!(
+            events(&e.key(K::KEY_Q, 0).keyboard),
+            events(&[key_event(K::KEY_Q, 0)]),
+        );
+
+        e.key(K::KEY_F3, 1);
+        let locate = e.key(K::KEY_Q, 1);
+        assert!(locate.locate);
+        assert!(locate.keyboard.is_empty());
+        assert!(!e.key(K::KEY_Q, 1).locate);
+        assert!(e.key(K::KEY_Q, 0).keyboard.is_empty());
+        e.key(K::KEY_F3, 0);
+    }
+
+    #[test]
     fn speed_mode_tracks_custom_bindings_releases_and_slow_priority() {
         let mut config = instant_config();
         config.keys.fast = K::KEY_F8;
@@ -567,24 +585,6 @@ mod tests {
         e.key(K::KEY_F9, 1);
         e.key(K::KEY_F3, 0);
         assert_eq!(e.speed_mode(), SpeedMode::Normal);
-    }
-
-    #[test]
-    fn cursor_locator_key_is_consumed_and_triggers_only_in_free_mouse_mode() {
-        let mut e = engine();
-        assert!(!e.key(K::KEY_Q, 1).locate);
-        assert_eq!(
-            events(&e.key(K::KEY_Q, 0).keyboard),
-            events(&[key_event(K::KEY_Q, 0)]),
-        );
-
-        e.key(K::KEY_F3, 1);
-        let locate = e.key(K::KEY_Q, 1);
-        assert!(locate.locate);
-        assert!(locate.keyboard.is_empty());
-        assert!(!e.key(K::KEY_Q, 1).locate);
-        assert!(e.key(K::KEY_Q, 0).keyboard.is_empty());
-        e.key(K::KEY_F3, 0);
     }
 
     #[test]
@@ -749,8 +749,8 @@ mod tests {
         e.key(K::KEY_K, 1);
         e.key(K::KEY_K, 2);
         e.key(K::KEY_K, 0);
-        e.key(K::KEY_Q, 1);
-        e.key(K::KEY_Q, 0);
+        e.key(K::KEY_W, 1);
+        e.key(K::KEY_W, 0);
         assert_eq!(e.keycast_keys(), [K::KEY_K]);
         e.advance(Duration::from_secs(1));
         assert!(e.keycast_keys().is_empty());

@@ -202,6 +202,16 @@ mod tests {
     }
 
     #[test]
+    fn cursor_locator_binding_survives_the_input_pipeline() {
+        let mut engine = InputEngine::new(Config::default()).unwrap();
+        engine.key(K::KEY_F3, 1);
+        let output = engine.key(K::KEY_Q, 1);
+        assert!(output.locate);
+        assert!(output.keyboard.is_empty());
+        assert!(engine.key(K::KEY_Q, 0).keyboard.is_empty());
+    }
+
+    #[test]
     fn hint_shortcuts_are_disabled_in_mouse_mode_and_preserve_keycast_toggle() {
         for mode in ["hold", "toggle"] {
             let config = Config::parse(&format!(
@@ -591,15 +601,6 @@ mod tests {
         );
         assert!(!engine.active());
         assert!(engine.key(K::KEY_SPACE, 0).keyboard.is_empty());
-    }
-
-    #[test]
-    fn cursor_locator_binding_survives_the_input_pipeline() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
-        engine.key(K::KEY_F3, 1);
-        let output = engine.key(K::KEY_Q, 1);
-        assert!(output.locate);
-        assert!(output.keyboard.is_empty());
     }
 
     #[test]
