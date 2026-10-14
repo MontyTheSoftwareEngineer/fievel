@@ -6,7 +6,7 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/fievel
-Restart=on-failure
+Restart=always
 RestartSec=2
 
 [Install]
