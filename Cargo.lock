@@ -185,6 +185,7 @@ dependencies = [
  "toml",
  "wayland-client",
  "wayland-protocols-wlr",
+ "windows-sys",
 ]
 
 [[package]]

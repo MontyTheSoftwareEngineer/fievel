@@ -1,4 +1,4 @@
-use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode};
+use crate::input::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::BTreeSet;
 use std::time::Duration;
 

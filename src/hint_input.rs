@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, time::Duration};
 
-use evdev::KeyCode as K;
+use crate::input::KeyCode as K;
 
 use crate::{
     config::{Config, HintKeys},

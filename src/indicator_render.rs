@@ -1,4 +1,4 @@
-use evdev::KeyCode;
+use crate::input::KeyCode;
 use crate::engine::SpeedMode;
 
 const COLUMNS: usize = 40;

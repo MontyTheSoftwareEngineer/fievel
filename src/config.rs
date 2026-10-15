@@ -1,5 +1,5 @@
 use crate::font::Color;
-use evdev::KeyCode as K;
+use crate::input::KeyCode as K;
 use serde::{Deserialize, Deserializer};
 use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
 

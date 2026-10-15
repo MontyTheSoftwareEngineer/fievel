@@ -1,5 +1,5 @@
 use crate::config::parse_key;
-use evdev::KeyCode as K;
+use crate::input::KeyCode as K;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;

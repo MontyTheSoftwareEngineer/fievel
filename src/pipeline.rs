@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, time::Duration};
 
-use evdev::KeyCode;
+use crate::input::KeyCode;
 
 use crate::{
     config::{Config, HintKeys},
@@ -156,7 +156,7 @@ fn append(output: &mut Output, next: Output) {
 mod tests {
     use super::*;
     use crate::config::Mode;
-    use evdev::{InputEvent, KeyCode as K, RelativeAxisCode as R};
+    use crate::input::{InputEvent, KeyCode as K, RelativeAxisCode as R};
 
     fn config() -> Config {
         let mut config = Config::parse(include_str!("../fievel.config")).unwrap();

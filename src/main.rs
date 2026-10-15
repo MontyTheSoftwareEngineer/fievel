@@ -4,6 +4,7 @@ mod engine;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod font;
 mod hint_input;
+mod input;
 mod keycast;
 mod label;
 mod pipeline;
@@ -36,8 +37,20 @@ mod odometer;
 #[path = "macos.rs"]
 mod platform;
 
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-compile_error!("fievel supports Linux and macOS");
+#[cfg(target_os = "windows")]
+#[path = "windows_hints.rs"]
+mod hints;
+#[cfg(target_os = "windows")]
+#[path = "odometer_windows.rs"]
+mod odometer;
+#[cfg(target_os = "windows")]
+mod windows_ui;
+#[cfg(target_os = "windows")]
+#[path = "windows.rs"]
+mod platform;
+
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+compile_error!("fievel supports Linux, macOS, and Windows");
 
 fn main() {
     platform::run();

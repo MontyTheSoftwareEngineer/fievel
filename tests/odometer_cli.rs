@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "windows"))]
+
 use rustix::fs::{flock, FlockOperation};
 use std::{fs, process::Command};
 
