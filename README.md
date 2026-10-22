@@ -165,6 +165,23 @@ Set up [device permissions](#device-permissions) once, then run the binary:
 
 Or copy it to a directory on your `PATH`
 
+### Package a release
+
+After building the release binary, create a versioned Linux x64 archive with:
+
+```sh
+./scripts/package-release.sh
+```
+
+This writes `target/release/fievel-<version>-linux-x64.tar.gz`, containing the
+binary, repository scripts, systemd unit, example config, README, and license.
+The installer in the archive uses its bundled `fievel` binary and does not need
+the Rust toolchain. Pass an archive path to write somewhere else:
+
+```sh
+./scripts/package-release.sh ./fievel-linux-x64.tar.gz
+```
+
 ### Movement odometer
 
 While fievel is running, it automatically keeps separate totals since reset for
