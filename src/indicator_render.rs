@@ -11,6 +11,7 @@ fn foreground(speed: SpeedMode) -> u32 {
     match speed {
         SpeedMode::Normal => 0xf0f0f0f0,
         SpeedMode::Fast => 0xf000f000,
+        SpeedMode::SuperFast => 0xf000f0f0,
         SpeedMode::Slow => 0xf0f0f000,
     }
 }
@@ -242,6 +243,7 @@ mod tests {
         for (speed, expected) in [
             (SpeedMode::Normal, 0xf0f0f0f0u32),
             (SpeedMode::Fast, 0xf000f000),
+            (SpeedMode::SuperFast, 0xf000f0f0),
             (SpeedMode::Slow, 0xf0f0f000),
         ] {
             let pixels = layout.pixels(width, height, speed);

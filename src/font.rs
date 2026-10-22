@@ -83,6 +83,33 @@ impl<'a> Canvas<'a> {
         self.fill_rect(x + width - 1, y, 1, height, color);
     }
 
+    pub fn stroke_circle(
+        &mut self,
+        center_x: i32,
+        center_y: i32,
+        radius: i32,
+        thickness: i32,
+        color: Color,
+    ) {
+        if radius <= 0 || thickness <= 0 {
+            return;
+        }
+        let inner = (radius - thickness / 2).max(0);
+        let outer = radius + (thickness + 1) / 2;
+        let inner_squared = inner * inner;
+        let outer_squared = outer * outer;
+        for y in (center_y - outer).max(0)..=(center_y + outer).min(self.height as i32 - 1) {
+            for x in (center_x - outer).max(0)..=(center_x + outer).min(self.width as i32 - 1) {
+                let dx = x - center_x;
+                let dy = y - center_y;
+                let distance_squared = dx * dx + dy * dy;
+                if (inner_squared..=outer_squared).contains(&distance_squared) {
+                    self.fill_rect(x, y, 1, 1, color);
+                }
+            }
+        }
+    }
+
     pub fn draw_text(&mut self, x: i32, y: i32, text: &str, scale: i32, color: Color) {
         if scale <= 0 {
             return;
@@ -279,5 +306,17 @@ mod tests {
         canvas.draw_text(2, 2, "ab", 1, Color::rgba(255, 128, 0, 0xff));
         assert!(pixels.chunks_exact(4).any(|pixel| pixel[3] != 0));
         assert_eq!(Canvas::text_size("ab", 2), (22, 14));
+    }
+
+    #[test]
+    fn draws_clipped_translucent_circle_rings() {
+        let mut pixels = vec![0; 24 * 24 * 4];
+        let mut canvas = Canvas::new(&mut pixels, 24, 24);
+        canvas.stroke_circle(0, 0, 8, 3, Color::rgba(255, 0, 0, 128));
+        let at = |x: usize, y: usize| &pixels[(y * 24 + x) * 4..(y * 24 + x + 1) * 4];
+        assert_eq!(at(0, 0), &[0, 0, 0, 0]);
+        assert_eq!(at(8, 0), &[0, 0, 128, 128]);
+        assert_eq!(at(2, 2), &[0, 0, 0, 0]);
+        assert!(at(0, 8)[3] != 0);
     }
 }

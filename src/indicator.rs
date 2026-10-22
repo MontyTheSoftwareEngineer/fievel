@@ -817,8 +817,15 @@ mod tests {
         };
         let keys = [K::KEY_K, K::KEY_L];
         for (index, speed) in [
-            SpeedMode::Normal, SpeedMode::Fast, SpeedMode::Slow, SpeedMode::Normal,
-        ].into_iter().enumerate() {
+            SpeedMode::Normal,
+            SpeedMode::Fast,
+            SpeedMode::SuperFast,
+            SpeedMode::Slow,
+            SpeedMode::Normal,
+        ]
+        .into_iter()
+        .enumerate()
+        {
             overlays.update(true, &keys, speed, false);
             assert_eq!(shared.revision.load(Ordering::SeqCst), index as u64 + 1);
             assert_eq!(shared.frame.lock().unwrap().speed, speed);

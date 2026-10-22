@@ -1,0 +1,13 @@
+[Unit]
+Description=Fievel keyboard and mouse control
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/fievel
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target
