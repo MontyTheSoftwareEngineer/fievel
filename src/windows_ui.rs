@@ -412,6 +412,7 @@ impl Overlay {
             match speed {
                 SpeedMode::Normal => {}
                 SpeedMode::Fast => label.push_str("  FAST"),
+                SpeedMode::SuperFast => label.push_str("  SUPER FAST"),
                 SpeedMode::Slow => label.push_str("  SLOW"),
             }
             Some(label)

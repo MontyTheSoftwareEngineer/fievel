@@ -13,6 +13,7 @@ pub enum SpeedMode {
     #[default]
     Normal,
     Fast,
+    SuperFast,
     Slow,
 }
 
@@ -111,15 +112,26 @@ impl Engine {
         match self.speed_mode() {
             SpeedMode::Normal => normal,
             SpeedMode::Fast => fast,
+            SpeedMode::SuperFast => fast * 2.0,
             SpeedMode::Slow => slow,
         }
+    }
+
+    fn shift_held(&self) -> bool {
+        [K::KEY_LEFTSHIFT, K::KEY_RIGHTSHIFT]
+            .into_iter()
+            .any(|key| self.control_held(key))
     }
 
     pub fn speed_mode(&self) -> SpeedMode {
         if self.active() && self.control_held(self.config.keys.slow) {
             SpeedMode::Slow
         } else if self.active() && self.control_held(self.config.keys.fast) {
-            SpeedMode::Fast
+            if self.shift_held() {
+                SpeedMode::SuperFast
+            } else {
+                SpeedMode::Fast
+            }
         } else {
             SpeedMode::Normal
         }
@@ -220,6 +232,9 @@ impl Engine {
         if self.active() && !was_active {
             // Transfer already-held controls from the keyboard to the mouse.
             for control in self.config.mouse_controls() {
+                if is_shift_key(control) {
+                    continue;
+                }
                 if self.forwarded.remove(&control) {
                     out.keyboard.push(key_event(control, 0));
                 }
@@ -230,49 +245,57 @@ impl Engine {
         }
 
         if let Input::Key(key, value) = input {
-            let keycast_hotkey = self.config.keycast.enabled && key == self.config.keycast.hotkey;
-            let hold_toggle = self.config.mode == Mode::Hold
-                && key == self.config.keys.toggle_hold;
-            if fresh_press && self.active() && key == self.config.keys.locate {
-                out.locate = true;
-            }
-            if fresh_press && was_active && hold_toggle {
-                self.hold_locked = !self.hold_locked;
-            } else if fresh_press && was_active && keycast_hotkey {
-                self.keycast.toggle();
-            } else if fresh_press
-                && self.active()
-                && self.config.keys.controls().contains(&key)
-                && !self.activation_keys.contains(&key)
-            {
-                self.keycast.press(key);
-            }
-            let consume = self.config.keys.free_mouse.as_slice() == [key]
-                || self.suppressed.contains(&key)
-                || (was_active && hold_toggle)
-                || (self.active()
-                    && (self.config.keys.controls().contains(&key)
-                        || key == self.config.keys.locate
-                        || keycast_hotkey));
-            if consume {
-                if value == 0 {
-                    self.suppressed.remove(&key);
-                    if self.forwarded.remove(&key) {
-                        out.keyboard.push(key_event(key, 0));
+            if !is_shift_key(key) {
+                let keycast_hotkey =
+                    self.config.keycast.enabled && key == self.config.keycast.hotkey;
+                let hold_toggle =
+                    self.config.mode == Mode::Hold && key == self.config.keys.toggle_hold;
+                if fresh_press && self.active() && key == self.config.keys.locate {
+                    out.locate = true;
+                }
+                if fresh_press && was_active && hold_toggle {
+                    self.hold_locked = !self.hold_locked;
+                } else if fresh_press && was_active && keycast_hotkey {
+                    self.keycast.toggle();
+                } else if fresh_press
+                    && self.active()
+                    && self.config.keys.controls().contains(&key)
+                    && !self.activation_keys.contains(&key)
+                {
+                    self.keycast.press(key);
+                }
+                let consume = self.config.keys.free_mouse.as_slice() == [key]
+                    || self.suppressed.contains(&key)
+                    || (was_active && hold_toggle)
+                    || (self.active()
+                        && (self.config.keys.controls().contains(&key)
+                            || key == self.config.keys.locate
+                            || keycast_hotkey));
+                if consume {
+                    if value == 0 {
+                        self.suppressed.remove(&key);
+                        if self.forwarded.remove(&key) {
+                            out.keyboard.push(key_event(key, 0));
+                        }
                     }
                 } else {
-                    self.suppressed.insert(key);
-                }
-            } else {
-                match value {
-                    1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
-                    0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
-                    2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
-                    _ => {}
+                    match value {
+                        1 if self.forwarded.insert(key) => {
+                            out.keyboard.push(key_event(key, 1))
+                        }
+                        0 if self.forwarded.remove(&key) => {
+                            out.keyboard.push(key_event(key, 0))
+                        }
+                        2 if self.forwarded.contains(&key) => {
+                            out.keyboard.push(key_event(key, 2))
+                        }
+                        _ => {}
+                    }
                 }
             }
         }
 
+        self.reconcile_shift_forwarding(&mut out);
         for (index, down) in self.home_end_chords().into_iter().enumerate() {
             if input.is_press() && down && !old_home_end[index] {
                 // A page jump must not be followed by coasting or by the remaining
@@ -330,6 +353,23 @@ impl Engine {
             }
         }
         out
+    }
+
+    fn reconcile_shift_forwarding(&mut self, out: &mut Output) {
+        let speed_held = self.active()
+            && (self.control_held(self.config.keys.slow)
+                || self.control_held(self.config.keys.fast));
+        for key in [K::KEY_LEFTSHIFT, K::KEY_RIGHTSHIFT] {
+            let should_forward = !speed_held
+                && self.held.contains(&key)
+                && !self.activation_keys.contains(&key)
+                && !self.suppressed.contains(&key);
+            if should_forward && self.forwarded.insert(key) {
+                out.keyboard.push(key_event(key, 1));
+            } else if !should_forward && self.forwarded.remove(&key) {
+                out.keyboard.push(key_event(key, 0));
+            }
+        }
     }
 
     pub fn advance(&mut self, elapsed: Duration) -> Output {
@@ -454,6 +494,10 @@ fn instant(easing: f64) -> bool {
     easing == 0.0 || easing == 1.0
 }
 
+fn is_shift_key(key: K) -> bool {
+    key == K::KEY_LEFTSHIFT || key == K::KEY_RIGHTSHIFT
+}
+
 fn advance_axis(
     remainder: &mut f64,
     velocity: &mut f64,
@@ -576,15 +620,90 @@ mod tests {
         assert_eq!(e.speed_mode(), SpeedMode::Normal);
         e.key(K::KEY_F3, 1);
         assert_eq!(e.speed_mode(), SpeedMode::Fast);
+        e.key(K::KEY_LEFTSHIFT, 1);
+        assert_eq!(e.speed_mode(), SpeedMode::SuperFast);
         e.key(K::KEY_F9, 1);
         assert_eq!(e.speed_mode(), SpeedMode::Slow);
         e.key(K::KEY_F9, 0);
+        assert_eq!(e.speed_mode(), SpeedMode::SuperFast);
+        e.key(K::KEY_LEFTSHIFT, 0);
         assert_eq!(e.speed_mode(), SpeedMode::Fast);
         e.key(K::KEY_F8, 0);
         assert_eq!(e.speed_mode(), SpeedMode::Normal);
         e.key(K::KEY_F9, 1);
         e.key(K::KEY_F3, 0);
         assert_eq!(e.speed_mode(), SpeedMode::Normal);
+    }
+
+    #[test]
+    fn shift_and_fast_key_double_pointer_and_scroll_rates_without_forwarding_shift() {
+        let mut e = Engine::new(instant_config());
+        e.key(K::KEY_F3, 1);
+        assert_eq!(
+            events(&e.key(K::KEY_LEFTSHIFT, 1).keyboard),
+            events(&[key_event(K::KEY_LEFTSHIFT, 1)])
+        );
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        assert_eq!(
+            events(&e.key(K::KEY_S, 1).keyboard),
+            events(&[key_event(K::KEY_LEFTSHIFT, 0)])
+        );
+        assert_eq!(e.speed_mode(), SpeedMode::SuperFast);
+        assert_eq!(e.speed(), 1800.0);
+        assert_eq!(e.scroll_speed(), 48.0);
+        e.key(K::KEY_L, 1);
+        e.key(K::KEY_COMMA, 1);
+
+        let mut movement = 0;
+        let mut scroll = 0;
+        for _ in 0..20 {
+            for event in e.advance(Duration::from_millis(50)).mouse {
+                match R(event.code()) {
+                    R::REL_X => movement += event.value(),
+                    R::REL_WHEEL => scroll += event.value(),
+                    R::REL_WHEEL_HI_RES => {}
+                    _ => panic!("unexpected axis"),
+                }
+            }
+        }
+        assert_eq!(movement, 1800);
+        assert_eq!(scroll, 48);
+        assert!(e.key(K::KEY_RIGHTSHIFT, 1).keyboard.is_empty());
+        assert_eq!(e.speed_mode(), SpeedMode::SuperFast);
+        assert!(e.key(K::KEY_LEFTSHIFT, 0).keyboard.is_empty());
+        assert_eq!(
+            events(&e.key(K::KEY_S, 0).keyboard),
+            events(&[key_event(K::KEY_RIGHTSHIFT, 1)])
+        );
+        assert_eq!(e.speed_mode(), SpeedMode::Normal);
+        assert_eq!(
+            events(&e.key(K::KEY_RIGHTSHIFT, 0).keyboard),
+            events(&[key_event(K::KEY_RIGHTSHIFT, 0)])
+        );
+    }
+
+    #[test]
+    fn shift_passes_through_in_mouse_mode_except_while_a_speed_key_is_held() {
+        let mut e = Engine::new(instant_config());
+        assert_eq!(
+            events(&e.key(K::KEY_LEFTSHIFT, 1).keyboard),
+            events(&[key_event(K::KEY_LEFTSHIFT, 1)])
+        );
+        assert!(e.key(K::KEY_F3, 1).keyboard.is_empty());
+        assert_eq!(
+            events(&e.key(K::KEY_S, 1).keyboard),
+            events(&[key_event(K::KEY_LEFTSHIFT, 0)])
+        );
+        assert!(e.key(K::KEY_LEFTSHIFT, 2).keyboard.is_empty());
+        assert_eq!(
+            events(&e.key(K::KEY_S, 0).keyboard),
+            events(&[key_event(K::KEY_LEFTSHIFT, 1)])
+        );
+        assert!(e.key(K::KEY_F3, 0).keyboard.is_empty());
+        assert_eq!(
+            events(&e.key(K::KEY_LEFTSHIFT, 0).keyboard),
+            events(&[key_event(K::KEY_LEFTSHIFT, 0)])
+        );
     }
 
     #[test]
