@@ -38,6 +38,49 @@ including **D+F** for Free Mouse Mode alongside **F3**.
 
 See [Configuration](#configuration) for all settings.
 
+## Optional: Run as a systemd user service
+
+You do not need to install a service to use Fievel; you can just run `./fievel`
+as shown in the [Quickstart](#quickstart). Install the service only if you want
+Fievel to run in the background, start with your graphical session, restart
+automatically if it exits, and send its logs to the systemd journal.
+
+From a cloned repository with Rust and Cargo installed, run:
+
+```sh
+./scripts/install-systemd-service.sh
+```
+
+The installer builds Fievel, installs it to `~/.local/bin/fievel`, and enables
+the service for `graphical-session.target`. If your session manager starts
+that target, the service starts and stops with your graphical session. It
+still needs the [device permissions](#device-permissions) described below.
+The service restarts Fievel whenever it exits; use
+`systemctl --user stop fievel.service` when you want it to stay stopped. The
+installer skips an existing unit. To update the unit after changing it in the
+repository, run:
+
+```sh
+install -Dm644 systemd/fievel.service "$HOME/.config/systemd/user/fievel.service"
+systemctl --user daemon-reload
+systemctl --user restart fievel.service
+```
+
+For a standalone Hyprland session that does not manage
+`graphical-session.target`, replace a direct `exec-once = fievel` entry with:
+
+```ini
+exec-once = systemctl --user import-environment WAYLAND_DISPLAY XDG_CURRENT_DESKTOP
+exec-once = systemctl --user start fievel.service
+exec-shutdown = systemctl --user stop fievel.service
+```
+
+The import keeps the Wayland indicator available to the user service. Check
+status with `systemctl --user status fievel.service` and view logs with
+`journalctl --user -u fievel.service`. To uninstall, run
+`systemctl --user disable --now fievel.service`, then remove
+`~/.config/systemd/user/fievel.service` and `~/.local/bin/fievel`.
+
 ## Controls
 
 By default, hold **F3** (weird I know, but it was meant for me NOT to press it)
@@ -60,7 +103,7 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | Space | Left button down on press, up on release (supports dragging) |
 | I | Right button down on press, up on release |
 | N / M / , / . | Scroll left / down / up / right |
-| S | Hold for fast movement and scrolling; release for normal speed |
+| S | Hold for fast movement and scrolling; add either Shift key for double speed |
 | A | Hold for slow movement and scrolling; release for normal speed |
 | Q | Show a brief red pulse around the cursor |
 
@@ -264,7 +307,9 @@ max >= min.
 
 Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
-are accepted. Controls must use distinct single keys. `free_mouse` and
+are accepted. Controls must use distinct single keys. Shift passes through to the focused app
+in Free Mouse Mode unless a speed key is held. With the fast key (S by default),
+either Shift key enables double speed for movement and scrolling. `free_mouse` and
 `[hints.keys]` activators accept either a single distinct key or a `+`-separated
 chord such as `"leftalt + space"` or `"leftctrl+leftalt+f3"`. All chord keys must
 be held together, in either press order; extra held keys do not prevent

@@ -325,6 +325,7 @@ impl Config {
     pub fn mouse_controls(&self) -> Vec<K> {
         let mut controls = self.keys.controls().to_vec();
         controls.push(self.keys.locate);
+        controls.extend([K::KEY_LEFTSHIFT, K::KEY_RIGHTSHIFT]);
         if self.keycast.enabled {
             controls.push(self.keycast.hotkey);
         }
@@ -606,6 +607,13 @@ mod tests {
         assert!(Config::parse(
             "[keys]\nfree_mouse = 'leftalt+space'\n[keycast]\nenabled = true\nhotkey = 'leftalt'"
         ).is_err());
+    }
+
+    #[test]
+    fn both_shift_keys_are_mouse_controls() {
+        let controls = Config::default().mouse_controls();
+        assert!(controls.contains(&K::KEY_LEFTSHIFT));
+        assert!(controls.contains(&K::KEY_RIGHTSHIFT));
     }
 
     #[test]
