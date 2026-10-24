@@ -138,8 +138,7 @@ From a cloned repository with Rust and Cargo installed, run:
 The installer builds Fievel, installs it to `~/.local/bin/fievel`, and enables
 the service for `graphical-session.target`. If your session manager starts
 that target, the service starts and stops with your graphical session. It
-still needs the [Linux device permissions](#linux-device-permissions) described
-below.
+still needs the [device permissions](#device-permissions) described below.
 The service restarts Fievel whenever it exits; use
 `systemctl --user stop fievel.service` when you want it to stay stopped. The
 installer skips an existing unit. To update the unit after changing it in the
@@ -256,6 +255,23 @@ Set up [device permissions](#device-permissions) once, then run the binary:
 
 Or copy it to a directory on your `PATH`
 
+### Package a release
+
+After building the release binary, create a versioned Linux x64 archive with:
+
+```sh
+./scripts/package-release.sh
+```
+
+This writes `target/release/fievel-<version>-linux-x64.tar.gz`, containing the
+binary, repository scripts, systemd unit, example config, README, and license.
+The installer in the archive uses its bundled `fievel` binary and does not need
+the Rust toolchain. Pass an archive path to write somewhere else:
+
+```sh
+./scripts/package-release.sh ./fievel-linux-x64.tar.gz
+```
+
 ### Movement odometer
 
 While fievel is running, it automatically keeps separate totals since reset for
@@ -294,7 +310,7 @@ is set to an absolute path. Linux otherwise uses
 `~/Library/Application Support/Fievel/odometer.toml`; Windows uses
 `%LOCALAPPDATA%\Fievel\odometer.toml`.
 
-### Linux device permissions
+### Device permissions
 
 To run without sudo, fievel needs read access to each keyboard's input device and
 write access to `/dev/uinput`. On distributions that grant input-device access
