@@ -54,6 +54,14 @@ cargo build --release
 ./target/release/fievel
 ```
 
+To create a macOS release archive after building:
+
+```sh
+./scripts/package-release-macos.sh
+```
+
+The archive is written to `target/release/fievel-<version>-macos-<arch>.tar.gz`.
+
 On first launch, allow **Input Monitoring** and **Accessibility** for the
 terminal or app running Fievel in **System Settings → Privacy & Security**.
 Quit and restart Fievel after granting access. Hint mode also needs **Screen
@@ -84,6 +92,14 @@ PowerShell:
 cargo build --release
 .\target\release\fievel.exe
 ```
+
+To create a Windows release archive after building:
+
+```powershell
+.\scripts\package-release-windows.ps1
+```
+
+The archive is written to `target\release\fievel-<version>-windows-<arch>.zip`.
 
 Fievel runs as the current user; administrator access is not normally needed.
 While running, it installs global low-level keyboard and mouse hooks so it can
