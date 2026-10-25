@@ -214,9 +214,19 @@ are also separated from neutral icon contours, even when they touch.
 Type a label to click its center. As you type, non-matching hints disappear and
 matching letters are highlighted. **Backspace** removes the last letter.
 
-Press the same shortcut again to cancel, or the other shortcut to switch click
-buttons without losing your selection. **Escape** or **Enter** also cancels;
-Backspace cancels when no letters have been typed.
+Press **Super+G** for a left-click grid on the display containing the pointer.
+Choose a quadrant with **U/I/J/K** (upper-left, upper-right, lower-left,
+lower-right) to subdivide recursively. The pointer follows the selected
+region's center as you type or backtrack. Press **Space** to left-click or **R**
+to right-click at the pointer. Configure quadrant keys using letters A-Z with
+`hints.keys.grid_upper_left`, `grid_upper_right`, `grid_lower_left`, and
+`grid_lower_right`; set `grid_left_click` and `grid_right_click` to change the
+click buttons. The overlay labels show your configured quadrant keys.
+**Backspace** steps back, and **Escape** or **Enter** cancels.
+
+In label-hint mode, press the same shortcut again to cancel, or the other
+shortcut to switch click buttons without losing your selection. **Escape** or
+**Enter** also cancels; Backspace cancels when no letters have been typed.
 Hint shortcuts are inactive while Free Mouse Mode is active, so Super+click can
 be used for desktop window actions without opening hints.
 
@@ -403,6 +413,13 @@ max_height = 96
 [hints.keys]
 left = "leftmeta + space"
 right = "leftmeta + i"
+grid = "leftmeta + g"
+grid_upper_left = "u"
+grid_upper_right = "i"
+grid_lower_left = "j"
+grid_lower_right = "k"
+grid_left_click = "space"
+grid_right_click = "r"
 cancel = "enter"
 toggle_background = "leftctrl"
 debug = "f8"
@@ -410,6 +427,8 @@ debug = "f8"
 
 All settings are optional; omitted values keep their defaults. If the default
 file is missing, a message is printed and built-in defaults are used.
+On Wayland, if the cursor is hidden and its display cannot be identified from
+screencopy, grid mode starts at the center of the first available output.
 Unknown settings, unknown key names, duplicate control bindings, repeated keys
 within an activation chord, and nonpositive,
 nonfinite, or greater-than-100000 speeds are rejected.
