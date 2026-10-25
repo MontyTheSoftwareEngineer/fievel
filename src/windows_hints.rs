@@ -303,8 +303,8 @@ impl ActiveHints {
                     height,
                     label: String::new(),
                     prefix_length: 0,
-                    border: Some(config.border_color),
-                    fill: Some(config.fill_color),
+                    border: Some(config.grid_border_color(quadrant)),
+                    fill: Some(config.grid_fill_color(quadrant)),
                     debug_dot: false,
                 });
                 hints.push(OverlayHint {

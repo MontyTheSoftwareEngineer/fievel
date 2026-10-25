@@ -326,6 +326,8 @@ impl ActiveHints {
             let mut native = Vec::new();
             for (quadrant, rect) in grid.cells() {
                 let label = CString::new("").unwrap();
+                let border_color = config.grid_border_color(quadrant);
+                let fill_color = config.grid_fill_color(quadrant);
                 native.push(NativeHint {
                     x: rect.x,
                     y: main_height - (rect.y + rect.height),
@@ -334,10 +336,10 @@ impl ActiveHints {
                     label: label.as_ptr(),
                     selected: true,
                     prefix_length: 0,
-                    custom_colors: false,
+                    custom_colors: true,
                     debug_dot: false,
-                    border_color: 0,
-                    fill_color: 0,
+                    border_color: color(border_color),
+                    fill_color: color(fill_color),
                 });
                 labels.push(label);
                 let label_text = quadrant.label(&config.keys);

@@ -1898,8 +1898,20 @@ fn draw_grid(
         let y = (rect.y * scale_y) as i32;
         let cell_width = (rect.width * scale_x) as i32;
         let cell_height = (rect.height * scale_y) as i32;
-        canvas.fill_rect(x, y, cell_width, cell_height, config.fill_color);
-        canvas.stroke_rect(x, y, cell_width, cell_height, config.border_color);
+        canvas.fill_rect(
+            x,
+            y,
+            cell_width,
+            cell_height,
+            config.grid_fill_color(quadrant),
+        );
+        canvas.stroke_rect(
+            x,
+            y,
+            cell_width,
+            cell_height,
+            config.grid_border_color(quadrant),
+        );
         let label = quadrant.label(&config.keys);
         let mut label_scale = ((cell_height - 4) / 8).clamp(1, 3);
         while label_scale > 1 && Canvas::text_size(&label, label_scale).0 + 6 > cell_width {

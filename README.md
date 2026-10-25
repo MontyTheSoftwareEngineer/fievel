@@ -239,6 +239,13 @@ Configure shortcuts under `[hints.keys]` and colors under `[hints]`.
 key despite its name. **F8** (`debug`) cycles normal hints, detected edges, and
 color-coded accepted/rejected targets. Clicking is paused in debug views.
 
+To customize recursive-grid quadrants independently, set colors in the
+`[hints.grid_colors]` table using `upper_left`, `upper_right`, `lower_left`, and
+`lower_right`. Values accept `#RRGGBB` or `#RRGGBBAA`. Each color sets that
+quadrant's border and fill tint at every recursion depth; fill opacity continues
+to use `[hints].fill_color`. Unset quadrants retain the existing `[hints]`
+`border_color` and `fill_color`.
+
 On Linux, hint mode requires a Wayland compositor with wlr layer-shell,
 screencopy, and virtual-pointer support, such as Hyprland or Sway. On macOS 14
 or later, it uses ScreenCaptureKit and a native transparent overlay and requires

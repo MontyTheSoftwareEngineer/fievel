@@ -1,4 +1,5 @@
 use crate::font::Color;
+use crate::grid::GridQuadrant;
 use crate::input::KeyCode as K;
 use serde::{Deserialize, Deserializer};
 use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
@@ -246,6 +247,7 @@ pub struct Hints {
     pub border_color: Color,
     #[serde(deserialize_with = "deserialize_color")]
     pub fill_color: Color,
+    pub grid_colors: GridColors,
     #[serde(deserialize_with = "deserialize_color")]
     pub readability_color: Color,
     #[serde(deserialize_with = "deserialize_color")]
@@ -265,6 +267,7 @@ impl Default for Hints {
             label_symbols: "abcdefghijklmnopqrstuvwxyz".to_owned(),
             border_color: Color::rgba(0x00, 0xff, 0x00, 0xe0),
             fill_color: Color::rgba(0x00, 0xff, 0x00, 0x18),
+            grid_colors: GridColors::default(),
             readability_color: Color::rgba(0x40, 0x40, 0x40, 0xe6),
             label_color: Color::rgba(0xff, 0xff, 0xff, 0xff),
             label_highlight_color: Color::rgba(0xff, 0xc1, 0x07, 0xff),
@@ -272,6 +275,45 @@ impl Default for Hints {
             max_width: 499,
             min_height: 4,
             max_height: 96,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(default, deny_unknown_fields)]
+pub struct GridColors {
+    #[serde(deserialize_with = "deserialize_optional_color")]
+    pub upper_left: Option<Color>,
+    #[serde(deserialize_with = "deserialize_optional_color")]
+    pub upper_right: Option<Color>,
+    #[serde(deserialize_with = "deserialize_optional_color")]
+    pub lower_left: Option<Color>,
+    #[serde(deserialize_with = "deserialize_optional_color")]
+    pub lower_right: Option<Color>,
+}
+
+impl GridColors {
+    fn for_quadrant(&self, quadrant: GridQuadrant) -> Option<Color> {
+        match quadrant {
+            GridQuadrant::UpperLeft => self.upper_left,
+            GridQuadrant::UpperRight => self.upper_right,
+            GridQuadrant::LowerLeft => self.lower_left,
+            GridQuadrant::LowerRight => self.lower_right,
+        }
+    }
+}
+
+impl Hints {
+    pub fn grid_border_color(&self, quadrant: GridQuadrant) -> Color {
+        self.grid_colors
+            .for_quadrant(quadrant)
+            .unwrap_or(self.border_color)
+    }
+
+    pub fn grid_fill_color(&self, quadrant: GridQuadrant) -> Color {
+        match self.grid_colors.for_quadrant(quadrant) {
+            Some(color) => Color::rgba(color.r, color.g, color.b, self.fill_color.a),
+            None => self.fill_color,
         }
     }
 }
@@ -341,6 +383,14 @@ fn deserialize_chord<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<K
 fn deserialize_color<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Color, D::Error> {
     let value = String::deserialize(deserializer)?;
     Color::parse(&value).map_err(serde::de::Error::custom)
+}
+
+fn deserialize_optional_color<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Color>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|value| Color::parse(&value).map_err(serde::de::Error::custom))
+        .transpose()
 }
 
 pub(crate) fn parse_key(value: &str) -> Result<K, String> {
@@ -908,6 +958,14 @@ mod tests {
         assert_eq!(config.hints.keys.toggle_background, K::KEY_LEFTCTRL);
         assert_eq!(config.hints.keys.debug, K::KEY_F8);
         assert_eq!(config.hints.readability_color, Color::rgba(64, 64, 64, 230));
+        assert_eq!(
+            config.hints.grid_border_color(GridQuadrant::UpperLeft),
+            config.hints.border_color
+        );
+        assert_eq!(
+            config.hints.grid_fill_color(GridQuadrant::LowerRight),
+            config.hints.fill_color
+        );
         assert_eq!(config.hints.label_symbols, "abcdefghijklmnopqrstuvwxyz");
         assert_eq!(config.hints.max_height, 96);
         let config =
@@ -977,6 +1035,27 @@ mod tests {
         .unwrap();
         assert_eq!(custom.hints.keys.toggle_background, K::KEY_RIGHTCTRL);
         assert_eq!(custom.hints.readability_color, Color::rgba(96, 96, 96, 204));
+        let grid = Config::parse(
+            "[hints]\nborder_color = '#0000ffe0'\nfill_color = '#0000ff44'\n\
+             [hints.grid_colors]\nupper_left = '#ff0000c0'\nlower_right = '#ffff0080'",
+        )
+        .unwrap();
+        assert_eq!(
+            grid.hints.grid_border_color(GridQuadrant::UpperLeft),
+            Color::rgba(255, 0, 0, 192)
+        );
+        assert_eq!(
+            grid.hints.grid_fill_color(GridQuadrant::UpperLeft),
+            Color::rgba(255, 0, 0, 68)
+        );
+        assert_eq!(
+            grid.hints.grid_border_color(GridQuadrant::UpperRight),
+            Color::rgba(0, 0, 255, 224)
+        );
+        assert_eq!(
+            grid.hints.grid_fill_color(GridQuadrant::UpperRight),
+            Color::rgba(0, 0, 255, 68)
+        );
         assert!(Config::parse(
             "[hints.keys]\ncancel = 'rightctrl'\ntoggle_background = 'rightctrl'"
         )
