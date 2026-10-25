@@ -5,7 +5,7 @@ use crate::{
     hints::{ActiveHints, HintResult},
     input::{EventType, KeyCode as K, RelativeAxisCode as R},
     odometer,
-    pipeline::InputEngine,
+    pipeline::{HintRequest, InputEngine},
     windows_ui::{Overlay, INPUT_MARKER},
 };
 use clap::Parser;
@@ -680,10 +680,19 @@ fn activate_pending_hints(
     config: &Config,
     overlay: &mut Overlay,
 ) {
-    if let Some(click) = engine.take_hint_request() {
-        match ActiveHints::activate(&config.hints, click, overlay) {
+    if let Some(request) = engine.take_hint_request() {
+        let activated = match request {
+            HintRequest::Click(click) => ActiveHints::activate(&config.hints, click, overlay),
+            HintRequest::Grid => ActiveHints::activate_grid(
+                &config.hints,
+                crate::hints::ClickKind::Left,
+                overlay,
+            ),
+        };
+        match activated {
             Ok(hints) => {
                 input.begin(held.iter().copied());
+                input.set_grid_mode(hints.is_grid_mode());
                 *mode = Some(hints);
                 if input.readability_held() {
                     handle_hint_input(
@@ -717,6 +726,22 @@ fn handle_hint_input(
                     *mode = None;
                 } else {
                     hints.set_click_kind(click);
+                }
+            }
+            HintInputEvent::GridShortcut => {
+                if hints.is_grid_mode() {
+                    hints.cancel(overlay)?;
+                    *mode = None;
+                } else {
+                    let click = hints.click_kind();
+                    hints.cancel(overlay)?;
+                    match ActiveHints::activate_grid(&config.hints, click, overlay) {
+                        Ok(grid) => *mode = Some(grid),
+                        Err(error) => {
+                            ActiveHints::warning(error.as_ref());
+                            *mode = None;
+                        }
+                    }
                 }
             }
             HintInputEvent::Key(key, value) => {

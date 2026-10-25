@@ -5,7 +5,7 @@ use crate::{
     hints::{ActiveHints, HintResult},
     indicator::Overlays,
     odometer,
-    pipeline::InputEngine,
+    pipeline::{HintRequest, InputEngine},
 };
 use clap::Parser;
 use evdev::{EventType, KeyCode as K, RelativeAxisCode as R};
@@ -300,10 +300,18 @@ fn activate_pending_hints(
     held: &BTreeSet<K>,
     config: &Config,
 ) {
-    if let Some(click) = engine.take_hint_request() {
-        match ActiveHints::activate(&config.hints, click) {
+    if let Some(request) = engine.take_hint_request() {
+        let activated = match request {
+            HintRequest::Click(click) => ActiveHints::activate(&config.hints, click),
+            HintRequest::Grid => ActiveHints::activate_grid(
+                &config.hints,
+                crate::hints::ClickKind::Left,
+            ),
+        };
+        match activated {
             Ok(hints) => {
                 input.begin(held.iter().copied());
+                input.set_grid_mode(hints.is_grid_mode());
                 *mode = Some(hints);
                 if input.readability_held() {
                     handle_hint_input(
@@ -334,6 +342,22 @@ fn handle_hint_input(
                     *mode = None;
                 } else {
                     hints.set_click_kind(click);
+                }
+            }
+            HintInputEvent::GridShortcut => {
+                if hints.is_grid_mode() {
+                    hints.cancel();
+                    *mode = None;
+                } else {
+                    let click = hints.click_kind();
+                    hints.cancel();
+                    match ActiveHints::activate_grid(&config.hints, click) {
+                        Ok(grid) => *mode = Some(grid),
+                        Err(error) => {
+                            ActiveHints::warning(error.as_ref());
+                            *mode = None;
+                        }
+                    }
                 }
             }
             HintInputEvent::Key(key, value) => match hints.handle_key(key, value, &config.hints) {

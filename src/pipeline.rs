@@ -9,6 +9,12 @@ use crate::{
     remap::{Event, Remapper},
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HintRequest {
+    Click(ClickKind),
+    Grid,
+}
+
 pub struct InputEngine {
     remapper: Remapper,
     mouse: Engine,
@@ -18,13 +24,14 @@ pub struct InputEngine {
 struct HintActivation {
     keys: HintKeys,
     held: BTreeSet<KeyCode>,
-    pending: Option<ClickKind>,
+    pending: Option<HintRequest>,
 }
 
 impl HintActivation {
     fn key(&mut self, key: KeyCode, value: i32, can_activate: bool) -> bool {
         let left_before = self.chord_held(&self.keys.left);
         let right_before = self.chord_held(&self.keys.right);
+        let grid_before = self.chord_held(&self.keys.grid);
         match value {
             1 => {
                 self.held.insert(key);
@@ -36,9 +43,11 @@ impl HintActivation {
         }
         if can_activate && value == 1 {
             if !left_before && self.chord_held(&self.keys.left) {
-                self.pending = Some(ClickKind::Left);
+                self.pending = Some(HintRequest::Click(ClickKind::Left));
             } else if !right_before && self.chord_held(&self.keys.right) {
-                self.pending = Some(ClickKind::Right);
+                self.pending = Some(HintRequest::Click(ClickKind::Right));
+            } else if !grid_before && self.chord_held(&self.keys.grid) {
+                self.pending = Some(HintRequest::Grid);
             }
         }
         self.pending.is_some()
@@ -109,7 +118,7 @@ impl InputEngine {
         }
     }
 
-    pub fn take_hint_request(&mut self) -> Option<ClickKind> {
+    pub fn take_hint_request(&mut self) -> Option<HintRequest> {
         self.hints.pending.take()
     }
 
@@ -248,7 +257,7 @@ mod tests {
             let output = engine.key(K::KEY_SPACE, 1);
             assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
             assert!(output.mouse.is_empty());
-            assert_eq!(engine.take_hint_request(), Some(ClickKind::Left));
+            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
             assert!(!engine.active());
             assert!(engine.keycast_keys().is_empty());
             assert_eq!(engine.speed_mode(), crate::engine::SpeedMode::Normal);
@@ -274,7 +283,7 @@ mod tests {
             assert!(!engine.active());
             engine.key(K::KEY_LEFTMETA, 1);
             engine.key(K::KEY_I, 1);
-            assert_eq!(engine.take_hint_request(), Some(ClickKind::Right));
+            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Right)));
             assert!(!engine.active());
             engine.key(K::KEY_F3, 0);
             engine.key(K::KEY_L, 0);
@@ -300,13 +309,29 @@ mod tests {
             let output = engine.key(key, 1);
             assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
             assert!(output.mouse.is_empty());
-            assert_eq!(engine.take_hint_request(), Some(click));
+            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(click)));
             assert_eq!(engine.take_hint_request(), None);
             assert!(!engine.active());
             for (key, value) in [(key, 2), (key, 0), (K::KEY_LEFTMETA, 0)] {
                 engine.key(key, value);
                 assert_eq!(engine.take_hint_request(), None);
             }
+        }
+    }
+
+    #[test]
+    fn grid_shortcut_activates_in_either_press_order() {
+        for keys_pressed in [
+            [K::KEY_LEFTMETA, K::KEY_G],
+            [K::KEY_G, K::KEY_LEFTMETA],
+        ] {
+            let mut engine = InputEngine::new(Config::default()).unwrap();
+            for key in keys_pressed {
+                let output = engine.key(key, 1);
+                assert!(output.mouse.is_empty());
+            }
+            assert_eq!(engine.take_hint_request(), Some(HintRequest::Grid));
+            assert_eq!(engine.take_hint_request(), None);
         }
     }
 
@@ -355,7 +380,7 @@ mod tests {
             let output = engine.key(K::KEY_SPACE, 1);
             assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
             assert!(output.mouse.is_empty());
-            assert_eq!(engine.take_hint_request(), Some(ClickKind::Left));
+            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
             for key in [first, second, K::KEY_SPACE] {
                 assert!(engine.key(key, 0).keyboard.is_empty());
             }
@@ -372,7 +397,7 @@ mod tests {
         assert_eq!(engine.take_hint_request(), None);
         let output = engine.advance(Duration::from_millis(30));
         assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
-        assert_eq!(engine.take_hint_request(), Some(ClickKind::Right));
+        assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Right)));
         assert!(engine.release_all().keyboard.is_empty());
     }
 
@@ -382,7 +407,7 @@ mod tests {
         engine.key(K::KEY_SPACE, 1);
         let output = engine.key(K::KEY_LEFTMETA, 1);
         assert_eq!(keys(&output.keyboard), [(K::KEY_SPACE, 0)]);
-        assert_eq!(engine.take_hint_request(), Some(ClickKind::Left));
+        assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
 
         let config =
             Config::parse("[hints.keys]\nleft = 'leftctrl+space'\n[remap.main]\n'a+s' = 'ctrl'")

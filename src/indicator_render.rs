@@ -1,5 +1,6 @@
 use crate::input::KeyCode;
 use crate::engine::SpeedMode;
+use crate::grid::key_label;
 
 const COLUMNS: usize = 40;
 const CELL_WIDTH: u32 = 12;
@@ -14,30 +15,6 @@ fn foreground(speed: SpeedMode) -> u32 {
         SpeedMode::SuperFast => 0xf000f0f0,
         SpeedMode::Slow => 0xf0f0f000,
     }
-}
-
-pub(super) fn key_label(key: KeyCode) -> String {
-    let punctuation = match key {
-        KeyCode::KEY_COMMA => Some(","),
-        KeyCode::KEY_DOT => Some("."),
-        KeyCode::KEY_SEMICOLON => Some(";"),
-        KeyCode::KEY_APOSTROPHE => Some("'"),
-        KeyCode::KEY_GRAVE => Some("`"),
-        KeyCode::KEY_MINUS => Some("-"),
-        KeyCode::KEY_EQUAL => Some("="),
-        KeyCode::KEY_LEFTBRACE => Some("["),
-        KeyCode::KEY_RIGHTBRACE => Some("]"),
-        KeyCode::KEY_BACKSLASH => Some("\\"),
-        KeyCode::KEY_SLASH => Some("/"),
-        _ => None,
-    };
-    if let Some(label) = punctuation {
-        return label.into();
-    }
-    let name = format!("{key:?}");
-    name.strip_prefix("KEY_")
-        .unwrap_or(&name)
-        .to_ascii_uppercase()
 }
 
 pub(super) struct Layout {

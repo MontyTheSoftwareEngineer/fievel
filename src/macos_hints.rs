@@ -1,6 +1,7 @@
 use crate::{
     config::Hints,
     detect::{self, DetectionLimits, Outcome, Rect, Source},
+    grid::{GridQuadrant, GridRect, GridSelection},
     label::{AppendResult, LabelAlphabet, LabelSelection},
 };
 use evdev::KeyCode as K;
@@ -94,6 +95,7 @@ pub struct ActiveHints {
     cancel: K,
     debug_key: K,
     debug_view: DebugView,
+    grid: Option<GridSelection>,
 }
 
 unsafe extern "C" {
@@ -101,6 +103,14 @@ unsafe extern "C" {
     fn fievel_capture_screens(captures: *mut *mut NativeCapture, count: *mut usize) -> bool;
     fn fievel_release_captures(captures: *mut NativeCapture, count: usize);
     fn fievel_main_display_height() -> f64;
+    fn fievel_grid_bounds_at_pointer(
+        display_x: *mut f64,
+        display_y: *mut f64,
+        display_width: *mut f64,
+        display_height: *mut f64,
+        pointer_x: *mut f64,
+        pointer_y: *mut f64,
+    ) -> bool;
     fn fievel_ui_set_hints(
         hints: *const NativeHint,
         count: usize,
@@ -112,6 +122,7 @@ unsafe extern "C" {
         highlight: u32,
     );
     fn fievel_ui_clear_hints();
+    fn fievel_move_pointer_to(x: f64, y: f64) -> bool;
     fn fievel_click_at(x: f64, y: f64, right: bool) -> bool;
 }
 
@@ -135,6 +146,10 @@ impl ActiveHints {
         self.click = click;
     }
 
+    pub fn is_grid_mode(&self) -> bool {
+        self.grid.is_some()
+    }
+
     pub fn cancel(&mut self) {
         unsafe { fievel_ui_clear_hints() };
     }
@@ -155,6 +170,49 @@ impl ActiveHints {
             cancel: config.keys.cancel,
             debug_key: config.keys.debug,
             debug_view: DebugView::Normal,
+            grid: None,
+        };
+        hints.redraw(config);
+        Ok(hints)
+    }
+
+    pub fn activate_grid(config: &Hints, click: ClickKind) -> Result<Self, Box<dyn Error>> {
+        let alphabet = LabelAlphabet::new(&config.label_symbols)
+            .map_err(|error| format!("hints.label_symbols: {error}"))?;
+        let (mut display_x, mut display_y) = (0.0, 0.0);
+        let (mut display_width, mut display_height) = (0.0, 0.0);
+        let (mut pointer_x, mut pointer_y) = (0.0, 0.0);
+        if !unsafe {
+            fievel_grid_bounds_at_pointer(
+                &mut display_x,
+                &mut display_y,
+                &mut display_width,
+                &mut display_height,
+                &mut pointer_x,
+                &mut pointer_y,
+            )
+        } {
+            return Err("could not determine the display under the pointer".into());
+        }
+        let mut grid = GridSelection::new(GridRect {
+            x: display_x,
+            y: display_y,
+            width: display_width,
+            height: display_height,
+        });
+        grid.set_cursor(pointer_x, pointer_y);
+        let hints = Self {
+            alphabet: alphabet.clone(),
+            selection: LabelSelection::new(alphabet, 0),
+            regions: Vec::new(),
+            debug_regions: Vec::new(),
+            edge_regions: Vec::new(),
+            click,
+            background_hidden: false,
+            cancel: config.keys.cancel,
+            debug_key: config.keys.debug,
+            debug_view: DebugView::Normal,
+            grid: Some(grid),
         };
         hints.redraw(config);
         Ok(hints)
@@ -178,9 +236,46 @@ impl ActiveHints {
             self.cancel();
             return Ok(HintResult::Cancelled);
         }
-        if key == self.debug_key {
+        if key == self.debug_key && self.grid.is_none() {
             self.debug_view = self.debug_view.next();
             self.redraw(config);
+            return Ok(HintResult::Continue);
+        }
+        if self.background_hidden && self.grid.is_some() {
+            return Ok(HintResult::Continue);
+        }
+        if let Some(grid) = &mut self.grid {
+            if key == K::KEY_BACKSPACE {
+                if !grid.backspace() {
+                    self.cancel();
+                    return Ok(HintResult::Cancelled);
+                }
+                let (x, y) = grid.cursor();
+                if !unsafe { fievel_move_pointer_to(x, y) } {
+                    return Err("failed to move the macOS grid cursor".into());
+                }
+                self.redraw(config);
+                return Ok(HintResult::Continue);
+            }
+            if key == config.keys.grid_left_click || key == config.keys.grid_right_click {
+                let (x, y) = grid.cursor();
+                let right = key == config.keys.grid_right_click;
+                if !unsafe { fievel_click_at(x, y, right) } {
+                    return Err("failed to synthesize the macOS grid click".into());
+                }
+                self.cancel();
+                return Ok(HintResult::Clicked);
+            }
+            let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
+                return Ok(HintResult::Continue);
+            };
+            if grid.select(quadrant) {
+                let (x, y) = grid.cursor();
+                if !unsafe { fievel_move_pointer_to(x, y) } {
+                    return Err("failed to move the macOS grid cursor".into());
+                }
+                self.redraw(config);
+            }
             return Ok(HintResult::Continue);
         }
         if self.background_hidden || self.debug_view != DebugView::Normal || self.regions.is_empty()
@@ -226,52 +321,94 @@ impl ActiveHints {
 
     fn redraw(&self, config: &Hints) {
         let main_height = unsafe { fievel_main_display_height() };
-        let (labels, native) = match self.debug_view {
-            DebugView::Normal => {
-                let mut labels = Vec::new();
-                let mut native = Vec::new();
-                for (index, region) in self.regions.iter().enumerate() {
-                    if !self.selection.matches_index(index) {
-                        continue;
-                    }
-                    let (prefix, suffix) = self.selection.split_index(index).unwrap();
-                    let prefix_length = prefix.chars().count() as u32;
-                    let label =
-                        CString::new(prefix + &suffix).expect("hint label contains no NUL bytes");
-                    native.push(NativeHint {
-                        x: region.display_x + f64::from(region.rect.x),
-                        y: main_height
-                            - (region.display_y
-                                + f64::from(region.rect.y)
-                                + f64::from(region.rect.height)),
-                        width: f64::from(region.rect.width),
-                        height: f64::from(region.rect.height),
-                        label: label.as_ptr(),
-                        selected: true,
-                        prefix_length,
-                        custom_colors: false,
-                        debug_dot: false,
-                        border_color: 0,
-                        fill_color: 0,
-                    });
-                    labels.push(label);
-                }
-                (labels, native)
+        let (labels, native) = if let Some(grid) = &self.grid {
+            let mut labels = Vec::new();
+            let mut native = Vec::new();
+            for (quadrant, rect) in grid.cells() {
+                let label = CString::new("").unwrap();
+                native.push(NativeHint {
+                    x: rect.x,
+                    y: main_height - (rect.y + rect.height),
+                    width: rect.width,
+                    height: rect.height,
+                    label: label.as_ptr(),
+                    selected: true,
+                    prefix_length: 0,
+                    custom_colors: false,
+                    debug_dot: false,
+                    border_color: 0,
+                    fill_color: 0,
+                });
+                labels.push(label);
+                let label_text = quadrant.label(&config.keys);
+                let label_width = (label_text.chars().count() as f64 * 10.0 + 8.0).max(18.0);
+                let label = CString::new(label_text).unwrap();
+                let center_x = rect.x + rect.width / 2.0;
+                let center_y = rect.y + rect.height / 2.0;
+                native.push(NativeHint {
+                    x: center_x - label_width / 2.0,
+                    y: main_height - center_y - 10.0,
+                    width: label_width,
+                    height: 20.0,
+                    label: label.as_ptr(),
+                    selected: true,
+                    prefix_length: 0,
+                    custom_colors: false,
+                    debug_dot: false,
+                    border_color: 0,
+                    fill_color: 0,
+                });
+                labels.push(label);
             }
-            DebugView::Edges => (
-                Vec::new(),
-                self.edge_regions
-                    .iter()
-                    .map(|region| debug_hint(*region, main_height, true))
-                    .collect(),
-            ),
-            DebugView::Components => (
-                Vec::new(),
-                self.debug_regions
-                    .iter()
-                    .map(|region| debug_hint(*region, main_height, false))
-                    .collect(),
-            ),
+            (labels, native)
+        } else {
+            match self.debug_view {
+                DebugView::Normal => {
+                    let mut labels = Vec::new();
+                    let mut native = Vec::new();
+                    for (index, region) in self.regions.iter().enumerate() {
+                        if !self.selection.matches_index(index) {
+                            continue;
+                        }
+                        let (prefix, suffix) = self.selection.split_index(index).unwrap();
+                        let prefix_length = prefix.chars().count() as u32;
+                        let label = CString::new(prefix + &suffix)
+                            .expect("hint label contains no NUL bytes");
+                        native.push(NativeHint {
+                            x: region.display_x + f64::from(region.rect.x),
+                            y: main_height
+                                - (region.display_y
+                                    + f64::from(region.rect.y)
+                                    + f64::from(region.rect.height)),
+                            width: f64::from(region.rect.width),
+                            height: f64::from(region.rect.height),
+                            label: label.as_ptr(),
+                            selected: true,
+                            prefix_length,
+                            custom_colors: false,
+                            debug_dot: false,
+                            border_color: 0,
+                            fill_color: 0,
+                        });
+                        labels.push(label);
+                    }
+                    (labels, native)
+                }
+                DebugView::Edges => (
+                    Vec::new(),
+                    self.edge_regions
+                        .iter()
+                        .map(|region| debug_hint(*region, main_height, true))
+                        .collect(),
+                ),
+                DebugView::Components => (
+                    Vec::new(),
+                    self.debug_regions
+                        .iter()
+                        .map(|region| debug_hint(*region, main_height, false))
+                        .collect(),
+                ),
+            }
         };
         let _labels = labels;
         unsafe {

@@ -853,6 +853,62 @@ double fievel_main_display_height(void) {
     return CGDisplayBounds(CGMainDisplayID()).size.height;
 }
 
+bool fievel_grid_bounds_at_pointer(
+    double *display_x,
+    double *display_y,
+    double *display_width,
+    double *display_height,
+    double *pointer_x,
+    double *pointer_y
+) {
+    if (display_x == NULL || display_y == NULL ||
+        display_width == NULL || display_height == NULL ||
+        pointer_x == NULL || pointer_y == NULL) {
+        return false;
+    }
+    CGEventRef event = CGEventCreate(NULL);
+    if (event == NULL) {
+        return false;
+    }
+    CGPoint point = CGEventGetLocation(event);
+    CFRelease(event);
+    CGDirectDisplayID display = 0;
+    uint32_t count = 0;
+    if (CGGetDisplaysWithPoint(point, 1, &display, &count) != kCGErrorSuccess || count == 0) {
+        return false;
+    }
+    CGRect bounds = CGDisplayBounds(display);
+    if (bounds.size.width <= 0 || bounds.size.height <= 0) {
+        return false;
+    }
+    *display_x = bounds.origin.x;
+    *display_y = bounds.origin.y;
+    *display_width = bounds.size.width;
+    *display_height = bounds.size.height;
+    *pointer_x = point.x;
+    *pointer_y = point.y;
+    return true;
+}
+
+bool fievel_move_pointer_to(double x, double y) {
+    CGEventSourceRef source = fievel_event_source();
+    if (source == NULL) {
+        return false;
+    }
+    CGPoint point = CGPointMake(x, y);
+    CGEventRef event = CGEventCreateMouseEvent(source, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    if (event != NULL) {
+        CGEventSetIntegerValueField(event, kCGEventSourceUserData, event_marker);
+        CGEventPost(kCGHIDEventTap, event);
+        CFRelease(event);
+        pthread_mutex_lock(&pointer_lock);
+        last_pointer = point;
+        pthread_mutex_unlock(&pointer_lock);
+    }
+    CFRelease(source);
+    return event != NULL;
+}
+
 bool fievel_click_at(double x, double y, bool right) {
     CGEventSourceRef source = fievel_event_source();
     if (source == NULL) {

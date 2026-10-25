@@ -17,6 +17,38 @@ pub struct Config {
     pub remap: crate::remap::RemapConfig,
 }
 
+fn is_letter_key(key: K) -> bool {
+    [
+        K::KEY_A,
+        K::KEY_B,
+        K::KEY_C,
+        K::KEY_D,
+        K::KEY_E,
+        K::KEY_F,
+        K::KEY_G,
+        K::KEY_H,
+        K::KEY_I,
+        K::KEY_J,
+        K::KEY_K,
+        K::KEY_L,
+        K::KEY_M,
+        K::KEY_N,
+        K::KEY_O,
+        K::KEY_P,
+        K::KEY_Q,
+        K::KEY_R,
+        K::KEY_S,
+        K::KEY_T,
+        K::KEY_U,
+        K::KEY_V,
+        K::KEY_W,
+        K::KEY_X,
+        K::KEY_Y,
+        K::KEY_Z,
+    ]
+    .contains(&key)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -251,6 +283,20 @@ pub struct HintKeys {
     pub left: Vec<K>,
     #[serde(deserialize_with = "deserialize_chord")]
     pub right: Vec<K>,
+    #[serde(deserialize_with = "deserialize_chord")]
+    pub grid: Vec<K>,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub grid_upper_left: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub grid_upper_right: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub grid_lower_left: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub grid_lower_right: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub grid_left_click: K,
+    #[serde(deserialize_with = "deserialize_key")]
+    pub grid_right_click: K,
     #[serde(deserialize_with = "deserialize_key")]
     pub cancel: K,
     #[serde(deserialize_with = "deserialize_key")]
@@ -264,6 +310,13 @@ impl Default for HintKeys {
         Self {
             left: vec![K::KEY_LEFTMETA, K::KEY_SPACE],
             right: vec![K::KEY_LEFTMETA, K::KEY_I],
+            grid: vec![K::KEY_LEFTMETA, K::KEY_G],
+            grid_upper_left: K::KEY_U,
+            grid_upper_right: K::KEY_I,
+            grid_lower_left: K::KEY_J,
+            grid_lower_right: K::KEY_K,
+            grid_left_click: K::KEY_SPACE,
+            grid_right_click: K::KEY_R,
             cancel: K::KEY_ENTER,
             toggle_background: K::KEY_LEFTCTRL,
             debug: K::KEY_F8,
@@ -387,6 +440,70 @@ impl Config {
         validate_chord("keys.free_mouse", &self.keys.free_mouse)?;
         validate_chord("hints.keys.left", &self.hints.keys.left)?;
         validate_chord("hints.keys.right", &self.hints.keys.right)?;
+        validate_chord("hints.keys.grid", &self.hints.keys.grid)?;
+        let grid_keys = [
+            (
+                "hints.keys.grid_upper_left",
+                self.hints.keys.grid_upper_left,
+            ),
+            (
+                "hints.keys.grid_upper_right",
+                self.hints.keys.grid_upper_right,
+            ),
+            (
+                "hints.keys.grid_lower_left",
+                self.hints.keys.grid_lower_left,
+            ),
+            (
+                "hints.keys.grid_lower_right",
+                self.hints.keys.grid_lower_right,
+            ),
+            (
+                "hints.keys.grid_left_click",
+                self.hints.keys.grid_left_click,
+            ),
+            (
+                "hints.keys.grid_right_click",
+                self.hints.keys.grid_right_click,
+            ),
+        ];
+        for (name, key) in &grid_keys[..4] {
+            if !is_letter_key(*key) {
+                return Err(format!("{name} must be a letter from A to Z"));
+            }
+        }
+        let mut assigned_grid_keys = BTreeMap::new();
+        for (name, key) in grid_keys {
+            if let Some(other) = assigned_grid_keys.insert(key, name) {
+                return Err(format!("{name} and {other} both bind {key:?}"));
+            }
+            if [
+                K::KEY_RESERVED,
+                K::KEY_UNKNOWN,
+                K::KEY_ESC,
+                K::KEY_BACKSPACE,
+                K::KEY_LEFTCTRL,
+                K::KEY_RIGHTCTRL,
+                K::KEY_LEFTALT,
+                K::KEY_RIGHTALT,
+                K::KEY_LEFTMETA,
+                K::KEY_RIGHTMETA,
+                K::KEY_LEFTSHIFT,
+                K::KEY_RIGHTSHIFT,
+                self.hints.keys.cancel,
+                self.hints.keys.toggle_background,
+                self.hints.keys.debug,
+            ]
+            .contains(&key)
+            {
+                return Err(format!(
+                    "{name} conflicts with a modifier, reserved grid, cancellation, peek, or debug key"
+                ));
+            }
+            if self.keys.free_mouse.len() == 1 && self.keys.free_mouse[0] == key {
+                return Err(format!("{name} conflicts with keys.free_mouse"));
+            }
+        }
         validate_hint_symbols(&self.hints.label_symbols)?;
         let toggle = self.hints.keys.toggle_background;
         if toggle == self.hints.keys.cancel
@@ -409,6 +526,7 @@ impl Config {
             self.hints.keys.cancel, toggle].contains(&debug)
             || self.hints.keys.left.contains(&debug)
             || self.hints.keys.right.contains(&debug)
+            || self.hints.keys.grid.contains(&debug)
             || self.keys.free_mouse.contains(&debug)
             || self.hints.label_symbols.chars()
                 .any(|symbol| parse_key(&symbol.to_string()) == Ok(debug))
@@ -428,6 +546,7 @@ impl Config {
         for (name, chord) in [
             ("hints.keys.left", &self.hints.keys.left),
             ("hints.keys.right", &self.hints.keys.right),
+            ("hints.keys.grid", &self.hints.keys.grid),
         ] {
             if chord.len() == 1 {
                 let key = chord[0];
@@ -459,6 +578,24 @@ impl Config {
             &self.hints.keys.left,
             "hints.keys.right",
             &self.hints.keys.right,
+        )?;
+        validate_unique_chords(
+            "keys.free_mouse",
+            &self.keys.free_mouse,
+            "hints.keys.grid",
+            &self.hints.keys.grid,
+        )?;
+        validate_unique_chords(
+            "hints.keys.left",
+            &self.hints.keys.left,
+            "hints.keys.grid",
+            &self.hints.keys.grid,
+        )?;
+        validate_unique_chords(
+            "hints.keys.right",
+            &self.hints.keys.right,
+            "hints.keys.grid",
+            &self.hints.keys.grid,
         )?;
         Ok(())
     }
@@ -760,12 +897,32 @@ mod tests {
         let config = Config::parse("").unwrap();
         assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTMETA, K::KEY_SPACE]);
         assert_eq!(config.hints.keys.right, vec![K::KEY_LEFTMETA, K::KEY_I]);
+        assert_eq!(config.hints.keys.grid, vec![K::KEY_LEFTMETA, K::KEY_G]);
+        assert_eq!(config.hints.keys.grid_upper_left, K::KEY_U);
+        assert_eq!(config.hints.keys.grid_upper_right, K::KEY_I);
+        assert_eq!(config.hints.keys.grid_lower_left, K::KEY_J);
+        assert_eq!(config.hints.keys.grid_lower_right, K::KEY_K);
+        assert_eq!(config.hints.keys.grid_left_click, K::KEY_SPACE);
+        assert_eq!(config.hints.keys.grid_right_click, K::KEY_R);
         assert_eq!(config.hints.keys.cancel, K::KEY_ENTER);
         assert_eq!(config.hints.keys.toggle_background, K::KEY_LEFTCTRL);
         assert_eq!(config.hints.keys.debug, K::KEY_F8);
         assert_eq!(config.hints.readability_color, Color::rgba(64, 64, 64, 230));
         assert_eq!(config.hints.label_symbols, "abcdefghijklmnopqrstuvwxyz");
         assert_eq!(config.hints.max_height, 96);
+        let config =
+            Config::parse("[hints.keys]\ngrid_left_click = 'f1'\ngrid_right_click = 'f2'").unwrap();
+        assert_eq!(config.hints.keys.grid_left_click, K::KEY_F1);
+        assert_eq!(config.hints.keys.grid_right_click, K::KEY_F2);
+        let config = Config::parse(
+            "[hints.keys]\ngrid_upper_left = 'a'\ngrid_upper_right = 's'\n\
+             grid_lower_left = 'd'\ngrid_lower_right = 'f'",
+        )
+        .unwrap();
+        assert_eq!(config.hints.keys.grid_upper_left, K::KEY_A);
+        assert_eq!(config.hints.keys.grid_upper_right, K::KEY_S);
+        assert_eq!(config.hints.keys.grid_lower_left, K::KEY_D);
+        assert_eq!(config.hints.keys.grid_lower_right, K::KEY_F);
         for text in [
             "[hints]\nlabel_symbols = 'a'",
             "[hints]\nlabel_symbols = 'abcA'",
@@ -776,6 +933,15 @@ mod tests {
             "[hints.keys]\nleft = ''",
             "[hints.keys]\nleft = 'leftmeta+leftmeta'",
             "[hints.keys]\nright = 'leftmeta+not-a-key'",
+            "[hints.keys]\ngrid = ''",
+            "[hints.keys]\ngrid = 'leftmeta+leftmeta'",
+            "[hints.keys]\ngrid_left_click = 'u'",
+            "[hints.keys]\ngrid_right_click = 'space'\ngrid_left_click = 'space'",
+            "[hints.keys]\ngrid_left_click = 'enter'",
+            "[hints.keys]\ngrid_upper_left = 'u'\ngrid_upper_right = 'u'",
+            "[hints.keys]\ngrid_lower_left = 'space'",
+            "[hints.keys]\ngrid_upper_left = 'f1'",
+            "[hints.keys]\ngrid_right_click = 'f3'\n[keys]\nfree_mouse = 'f3'",
             "[hints.keys]\ncancel = 'space'",
             "[hints.keys]\ntoggle_background = 'enter'",
             "[hints.keys]\ntoggle_background = 'escape'",
@@ -786,6 +952,7 @@ mod tests {
             "[hints]\nreadability_color = 'grey'",
             "[hints.keys]\nleft = 'j'",
             "[hints.keys]\nleft = 'leftmeta+space'\nright = 'leftmeta+space'",
+            "[hints.keys]\nleft = 'leftmeta+space'\ngrid = 'leftmeta+space'",
             "[hints]\ncolor = '#00ff00'",
         ] {
             assert!(Config::parse(text).is_err(), "{text}");

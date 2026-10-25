@@ -1,7 +1,8 @@
 use crate::{
     config::Hints,
     detect::{self, DetectionLimits, Outcome, Rect, Source},
-    font::Color,
+    font::{Canvas, Color},
+    grid::{GridQuadrant, GridRect, GridSelection},
     input::KeyCode as K,
     label::{AppendResult, LabelAlphabet, LabelSelection},
     windows_ui::{HintColors, Overlay, OverlayHint},
@@ -14,8 +15,12 @@ use std::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
-    SRCCOPY,
+    GetMonitorInfoW, MonitorFromPoint, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
+};
+use windows_sys::Win32::{
+    Foundation::POINT,
+    UI::WindowsAndMessaging::GetCursorPos,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +81,7 @@ pub struct ActiveHints {
     background_hidden: bool,
     debug_view: DebugView,
     origin: (i32, i32),
+    grid: Option<GridSelection>,
 }
 
 impl ActiveHints {
@@ -85,6 +91,10 @@ impl ActiveHints {
 
     pub fn set_click_kind(&mut self, click: ClickKind) {
         self.click = click;
+    }
+
+    pub fn is_grid_mode(&self) -> bool {
+        self.grid.is_some()
     }
 
     pub fn cancel(&mut self, overlay: &mut Overlay) -> io::Result<()> {
@@ -114,6 +124,57 @@ impl ActiveHints {
             background_hidden: false,
             debug_view: DebugView::Normal,
             origin,
+            grid: None,
+        };
+        hints.redraw(config, overlay)?;
+        Ok(hints)
+    }
+
+    pub fn activate_grid(
+        config: &Hints,
+        click: ClickKind,
+        overlay: &mut Overlay,
+    ) -> Result<Self, Box<dyn Error>> {
+        let alphabet = LabelAlphabet::new(&config.label_symbols)
+            .map_err(|error| format!("hints.label_symbols: {error}"))?;
+        let origin = overlay.origin();
+        let mut point = POINT { x: 0, y: 0 };
+        if unsafe { GetCursorPos(&mut point) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let monitor = unsafe { MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST) };
+        if monitor.is_null() {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut info: MONITORINFO = unsafe { zeroed() };
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if unsafe { GetMonitorInfoW(monitor, &mut info) } == 0 {
+            return Err(io::Error::last_os_error().into());
+        }
+        let mut grid = GridSelection::new(GridRect {
+            x: f64::from(info.rcMonitor.left - origin.0),
+            y: f64::from(info.rcMonitor.top - origin.1),
+            width: f64::from(info.rcMonitor.right - info.rcMonitor.left),
+            height: f64::from(info.rcMonitor.bottom - info.rcMonitor.top),
+        });
+        grid.set_cursor(
+            f64::from(point.x - origin.0),
+            f64::from(point.y - origin.1),
+        );
+        let hints = Self {
+            alphabet: alphabet.clone(),
+            selection: LabelSelection::new(alphabet, 0),
+            regions: Vec::new(),
+            debug_regions: Vec::new(),
+            edge_regions: Vec::new(),
+            click,
+            cancel: config.keys.cancel,
+            debug_key: config.keys.debug,
+            background_key: config.keys.toggle_background,
+            background_hidden: false,
+            debug_view: DebugView::Normal,
+            origin,
+            grid: Some(grid),
         };
         hints.redraw(config, overlay)?;
         Ok(hints)
@@ -138,9 +199,49 @@ impl ActiveHints {
             self.cancel(overlay)?;
             return Ok(HintResult::Cancelled);
         }
-        if key == self.debug_key {
+        if key == self.debug_key && self.grid.is_none() {
             self.debug_view = self.debug_view.next();
             self.redraw(config, overlay)?;
+            return Ok(HintResult::Continue);
+        }
+        if self.background_hidden && self.grid.is_some() {
+            return Ok(HintResult::Continue);
+        }
+        if let Some(grid) = &mut self.grid {
+            if key == K::KEY_BACKSPACE {
+                if !grid.backspace() {
+                    self.cancel(overlay)?;
+                    return Ok(HintResult::Cancelled);
+                }
+                let (x, y) = grid.cursor();
+                Overlay::move_cursor_to(
+                    self.origin.0 + x.round() as i32,
+                    self.origin.1 + y.round() as i32,
+                )?;
+                self.redraw(config, overlay)?;
+                return Ok(HintResult::Continue);
+            }
+            if key == config.keys.grid_left_click || key == config.keys.grid_right_click {
+                let (x, y) = grid.cursor();
+                overlay.click_at(
+                    self.origin.0 + x.round() as i32,
+                    self.origin.1 + y.round() as i32,
+                    key == config.keys.grid_right_click,
+                )?;
+                self.cancel(overlay)?;
+                return Ok(HintResult::Clicked);
+            }
+            let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
+                return Ok(HintResult::Continue);
+            };
+            if grid.select(quadrant) {
+                let (x, y) = grid.cursor();
+                Overlay::move_cursor_to(
+                    self.origin.0 + x.round() as i32,
+                    self.origin.1 + y.round() as i32,
+                )?;
+                self.redraw(config, overlay)?;
+            }
             return Ok(HintResult::Continue);
         }
         if self.background_hidden || self.debug_view != DebugView::Normal || self.regions.is_empty()
@@ -186,6 +287,40 @@ impl ActiveHints {
             text: config.label_color,
             highlight: config.label_highlight_color,
         };
+        if let Some(grid) = &self.grid {
+            let mut hints = Vec::with_capacity(8);
+            for (quadrant, rect) in grid.cells() {
+                let x = self.origin.0 + rect.x.round() as i32;
+                let y = self.origin.1 + rect.y.round() as i32;
+                let width = rect.width.round() as i32;
+                let height = rect.height.round() as i32;
+                let label = quadrant.label(&config.keys);
+                let label_width = (Canvas::text_size(&label, 2).0 + 12).max(24);
+                hints.push(OverlayHint {
+                    x,
+                    y,
+                    width,
+                    height,
+                    label: String::new(),
+                    prefix_length: 0,
+                    border: Some(config.border_color),
+                    fill: Some(config.fill_color),
+                    debug_dot: false,
+                });
+                hints.push(OverlayHint {
+                    x: x + width / 2 - label_width / 2,
+                    y: y + height / 2 - 10,
+                    width: label_width,
+                    height: 20,
+                    label,
+                    prefix_length: 0,
+                    border: None,
+                    fill: Some(config.readability_color),
+                    debug_dot: false,
+                });
+            }
+            return overlay.set_hints(hints, self.background_hidden, colors);
+        }
         let hints = match self.debug_view {
             DebugView::Normal => self
                 .regions
