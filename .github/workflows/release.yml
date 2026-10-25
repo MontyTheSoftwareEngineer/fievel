@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.platform }}-${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            shell: bash
+            package_command: ./scripts/package-release.sh
+          - os: macos-15-intel
+            platform: macos
+            arch: x64
+            shell: bash
+            package_command: ./scripts/package-release-macos.sh
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            shell: bash
+            package_command: ./scripts/package-release-macos.sh
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            shell: pwsh
+            package_command: ./scripts/package-release-windows.ps1
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Verify tag matches package version
+        shell: bash
+        run: |
+          version=$(sed -n '/^\[package\]/,/^\[/s/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version v$version" >&2
+            exit 1
+          fi
+      - run: cargo test --locked
+      - run: cargo build --release --locked
+      - run: ${{ matrix.package_command }}
+        shell: ${{ matrix.shell }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.platform }}-${{ matrix.arch }}
+          path: target/release/fievel-*-${{ matrix.platform }}-*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --generate-notes --verify-tag

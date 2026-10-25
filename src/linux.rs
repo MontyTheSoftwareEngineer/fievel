@@ -699,7 +699,7 @@ fn activate_pending_hints(
     }
 }
 
-fn handle_hint_input(
+pub(super) fn handle_hint_input(
     actions: Vec<HintInputEvent>,
     hint_mode: &mut Option<ActiveHints>,
     config: &Config,

@@ -23,6 +23,8 @@ mod indicator_render;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod platform;
+#[cfg(all(target_os = "linux", test))]
+use platform::handle_hint_input;
 
 #[cfg(target_os = "macos")]
 #[path = "macos_hints.rs"]
