@@ -90,6 +90,8 @@ impl Default for Speeds {
 #[serde(default, deny_unknown_fields)]
 pub struct Easing {
     pub movement: f64,
+    /// Easing while the pointer slows down or stops; unset uses `movement`.
+    pub movement_stop: Option<f64>,
     pub scroll: f64,
 }
 
@@ -97,6 +99,7 @@ impl Default for Easing {
     fn default() -> Self {
         Self {
             movement: 0.2,
+            movement_stop: None,
             scroll: 0.3,
         }
     }
@@ -368,6 +371,7 @@ impl Config {
         }
         for (name, value) in [
             ("movement", self.easing.movement),
+            ("movement_stop", self.easing.movement_stop.unwrap_or(self.easing.movement)),
             ("scroll", self.easing.scroll),
         ] {
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -614,6 +618,15 @@ mod tests {
         let controls = Config::default().mouse_controls();
         assert!(controls.contains(&K::KEY_LEFTSHIFT));
         assert!(controls.contains(&K::KEY_RIGHTSHIFT));
+    }
+
+    #[test]
+    fn movement_stop_easing_is_optional_and_validated() {
+        assert_eq!(Config::default().easing.movement_stop, None);
+        let config = Config::parse("[easing]\nmovement = 0.1\nmovement_stop = 1").unwrap();
+        assert_eq!((config.easing.movement, config.easing.movement_stop), (0.1, Some(1.0)));
+        let error = Config::parse("[easing]\nmovement_stop = 1.5").unwrap_err();
+        assert!(error.to_string().starts_with("easing.movement_stop"), "{error}");
     }
 
     #[test]
