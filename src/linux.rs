@@ -5,7 +5,7 @@ use crate::{
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
     indicator::Overlays as Indicator,
-    pipeline::InputEngine as Engine,
+    pipeline::{HintRequest, InputEngine as Engine},
 };
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
@@ -681,10 +681,15 @@ fn activate_pending_hints(
     held: &HeldKeys,
     config: &Config,
 ) {
-    if let Some(click) = engine.take_hint_request() {
-        match ActiveHints::activate(&config.hints, click) {
+    if let Some(request) = engine.take_hint_request() {
+        let activated = match request {
+            HintRequest::Click(click) => ActiveHints::activate(&config.hints, click),
+            HintRequest::Grid => ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left),
+        };
+        match activated {
             Ok(hints) => {
                 hint_input.begin(held.keys().iter());
+                hint_input.set_grid_mode(hints.is_grid_mode());
                 *hint_mode = Some(hints);
                 if hint_input.readability_held() {
                     handle_hint_input(
@@ -699,7 +704,7 @@ fn activate_pending_hints(
     }
 }
 
-fn handle_hint_input(
+pub(crate) fn handle_hint_input(
     actions: Vec<HintInputEvent>,
     hint_mode: &mut Option<ActiveHints>,
     config: &Config,
@@ -715,6 +720,22 @@ fn handle_hint_input(
                     *hint_mode = None;
                 } else {
                     hints.set_click_kind(click);
+                }
+            }
+            HintInputEvent::GridShortcut => {
+                if hints.is_grid_mode() {
+                    hints.cancel();
+                    *hint_mode = None;
+                } else {
+                    let click = hints.click_kind();
+                    hints.cancel();
+                    match ActiveHints::activate_grid(&config.hints, click) {
+                        Ok(grid) => *hint_mode = Some(grid),
+                        Err(error) => {
+                            ActiveHints::warning(error.as_ref());
+                            *hint_mode = None;
+                        }
+                    }
                 }
             }
             HintInputEvent::Key(key, value) => match hints.handle_key(key, value, &config.hints) {

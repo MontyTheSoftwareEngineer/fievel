@@ -2,6 +2,7 @@ use crate::{
     config::Hints,
     detect::{self, DetectionLimits, DetectionTrace, Outcome, Rect},
     font::{Canvas, Color},
+    grid::{GridQuadrant, GridRect, GridSelection},
     label::{AppendResult, LabelAlphabet, LabelSelection},
 };
 use evdev::KeyCode as K;
@@ -46,7 +47,7 @@ pub enum ClickKind {
 
 pub fn locate_cursor() -> Result<(), Box<dyn Error>> {
     let mut backend = WaylandHints::connect_for_locator()?;
-    let (output_index, center) = backend.capture_cursor_position()?;
+    let (output_index, center, _) = backend.capture_cursor_position(false)?;
     backend.draw_cursor_pulse(output_index, center)?;
     std::thread::sleep(CURSOR_PULSE_DURATION);
     Ok(())
@@ -110,6 +111,8 @@ pub struct ActiveHints {
     click: ClickKind,
     cancel: K,
     background: HintBackground,
+    grid: Option<GridSelection>,
+    grid_output: Option<usize>,
     backend: WaylandHints,
 }
 
@@ -122,6 +125,10 @@ impl ActiveHints {
         self.click = click;
     }
 
+    pub fn is_grid_mode(&self) -> bool {
+        self.grid.is_some()
+    }
+
     pub fn cancel(&mut self) {
         self.backend.destroy();
     }
@@ -132,6 +139,41 @@ impl ActiveHints {
         let mut backend = WaylandHints::connect()?;
         let raw_regions = backend.capture_regions(config)?;
         Self::from_capture(config, click, alphabet, backend, raw_regions)
+    }
+
+    pub fn activate_grid(config: &Hints, click: ClickKind) -> Result<Self, Box<dyn Error>> {
+        let alphabet = LabelAlphabet::new(&config.label_symbols)
+            .map_err(|error| format!("hints.label_symbols: {error}"))?;
+        let mut backend = WaylandHints::connect()?;
+        let (output_index, cursor_position, cursor_visible) =
+            backend.capture_cursor_position(true)?;
+        let overlay = &backend.state.overlays[output_index];
+        let mut grid = GridSelection::new(GridRect {
+            x: 0.0,
+            y: 0.0,
+            width: f64::from(overlay.logical_width),
+            height: f64::from(overlay.logical_height),
+        });
+        grid.set_cursor(
+            f64::from(cursor_position.0),
+            f64::from(cursor_position.1),
+        );
+        if !cursor_visible {
+            let (x, y) = grid.cursor();
+            backend.move_grid_cursor(output_index, x, y)?;
+        }
+        backend.redraw_grid(config, output_index, &grid, false)?;
+        Ok(Self {
+            alphabet: alphabet.clone(),
+            selection: LabelSelection::new(alphabet, 0),
+            regions: Vec::new(),
+            click,
+            cancel: config.keys.cancel,
+            background: HintBackground::default(),
+            grid: Some(grid),
+            grid_output: Some(output_index),
+            backend,
+        })
     }
 
     fn from_capture(
@@ -160,6 +202,8 @@ impl ActiveHints {
             click,
             cancel: config.keys.cancel,
             background,
+            grid: None,
+            grid_output: None,
             backend,
         })
     }
@@ -172,12 +216,7 @@ impl ActiveHints {
     ) -> Result<HintResult, Box<dyn Error>> {
         if key == config.keys.toggle_background {
             if self.background.handle_key(key, value, config) {
-                self.backend.redraw(
-                    config,
-                    &self.regions,
-                    &self.selection,
-                    self.background.hidden,
-                )?;
+                self.redraw(config)?;
             }
             return Ok(HintResult::Continue);
         }
@@ -191,9 +230,44 @@ impl ActiveHints {
         if self.background.hidden {
             return Ok(HintResult::Continue);
         }
-        if key == config.keys.debug {
+        if key == config.keys.debug && self.grid.is_none() {
             self.backend.debug_view = self.backend.debug_view.next();
             self.backend.redraw(config, &self.regions, &self.selection, false)?;
+            return Ok(HintResult::Continue);
+        }
+        if self.grid.is_some() {
+            if key == K::KEY_BACKSPACE {
+                if !self.grid.as_mut().unwrap().backspace() {
+                    self.cancel();
+                    return Ok(HintResult::Cancelled);
+                }
+                let (x, y) = self.grid.as_ref().unwrap().cursor();
+                self.backend
+                    .move_grid_cursor(self.grid_output.unwrap(), x, y)?;
+                self.redraw(config)?;
+                return Ok(HintResult::Continue);
+            }
+            if key == config.keys.grid_left_click || key == config.keys.grid_right_click {
+                let (x, y) = self.grid.as_ref().unwrap().cursor();
+                let click = if key == config.keys.grid_left_click {
+                    ClickKind::Left
+                } else {
+                    ClickKind::Right
+                };
+                self.backend
+                    .click_grid(self.grid_output.unwrap(), x, y, click)?;
+                self.backend.destroy();
+                return Ok(HintResult::Clicked);
+            }
+            let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
+                return Ok(HintResult::Continue);
+            };
+            if self.grid.as_mut().unwrap().select(quadrant) {
+                let (x, y) = self.grid.as_ref().unwrap().cursor();
+                self.backend
+                    .move_grid_cursor(self.grid_output.unwrap(), x, y)?;
+                self.redraw(config)?;
+            }
             return Ok(HintResult::Continue);
         }
         // Diagnostic rectangles have no labels. Never resolve an invisible
@@ -206,12 +280,7 @@ impl ActiveHints {
                 self.cancel();
                 return Ok(HintResult::Cancelled);
             }
-            self.backend.redraw(
-                config,
-                &self.regions,
-                &self.selection,
-                self.background.hidden,
-            )?;
+            self.redraw(config)?;
             return Ok(HintResult::Continue);
         }
         let Some(symbol) = key_to_symbol(key) else {
@@ -228,16 +297,24 @@ impl ActiveHints {
                     self.backend.destroy();
                     return Ok(HintResult::Clicked);
                 }
-                self.backend.redraw(
-                    config,
-                    &self.regions,
-                    &self.selection,
-                    self.background.hidden,
-                )?;
+                self.redraw(config)?;
             }
             AppendResult::Full | AppendResult::Overflow => {}
         }
         Ok(HintResult::Continue)
+    }
+
+    fn redraw(&mut self, config: &Hints) -> Result<(), Box<dyn Error>> {
+        if let Some(grid) = &self.grid {
+            self.backend.redraw_grid(
+                config,
+                self.grid_output.unwrap(),
+                grid,
+                self.background.hidden,
+            )
+        } else {
+            self.backend.redraw(config, &self.regions, &self.selection, self.background.hidden)
+        }
     }
 
     pub fn warning(error: &dyn Error) {
@@ -493,7 +570,10 @@ impl WaylandHints {
         Ok(regions)
     }
 
-    fn capture_cursor_position(&mut self) -> Result<(usize, (i32, i32)), Box<dyn Error>> {
+    fn capture_cursor_position(
+        &mut self,
+        fallback_to_first_output: bool,
+    ) -> Result<(usize, (i32, i32), bool), Box<dyn Error>> {
         self.prepare_overlays()?;
         self.state.captures.clear();
         let screencopy = self.state.screencopy.as_ref().unwrap().clone();
@@ -566,11 +646,29 @@ impl WaylandHints {
                 buffer.destroy();
             }
         }
+        if let Some((_, output_index, center)) = best {
+            return Ok((output_index, center, true));
+        }
+        if fallback_to_first_output {
+            // Wayland exposes no global cursor position when screencopy cannot see it.
+            let overlay = self
+                .state
+                .overlays
+                .first()
+                .ok_or("no Wayland outputs are available for grid selection")?;
+            return Ok((
+                overlay.output_index,
+                (
+                    (overlay.logical_width / 2) as i32,
+                    (overlay.logical_height / 2) as i32,
+                ),
+                false,
+            ));
+        }
         if valid_pairs == 0 {
             return Err("failed to capture cursor screenshots from any output".into());
         }
-        best.map(|(_, output_index, center)| (output_index, center))
-            .ok_or_else(|| "cursor was not visible in the Wayland screencopy frames".into())
+        Err("cursor was not visible in the Wayland screencopy frames".into())
     }
 
     fn draw_cursor_pulse(
@@ -739,6 +837,49 @@ impl WaylandHints {
             );
             pool.destroy();
         }
+        Ok(())
+    }
+
+    fn redraw_grid(
+        &mut self,
+        config: &Hints,
+        output_index: usize,
+        selection: &GridSelection,
+        hidden: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        for overlay in &mut self.state.overlays {
+            if overlay.closed
+                || (overlay.width, overlay.height)
+                    != (overlay.logical_width, overlay.logical_height)
+            {
+                return Err(
+                    "output geometry changed during grid selection; activate hints again".into(),
+                );
+            }
+            let mut canvas = Canvas::new(&mut overlay.pixels, overlay.width, overlay.height);
+            canvas.clear(Color::rgba(0, 0, 0, 0));
+            if !hidden && overlay.output_index == output_index {
+                draw_grid(
+                    &mut canvas,
+                    selection,
+                    overlay.width,
+                    overlay.height,
+                    overlay.logical_width,
+                    overlay.logical_height,
+                    config,
+                );
+            }
+            write_all_at(&overlay.file, &overlay.pixels, 0)?;
+            overlay.surface.attach(Some(&overlay.buffer), 0, 0);
+            overlay.surface.damage(
+                0,
+                0,
+                overlay.logical_width as i32,
+                overlay.logical_height as i32,
+            );
+            overlay.surface.commit();
+        }
+        self.connection.flush()?;
         Ok(())
     }
 
@@ -993,6 +1134,82 @@ impl WaylandHints {
         pointer.destroy();
         // Keep the connection/device alive until release has been processed,
         // and acknowledge device destruction even when an earlier step failed.
+        let cleanup = self.sync(INPUT_TIMEOUT);
+        result.and(cleanup)
+    }
+
+    fn click_grid(
+        &mut self,
+        output_index: usize,
+        x: f64,
+        y: f64,
+        click: ClickKind,
+    ) -> Result<(), Box<dyn Error>> {
+        let output = self.state.outputs[output_index].output.clone();
+        let overlay = &self.state.overlays[output_index];
+        let (x, y, extent_width, extent_height) = grid_pointer_coordinates(
+            x,
+            y,
+            overlay.width,
+            overlay.height,
+            overlay.logical_width,
+            overlay.logical_height,
+        );
+
+        self.destroy_overlays();
+        self.sync(INPUT_TIMEOUT)?;
+        let pointer = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .unwrap()
+            .create_virtual_pointer_with_output(
+                self.state.seat.as_ref(),
+                Some(&output),
+                &self.qh,
+                (),
+            );
+        pointer.motion_absolute(time_ms(), x, y, extent_width, extent_height);
+        pointer.frame();
+        let result = self
+            .sync(INPUT_TIMEOUT)
+            .and_then(|()| self.click_button(&pointer, click));
+        pointer.destroy();
+        let cleanup = self.sync(INPUT_TIMEOUT);
+        result.and(cleanup)
+    }
+
+    fn move_grid_cursor(
+        &mut self,
+        output_index: usize,
+        x: f64,
+        y: f64,
+    ) -> Result<(), Box<dyn Error>> {
+        let output = self.state.outputs[output_index].output.clone();
+        let overlay = &self.state.overlays[output_index];
+        let (x, y, extent_width, extent_height) = grid_pointer_coordinates(
+            x,
+            y,
+            overlay.width,
+            overlay.height,
+            overlay.logical_width,
+            overlay.logical_height,
+        );
+        let pointer = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .unwrap()
+            .create_virtual_pointer_with_output(
+                self.state.seat.as_ref(),
+                Some(&output),
+                &self.qh,
+                (),
+            );
+        pointer.motion_absolute(time_ms(), x, y, extent_width, extent_height);
+        pointer.frame();
+        let result = self.sync(INPUT_TIMEOUT);
+        pointer.destroy();
         let cleanup = self.sync(INPUT_TIMEOUT);
         result.and(cleanup)
     }
@@ -1648,6 +1865,78 @@ fn click_coordinates(rect: Rect, width: u32, height: u32) -> (u32, u32, u32, u32
     )
 }
 
+fn grid_pointer_coordinates(
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    logical_width: u32,
+    logical_height: u32,
+) -> (u32, u32, u32, u32) {
+    let x = (x * f64::from(width) / f64::from(logical_width))
+        .round()
+        .clamp(0.0, f64::from(width.saturating_sub(1))) as u32;
+    let y = (y * f64::from(height) / f64::from(logical_height))
+        .round()
+        .clamp(0.0, f64::from(height.saturating_sub(1))) as u32;
+    (x, y, width, height)
+}
+
+fn draw_grid(
+    canvas: &mut Canvas<'_>,
+    selection: &GridSelection,
+    width: u32,
+    height: u32,
+    logical_width: u32,
+    logical_height: u32,
+    config: &Hints,
+) {
+    let scale_x = f64::from(width) / f64::from(logical_width);
+    let scale_y = f64::from(height) / f64::from(logical_height);
+    for (quadrant, rect) in selection.cells() {
+        let x = (rect.x * scale_x) as i32;
+        let y = (rect.y * scale_y) as i32;
+        let cell_width = (rect.width * scale_x) as i32;
+        let cell_height = (rect.height * scale_y) as i32;
+        canvas.fill_rect(
+            x,
+            y,
+            cell_width,
+            cell_height,
+            config.grid_fill_color(quadrant),
+        );
+        canvas.stroke_rect(
+            x,
+            y,
+            cell_width,
+            cell_height,
+            config.grid_border_color(quadrant),
+        );
+        let label = quadrant.label(&config.keys);
+        let mut label_scale = ((cell_height - 4) / 8).clamp(1, 3);
+        while label_scale > 1 && Canvas::text_size(&label, label_scale).0 + 6 > cell_width {
+            label_scale -= 1;
+        }
+        let (label_width, label_height) = Canvas::text_size(&label, label_scale);
+        let label_x = x + ((cell_width - label_width) / 2).max(1);
+        let label_y = y + ((cell_height - label_height) / 2).max(1);
+        canvas.fill_rect(
+            label_x - 3,
+            label_y - 2,
+            label_width + 6,
+            label_height + 4,
+            config.readability_color,
+        );
+        canvas.draw_text(
+            label_x,
+            label_y,
+            &label,
+            label_scale,
+            config.label_color,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1991,6 +2280,8 @@ mod tests {
             click: ClickKind::Left,
             cancel: config.keys.cancel,
             background: HintBackground::default(),
+            grid: None,
+            grid_output: None,
             backend,
         };
         std::thread::sleep(Duration::from_millis(250));
@@ -2035,12 +2326,17 @@ mod click_protocol_tests {
         PointerDestroyed,
     }
 
-    fn send_event(socket: &mut UnixStream, object: u32, opcode: u16, payload: &[u8]) {
-        socket.write_all(&object.to_ne_bytes()).unwrap();
-        socket
-            .write_all(&(((payload.len() as u32 + 8) << 16) | opcode as u32).to_ne_bytes())
-            .unwrap();
-        socket.write_all(payload).unwrap();
+    fn send_event(
+        socket: &mut UnixStream,
+        object: u32,
+        opcode: u16,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        socket.write_all(&object.to_ne_bytes())?;
+        socket.write_all(
+            &(((payload.len() as u32 + 8) << 16) | opcode as u32).to_ne_bytes(),
+        )?;
+        socket.write_all(payload)
     }
 
     fn words(values: &[u32]) -> Vec<u8> {
@@ -2075,7 +2371,14 @@ mod click_protocol_tests {
             let mut header = [0; 8];
             match socket.read_exact(&mut header) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    break;
+                }
                 Err(error) => panic!("mock Wayland request failed: {error}"),
             }
             let object = u32::from_ne_bytes(header[..4].try_into().unwrap());
@@ -2099,15 +2402,27 @@ mod click_protocol_tests {
                             global.push(0);
                         }
                         global.extend_from_slice(&u32::to_ne_bytes(*version));
-                        send_event(&mut socket, registry, 0, &global);
+                        send_event(&mut socket, registry, 0, &global).unwrap();
                     }
                 }
                 ("wl_display", 0) => {
                     sync_count += 1;
                     requests.push(Request::Sync(sync_count));
                     if withheld_sync != Some(sync_count) {
-                        send_event(&mut socket, args[0], 0, &words(&[sync_count as u32]));
-                        send_event(&mut socket, 1, 1, &words(&[args[0]]));
+                        let result =
+                            send_event(&mut socket, args[0], 0, &words(&[sync_count as u32]))
+                                .and_then(|()| {
+                                    send_event(&mut socket, 1, 1, &words(&[args[0]]))
+                                });
+                        if let Err(error) = result {
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                            ) {
+                                break;
+                            }
+                            panic!("mock Wayland response failed: {error}");
+                        }
                     }
                 }
                 ("wl_registry", 0) => {
@@ -2133,7 +2448,7 @@ mod click_protocol_tests {
                 }
                 ("wl_surface", 6) => {
                     if let Some(layer) = layers.get(&object) {
-                        send_event(&mut socket, *layer, 0, &words(&[1, 640, 480]));
+                        send_event(&mut socket, *layer, 0, &words(&[1, 640, 480])).unwrap();
                     }
                 }
                 ("zwlr_layer_surface_v1", 7) => requests.push(Request::LayerDestroyed),
@@ -2225,6 +2540,106 @@ mod click_protocol_tests {
             let (success, requests, _) = run_click(click, None);
             assert!(success);
             assert_eq!(requests, successful_sequence(button));
+        }
+    }
+
+    #[test]
+    fn grid_quadrant_selection_moves_cursor_to_cell_center() {
+        use Request::*;
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || serve(server, None));
+        let mut backend =
+            WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
+        backend.prepare_overlays().unwrap();
+        let config = crate::config::Config::parse("[hints.keys]\ngrid_upper_left = 'a'")
+            .unwrap()
+            .hints;
+        let alphabet = LabelAlphabet::new(&config.label_symbols).unwrap();
+        let grid = GridSelection::new(GridRect {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 480.0,
+        });
+        let mut hints = ActiveHints {
+            alphabet: alphabet.clone(),
+            selection: LabelSelection::new(alphabet, 0),
+            regions: Vec::new(),
+            click: ClickKind::Left,
+            cancel: config.keys.cancel,
+            background: HintBackground::default(),
+            grid: Some(grid),
+            grid_output: Some(0),
+            backend,
+        };
+
+        assert!(matches!(
+            hints.handle_key(K::KEY_A, 1, &config).unwrap(),
+            HintResult::Continue
+        ));
+        assert_eq!(hints.grid.as_ref().unwrap().center(), (160.0, 120.0));
+        drop(hints);
+
+        assert_eq!(
+            server.join().unwrap(),
+            vec![
+                Sync(1),
+                PointerCreated,
+                Motion([160, 120, 640, 480]),
+                Frame,
+                Sync(2),
+                PointerDestroyed,
+                Sync(3),
+                LayerDestroyed,
+                SurfaceDestroyed,
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_left_and_right_buttons_click_at_the_cursor() {
+        use Request::*;
+
+        for (key, button) in [
+            (K::KEY_SPACE, K::BTN_LEFT),
+            (K::KEY_R, K::BTN_RIGHT),
+        ] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let server = thread::spawn(move || serve(server, None));
+            let mut backend =
+                WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
+            backend.prepare_overlays().unwrap();
+            let config = Hints::default();
+            let alphabet = LabelAlphabet::new(&config.label_symbols).unwrap();
+            let mut grid = GridSelection::new(GridRect {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 480.0,
+            });
+            grid.set_cursor(123.0, 234.0);
+            let mut hints = ActiveHints {
+                alphabet: alphabet.clone(),
+                selection: LabelSelection::new(alphabet, 0),
+                regions: Vec::new(),
+                click: ClickKind::Left,
+                cancel: config.keys.cancel,
+                background: HintBackground::default(),
+                grid: Some(grid),
+                grid_output: Some(0),
+                backend,
+            };
+
+            assert!(matches!(
+                hints.handle_key(key, 1, &config).unwrap(),
+                HintResult::Clicked
+            ));
+            drop(hints);
+
+            let mut expected = successful_sequence(button);
+            expected[5] = Motion([123, 234, 640, 480]);
+            assert_eq!(server.join().unwrap(), expected);
         }
     }
 
@@ -2423,6 +2838,8 @@ mod click_protocol_tests {
             click: ClickKind::Left,
             cancel: K::KEY_ESC,
             background: HintBackground::default(),
+            grid: None,
+            grid_output: None,
             backend,
         };
         hints.handle_key(K::KEY_A, 1, &config).unwrap();
