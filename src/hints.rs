@@ -37,6 +37,8 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
 const INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 const HINT_NAMESPACE: &str = "fievel-hints";
 const CURSOR_PULSE_DURATION: Duration = Duration::from_millis(750);
+// wl_fixed has 8 fractional bits, so this is the smallest nonzero motion.
+const CURSOR_WAKE_NUDGE: f64 = 1.0 / 256.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickKind {
@@ -46,7 +48,15 @@ pub enum ClickKind {
 
 pub fn locate_cursor() -> Result<(), Box<dyn Error>> {
     let mut backend = WaylandHints::connect_for_locator()?;
-    let (output_index, center) = backend.capture_cursor_position()?;
+    let (output_index, center) = match backend.capture_cursor_position()? {
+        Some(position) => position,
+        None => {
+            backend.nudge_cursor()?;
+            backend
+                .capture_cursor_position()?
+                .ok_or("cursor remained invisible after virtual pointer nudge")?
+        }
+    };
     backend.draw_cursor_pulse(output_index, center)?;
     std::thread::sleep(CURSOR_PULSE_DURATION);
     Ok(())
@@ -493,7 +503,7 @@ impl WaylandHints {
         Ok(regions)
     }
 
-    fn capture_cursor_position(&mut self) -> Result<(usize, (i32, i32)), Box<dyn Error>> {
+    fn capture_cursor_position(&mut self) -> Result<Option<(usize, (i32, i32))>, Box<dyn Error>> {
         self.prepare_overlays()?;
         self.state.captures.clear();
         let screencopy = self.state.screencopy.as_ref().unwrap().clone();
@@ -569,8 +579,27 @@ impl WaylandHints {
         if valid_pairs == 0 {
             return Err("failed to capture cursor screenshots from any output".into());
         }
-        best.map(|(_, output_index, center)| (output_index, center))
-            .ok_or_else(|| "cursor was not visible in the Wayland screencopy frames".into())
+        Ok(best.map(|(_, output_index, center)| (output_index, center)))
+    }
+
+    fn nudge_cursor(&mut self) -> Result<(), Box<dyn Error>> {
+        let manager = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .ok_or("compositor does not support zwlr_virtual_pointer_manager_v1")?
+            .clone();
+        let seat = self.state.seat.as_ref().ok_or("missing wl_seat")?.clone();
+        let pointer = manager.create_virtual_pointer_with_output(Some(&seat), None, &self.qh, ());
+        pointer.motion(time_ms(), CURSOR_WAKE_NUDGE, 0.0);
+        pointer.frame();
+        let nudge = self.sync(INPUT_TIMEOUT);
+        pointer.motion(time_ms(), -CURSOR_WAKE_NUDGE, 0.0);
+        pointer.frame();
+        let restore = self.sync(INPUT_TIMEOUT);
+        pointer.destroy();
+        let destroy = self.sync(INPUT_TIMEOUT);
+        nudge.and(restore).and(destroy)
     }
 
     fn draw_cursor_pulse(
