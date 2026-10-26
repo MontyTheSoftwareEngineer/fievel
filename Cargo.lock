@@ -176,6 +176,7 @@ dependencies = [
 name = "fievel"
 version = "1.3.0"
 dependencies = [
+ "cc",
  "clap",
  "evdev",
  "rustix",
@@ -184,6 +185,7 @@ dependencies = [
  "toml",
  "wayland-client",
  "wayland-protocols-wlr",
+ "windows-sys",
 ]
 
 [[package]]

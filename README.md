@@ -1,14 +1,21 @@
 # fievel
 
-Never touch the mouse again! A Linux application written in rust to replace 
-mouse movements with keyboard. Includes everythign that I needed to completely
+Never touch the mouse again! A Linux, macOS, and Windows application written in Rust to replace
+mouse movements with keyboard. Includes everything needed to completely
 replace my mouse with keyboard. There is also an included key remapper that
 allows mapping combo's so that you can do home-row style mods on ANY keyboard,
 not just fancy programmable keyboards.
 
-Fievel reads all suitable keyboards through evdev by default and creates two uinput devices:
+On Linux, Fievel reads keyboards through evdev and creates two uinput devices:
 `fievel keyboard` for typing and keyboard mappings, and `fievel pointer` for
-mouse events. 
+mouse events. On macOS 14 or later, it uses a Quartz event tap, synthesized
+CoreGraphics events, and native AppKit overlays. On Windows, it uses low-level
+keyboard and mouse hooks, synthesized `SendInput` events, and a transparent
+native overlay.
+
+## Tutorial
+
+[![Watch the Fievel tutorial on YouTube](https://img.youtube.com/vi/uhxbh40br0Q/hqdefault.jpg)](https://youtu.be/uhxbh40br0Q)
 
 ## Quickstart
 
@@ -37,6 +44,83 @@ and restart Fievel to reload it. This example also enables
 including **D+F** for Free Mouse Mode alongside **F3**.
 
 See [Configuration](#configuration) for all settings.
+
+### macOS
+
+Build on macOS 14 or later with Rust and Cargo:
+
+```sh
+cargo build --release
+./target/release/fievel
+```
+
+To create a macOS release archive after building:
+
+```sh
+./scripts/package-release-macos.sh
+```
+
+The archive is written to `target/release/fievel-<version>-macos-<arch>.tar.gz`.
+
+On first launch, allow **Input Monitoring** and **Accessibility** for the
+terminal or app running Fievel in **System Settings → Privacy & Security**.
+Quit and restart Fievel after granting access. Hint mode also needs **Screen
+Recording**; macOS requests it the first time **Super+Space** or **Super+I** is
+used. Grant it to the same terminal/app and restart Fievel before trying hints
+again. Fievel does not need root access.
+
+Some terminal apps enable **Secure Keyboard Entry**, which prevents global
+keyboard capture while that terminal is focused. If keys type into the terminal
+instead of activating Fievel, turn Secure Keyboard Entry off in the terminal's
+menu or focus another app while using Fievel.
+
+The macOS backend listens to the system keyboard rather than individual device
+nodes, so `--device` and `--list` are Linux-only. It uses the same configuration
+and key names; `super` is Command and `alt` is Option. Keys are matched by their
+physical ANSI keyboard position. The default F3 activation works when macOS
+delivers F3 as a standard function key; depending on keyboard settings, you may
+need to press **Fn+F3**.
+
+### Windows
+
+Windows 10 version 1703 or later is required for per-monitor DPI awareness.
+
+Build with Rust and Cargo from the project directory, then launch from
+PowerShell:
+
+```powershell
+cargo build --release
+.\target\release\fievel.exe
+```
+
+To create a Windows release archive after building:
+
+```powershell
+.\scripts\package-release-windows.ps1
+```
+
+The archive is written to `target\release\fievel-<version>-windows-<arch>.zip`.
+
+Fievel runs as the current user; administrator access is not normally needed.
+While running, it installs global low-level keyboard and mouse hooks so it can
+remap keys and account for physical pointer movement. Keyboard input that is
+not used by Fievel is replayed to the active application. `--device` and
+`--list` are Linux-only because Windows hooks listen to the desktop rather than
+individual keyboards.
+
+The default configuration is
+`%APPDATA%\Fievel\fievel.config`; the odometer is stored in
+`%LOCALAPPDATA%\Fievel\odometer.toml`. Both paths can be overridden for config
+with `--config PATH`. Windows uses the shared Linux-style key names for its
+supported common keys, matched by physical scan code; keys that Windows cannot
+synthesize are rejected during config validation.
+
+Windows security boundaries still apply: Fievel cannot capture input on the
+secure desktop (for example, the UAC prompt or sign-in screen), and Windows
+blocks a non-elevated process from injecting input into an elevated
+application. Run Fievel elevated only if you specifically need to control an
+elevated app. Protected or secure content may also be unavailable to visual
+hint detection.
 
 ## Optional: Run as a systemd user service
 
@@ -107,11 +191,13 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | A | Hold for slow movement and scrolling; release for normal speed |
 | Q | Show a brief red pulse around the cursor |
 
-The cursor locator compares consecutive Wayland screencopy frames with and
-without the cursor. It requires `wlr-screencopy` cursor-overlay support; if the
-compositor does not include the cursor in captures, Fievel reports that the
-locator could not find it. The position is inferred by comparing the frames,
-so rapidly changing screen content can occasionally confuse detection.
+The locator key is configurable with `keys.locate` and defaults to Q.
+It is consumed only while Free Mouse Mode is active.
+On Linux, the locator compares Wayland screencopy frames with and without the
+cursor. It requires `wlr-screencopy` cursor-overlay support, and rapidly
+changing screen content can occasionally confuse detection. On macOS, it draws
+a brief pulse at the current cursor position using the native overlay. Windows
+uses the same native-overlay pulse.
 
 Home/End shortcuts are enabled by default and only work in Free Mouse Mode.
 Hold the configured scroll up+down keys together to send Home, or scroll
@@ -143,10 +229,14 @@ Configure shortcuts under `[hints.keys]` and colors under `[hints]`.
 key despite its name. **F8** (`debug`) cycles normal hints, detected edges, and
 color-coded accepted/rejected targets. Clicking is paused in debug views.
 
-Requires a Wayland compositor with wlr layer-shell, screencopy, and virtual-pointer
-support, such as Hyprland or Sway. Detection is visual, so it can miss controls
-or label non-clickable text. Exit and re-enter after scrolling or changing the
-screen. See [Hint detection](HINT-DETECTION.md) for tuning and debug details.
+On Linux, hint mode requires a Wayland compositor with wlr layer-shell,
+screencopy, and virtual-pointer support, such as Hyprland or Sway. On macOS 14
+or later, it uses ScreenCaptureKit and a native transparent overlay and requires
+Screen Recording permission. On Windows, it uses GDI desktop capture and a
+native transparent overlay; protected content may not be capturable. Detection
+is visual, so it can miss controls or label non-clickable text. Exit and
+re-enter after scrolling or changing the screen. See
+[Hint detection](HINT-DETECTION.md) for tuning and debug details.
 
 
 ## Build and run
@@ -204,8 +294,9 @@ fievel --reset-odometer
 
 This permanently clears both counters. 
 Distances are displayed in **estimated miles**, using a reference scale of
-**96 raw input units per inch** (6,082,560 units per mile).
-The default is a conventional reference, not detected device DPI.
+**96 units per inch** (6,082,560 units per mile). Linux units are raw input
+units; macOS units are display points; Windows units are screen pixels. This
+is a conventional reference, not detected device DPI or physical distance.
 You can choose a different reference scale when reporting:
 
 ```sh
@@ -213,8 +304,11 @@ fievel --odometer --odometer-units-per-inch 800
 ```
 
 
-Totals are stored in `$XDG_STATE_HOME/fievel/odometer.toml`, or
-`~/.local/state/fievel/odometer.toml` when `XDG_STATE_HOME` is unset or not absolute.
+Totals are stored in `$XDG_STATE_HOME/fievel/odometer.toml` when that variable
+is set to an absolute path. Linux otherwise uses
+`~/.local/state/fievel/odometer.toml`; macOS uses
+`~/Library/Application Support/Fievel/odometer.toml`; Windows uses
+`%LOCALAPPDATA%\Fievel\odometer.toml`.
 
 ### Device permissions
 
@@ -247,8 +341,9 @@ permission mechanism instead.
 
 ## Configuration
 
-On startup, the application reads `~/.config/fievel/fievel.config`, unless
-you select another file with `--config PATH`.
+On startup, Linux and macOS read `~/.config/fievel/fievel.config`; Windows
+reads `%APPDATA%\Fievel\fievel.config`. Select another file with
+`--config PATH`.
 The built-in defaults below do not enable remappings. The bundled
 [`fievel.config`](fievel.config) uses these defaults and adds the home-row
 mappings described below.
@@ -268,6 +363,7 @@ scroll_fast = 24
 
 [easing]
 movement = 0.2
+# movement_stop = 1 # Optional; easing while slowing down, stopping, or reversing
 scroll = 0.3
 
 [keys]
@@ -318,11 +414,14 @@ file is missing, a message is printed and built-in defaults are used.
 Unknown settings, unknown key names, duplicate control bindings, repeated keys
 within an activation chord, and nonpositive,
 nonfinite, or greater-than-100000 speeds are rejected.
-Easing values must be finite numbers between 0 and 1. Hint labels must use 2-26
-unique lowercase ASCII letters, and hint size limits must stay positive with
-max >= min.
+Easing values must be finite numbers between 0 and 1. `movement_stop` applies
+when the pointer slows down, stops, or reverses; leaving it unset keeps the
+symmetric `movement` easing. With `movement_stop = 1` (or 0) the pointer stops
+instantly and a reversal restarts from rest, so a low `movement` value can give
+fine taps without coasting. Hint labels must use 2-26 unique lowercase ASCII
+letters, and hint size limits must stay positive with max >= min.
 
-Key names are case-insensitive Linux keycodes: `h`, `space`, `f4`, `leftshift`,
+Key names are case-insensitive Linux-style key names: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
 are accepted. Controls must use distinct single keys. Shift passes through to the focused app
 in Free Mouse Mode unless a speed key is held. With the fast key (S by default),

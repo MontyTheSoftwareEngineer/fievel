@@ -1,3 +1,5 @@
+#![cfg(not(target_os = "windows"))]
+
 use rustix::fs::{flock, FlockOperation};
 use std::{fs, process::Command};
 
@@ -8,18 +10,15 @@ fn reports_persistent_totals_while_another_process_holds_the_writer_lock() {
     fs::create_dir(&directory).unwrap();
     let state = directory.join("fievel");
     let report = || {
-        Command::new(env!("CARGO_BIN_EXE_fievel"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_fievel"));
+        command
             .env("XDG_STATE_HOME", &directory)
             .env_remove("HOME")
-            .args([
-                "--odometer",
-                "--config",
-                "/nonexistent/fievel.config",
-                "--device",
-                "/nonexistent/input",
-            ])
-            .output()
-            .unwrap()
+            .args(["--odometer", "--config", "/nonexistent/fievel.config"]);
+        if cfg!(target_os = "linux") {
+            command.args(["--device", "/nonexistent/input"]);
+        }
+        command.output().unwrap()
     };
 
     let first = report();

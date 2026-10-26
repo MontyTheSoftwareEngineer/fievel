@@ -1,5 +1,5 @@
 use crate::font::Color;
-use evdev::KeyCode as K;
+use crate::input::KeyCode as K;
 use serde::{Deserialize, Deserializer};
 use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
 
@@ -90,6 +90,8 @@ impl Default for Speeds {
 #[serde(default, deny_unknown_fields)]
 pub struct Easing {
     pub movement: f64,
+    /// Easing while the pointer slows down or stops; unset uses `movement`.
+    pub movement_stop: Option<f64>,
     pub scroll: f64,
 }
 
@@ -97,6 +99,7 @@ impl Default for Easing {
     fn default() -> Self {
         Self {
             movement: 0.2,
+            movement_stop: None,
             scroll: 0.3,
         }
     }
@@ -368,6 +371,10 @@ impl Config {
         }
         for (name, value) in [
             ("movement", self.easing.movement),
+            (
+                "movement_stop",
+                self.easing.movement_stop.unwrap_or(self.easing.movement),
+            ),
             ("scroll", self.easing.scroll),
         ] {
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -620,6 +627,7 @@ mod tests {
     fn easing_defaults_overrides_and_validation() {
         let default = Config::parse("").unwrap();
         assert_eq!(default.easing.movement, 0.2);
+        assert_eq!(default.easing.movement_stop, None);
         assert_eq!(default.easing.scroll, 0.3);
         let config = Config::parse("[easing]\nmovement = 0").unwrap();
         assert_eq!(config.easing.movement, 0.0);
@@ -627,12 +635,26 @@ mod tests {
         let config = Config::parse("[easing]\nmovement = 1\nscroll = 0.5").unwrap();
         assert_eq!(config.easing.movement, 1.0);
         assert_eq!(config.easing.scroll, 0.5);
-        for field in ["movement", "scroll"] {
+        for field in ["movement", "movement_stop", "scroll"] {
             for value in ["-0.1", "1.01", "nan", "inf", "-inf", "'0.2'", "true"] {
                 assert!(Config::parse(&format!("[easing]\n{field} = {value}")).is_err());
             }
         }
         assert!(Config::parse("[easing]\nmovment = 0.2").is_err());
+    }
+
+    #[test]
+    fn movement_stop_easing_is_optional_and_validated() {
+        let config = Config::parse("[easing]\nmovement = 0.1\nmovement_stop = 1").unwrap();
+        assert_eq!(
+            (config.easing.movement, config.easing.movement_stop),
+            (0.1, Some(1.0))
+        );
+        let error = Config::parse("[easing]\nmovement_stop = 1.5").unwrap_err();
+        assert!(
+            error.to_string().starts_with("easing.movement_stop"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -696,16 +718,39 @@ mod tests {
     #[test]
     fn partial_configs_keep_unspecified_defaults() {
         let config = Config::parse(
-            "[speeds]\nnormal = 900\n[keys]\nfree_mouse = 'KEY_F4'\nleft = 'q'\nlocate = 'f7'\n[hints.keys]\nleft = 'leftmeta+j'",
+            "[speeds]\nnormal = 900\n[keys]\nfree_mouse = 'KEY_F4'\nleft = 'w'\n[hints.keys]\nleft = 'leftmeta+j'",
         )
         .unwrap();
         assert_eq!(config.speeds.normal, 900.0);
         assert_eq!(config.speeds.fast, 900.0);
         assert_eq!(config.keys.free_mouse, vec![K::KEY_F4]);
-        assert_eq!(config.keys.left, K::KEY_Q);
+        assert_eq!(config.keys.left, K::KEY_W);
+        assert_eq!(config.keys.locate, K::KEY_Q);
         assert_eq!(config.keys.scroll_up, K::KEY_COMMA);
         assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTMETA, K::KEY_J]);
         Config::parse("").unwrap();
+    }
+
+    #[test]
+    fn cursor_locator_key_is_configurable_and_cannot_conflict_with_controls() {
+        assert_eq!(Config::parse("").unwrap().keys.locate, K::KEY_Q);
+        assert_eq!(
+            Config::parse("[keys]\nfree_mouse = 'f3'").unwrap().keys.locate,
+            K::KEY_Q
+        );
+        assert_eq!(
+            Config::parse("[keys]\nlocate = 'f9'").unwrap().keys.locate,
+            K::KEY_F9
+        );
+        for binding in ["h", "f3", "z", "space"] {
+            assert!(
+                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_err(),
+                "{binding}"
+            );
+        }
+        assert!(Config::parse("[keys]\nfree_mouse = 'q'").is_err());
+        assert!(Config::parse("[keys]\nlocater = 'f9'").is_err());
+        assert!(Config::parse("[keys]\nleft = 'q'").is_err());
     }
 
     #[test]

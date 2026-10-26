@@ -1,6 +1,6 @@
 use std::{collections::BTreeSet, time::Duration};
 
-use evdev::KeyCode;
+use crate::input::KeyCode;
 
 use crate::{
     config::{Config, HintKeys},
@@ -156,7 +156,7 @@ fn append(output: &mut Output, next: Output) {
 mod tests {
     use super::*;
     use crate::config::Mode;
-    use evdev::{InputEvent, KeyCode as K, RelativeAxisCode as R};
+    use crate::input::{InputEvent, KeyCode as K, RelativeAxisCode as R};
 
     fn config() -> Config {
         let mut config = Config::parse(include_str!("../fievel.config")).unwrap();
@@ -312,15 +312,15 @@ mod tests {
 
     #[test]
     fn hint_shortcuts_do_not_intercept_mouse_clicks_in_free_mouse_mode() {
-        let config = Config::parse("[remap.main]\n'd+f' = 'free_mouse'\n'u+w' = 'super'").unwrap();
+        let config = Config::parse("[remap.main]\n'd+f' = 'free_mouse'\n'e+r' = 'super'").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         engine.key(K::KEY_D, 1);
         engine.key(K::KEY_F, 1);
         assert!(engine.active());
 
-        assert!(engine.key(K::KEY_U, 1).keyboard.is_empty());
+        assert!(engine.key(K::KEY_E, 1).keyboard.is_empty());
         assert_eq!(
-            keys(&engine.key(K::KEY_W, 1).keyboard),
+            keys(&engine.key(K::KEY_R, 1).keyboard),
             [(K::KEY_LEFTMETA, 1)]
         );
         assert_eq!(keys(&engine.key(K::KEY_SPACE, 1).mouse), [(K::BTN_LEFT, 1)]);
@@ -330,10 +330,9 @@ mod tests {
         assert_eq!(keys(&engine.key(K::KEY_SPACE, 0).mouse), [(K::BTN_LEFT, 0)]);
         assert_eq!(keys(&engine.key(K::KEY_I, 0).mouse), [(K::BTN_RIGHT, 0)]);
         assert_eq!(
-            keys(&engine.key(K::KEY_U, 0).keyboard),
+            keys(&engine.key(K::KEY_R, 0).keyboard),
             [(K::KEY_LEFTMETA, 0)]
         );
-        engine.key(K::KEY_W, 0);
         engine.key(K::KEY_D, 0);
         engine.key(K::KEY_F, 0);
         assert!(engine.take_hint_request().is_none());
