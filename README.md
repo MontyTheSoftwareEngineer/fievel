@@ -380,6 +380,7 @@ scroll_fast = 24
 
 [easing]
 movement = 0.2
+# movement_stop = 1 # Optional; easing while slowing down, stopping, or reversing
 scroll = 0.3
 
 [keys]
@@ -439,9 +440,12 @@ screencopy, grid mode starts at the center of the first available output.
 Unknown settings, unknown key names, duplicate control bindings, repeated keys
 within an activation chord, and nonpositive,
 nonfinite, or greater-than-100000 speeds are rejected.
-Easing values must be finite numbers between 0 and 1. Hint labels must use 2-26
-unique lowercase ASCII letters, and hint size limits must stay positive with
-max >= min.
+Easing values must be finite numbers between 0 and 1. `movement_stop` applies
+when the pointer slows down, stops, or reverses; leaving it unset keeps the
+symmetric `movement` easing. With `movement_stop = 1` (or 0) the pointer stops
+instantly and a reversal restarts from rest, so a low `movement` value can give
+fine taps without coasting. Hint labels must use 2-26 unique lowercase ASCII
+letters, and hint size limits must stay positive with max >= min.
 
 Key names are case-insensitive Linux-style key names: `h`, `space`, `f4`, `leftshift`,
 `KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`

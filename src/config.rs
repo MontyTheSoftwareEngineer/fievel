@@ -1,8 +1,13 @@
 use crate::font::Color;
 use crate::grid::GridQuadrant;
 use crate::input::KeyCode as K;
-use serde::{Deserialize, Deserializer};
-use std::{collections::BTreeMap, error::Error, fs, io, path::Path};
+use serde::{de::DeserializeOwned, Deserialize, Deserializer};
+use std::{
+    collections::{BTreeMap, HashSet},
+    error::Error,
+    fs, io,
+    path::Path,
+};
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -123,6 +128,8 @@ impl Default for Speeds {
 #[serde(default, deny_unknown_fields)]
 pub struct Easing {
     pub movement: f64,
+    /// Easing while the pointer slows down or stops; unset uses `movement`.
+    pub movement_stop: Option<f64>,
     pub scroll: f64,
 }
 
@@ -130,6 +137,7 @@ impl Default for Easing {
     fn default() -> Self {
         Self {
             movement: 0.2,
+            movement_stop: None,
             scroll: 0.3,
         }
     }
@@ -393,6 +401,318 @@ fn deserialize_optional_color<'de, D: Deserializer<'de>>(
         .transpose()
 }
 
+type TomlTable = toml::map::Map<String, toml::Value>;
+
+fn parse_toml_value<T: DeserializeOwned>(value: &toml::Value) -> Result<T, String> {
+    value
+        .clone()
+        .try_into()
+        .map_err(|error: toml::de::Error| error.to_string())
+}
+
+fn warn_unknown_fields(table: &TomlTable, known: &[&str], prefix: &str) {
+    for key in table.keys() {
+        if !known.contains(&key.as_str()) {
+            let path = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{prefix}.{key}")
+            };
+            eprintln!("Warning: unknown config key {path}; skipping it");
+        }
+    }
+}
+
+fn warn_invalid_config_value(path: &str, error: &str) {
+    let prefix = format!("{path}: ");
+    let reason = error.strip_prefix(&prefix).unwrap_or(error);
+    eprintln!("Warning: invalid config value {path}: {reason}; skipping it");
+}
+
+fn config_section<'a>(table: &'a TomlTable, key: &str, path: &str) -> Option<&'a TomlTable> {
+    match table.get(key) {
+        Some(value) => match value.as_table() {
+            Some(table) => Some(table),
+            None => {
+                eprintln!("Warning: invalid config value {path}: expected a table; skipping it");
+                None
+            }
+        },
+        None => None,
+    }
+}
+
+fn apply_value<T: DeserializeOwned>(
+    table: &TomlTable,
+    key: &str,
+    path: &str,
+    target: &mut T,
+    changed: &mut HashSet<String>,
+) {
+    apply_parsed(table, key, path, target, changed, parse_toml_value);
+}
+
+fn apply_parsed<T>(
+    table: &TomlTable,
+    key: &str,
+    path: &str,
+    target: &mut T,
+    changed: &mut HashSet<String>,
+    parse: impl FnOnce(&toml::Value) -> Result<T, String>,
+) {
+    let Some(value) = table.get(key) else {
+        return;
+    };
+    match parse(value) {
+        Ok(parsed) => {
+            *target = parsed;
+            changed.insert(path.to_owned());
+        }
+        Err(error) => {
+            warn_invalid_config_value(path, &error);
+        }
+    }
+}
+
+fn apply_key(
+    table: &TomlTable,
+    key: &str,
+    path: &str,
+    target: &mut K,
+    changed: &mut HashSet<String>,
+) {
+    apply_parsed(table, key, path, target, changed, |value| {
+        parse_toml_value::<String>(value).and_then(|value| parse_key(&value))
+    });
+}
+
+fn apply_chord(
+    table: &TomlTable,
+    key: &str,
+    path: &str,
+    target: &mut Vec<K>,
+    changed: &mut HashSet<String>,
+) {
+    apply_parsed(table, key, path, target, changed, |value| {
+        let value = parse_toml_value::<String>(value)?;
+        let chord = value
+            .split('+')
+            .map(parse_key)
+            .collect::<Result<Vec<_>, _>>()?;
+        validate_chord(path, &chord)?;
+        Ok(chord)
+    });
+}
+
+fn apply_color(
+    table: &TomlTable,
+    key: &str,
+    path: &str,
+    target: &mut Color,
+    changed: &mut HashSet<String>,
+) {
+    apply_parsed(table, key, path, target, changed, |value| {
+        parse_toml_value::<String>(value).and_then(|value| Color::parse(&value))
+    });
+}
+
+fn apply_optional_color(
+    table: &TomlTable,
+    key: &str,
+    path: &str,
+    target: &mut Option<Color>,
+    changed: &mut HashSet<String>,
+) {
+    apply_parsed(table, key, path, target, changed, |value| {
+        parse_toml_value::<String>(value)
+            .and_then(|value| Color::parse(&value))
+            .map(Some)
+    });
+}
+
+fn remap_with_entry(
+    remap: &crate::remap::RemapConfig,
+    layer: Option<&str>,
+    trigger: &str,
+    action: &str,
+) -> crate::remap::RemapConfig {
+    let mut candidate = remap.clone();
+    if let Some(layer) = layer {
+        if let Some(entries) = candidate.layers.get_mut(layer) {
+            entries.insert(trigger.to_owned(), action.to_owned());
+        }
+    } else {
+        candidate.main.insert(trigger.to_owned(), action.to_owned());
+    }
+    candidate
+}
+
+fn reset_config_value(config: &mut Config, path: &str) -> bool {
+    let defaults = Config::default();
+    match path {
+        "mode" => config.mode = defaults.mode,
+        "notify" => config.notify = defaults.notify,
+        "home_end_enabled" => config.home_end_enabled = defaults.home_end_enabled,
+        "keycast.enabled" => config.keycast.enabled = defaults.keycast.enabled,
+        "keycast.hotkey" => config.keycast.hotkey = defaults.keycast.hotkey,
+        "keycast.max_keys" => config.keycast.max_keys = defaults.keycast.max_keys,
+        "keycast.timeout" => config.keycast.timeout = defaults.keycast.timeout,
+        "speeds.normal" => config.speeds.normal = defaults.speeds.normal,
+        "speeds.slow" => config.speeds.slow = defaults.speeds.slow,
+        "speeds.fast" => config.speeds.fast = defaults.speeds.fast,
+        "speeds.scroll" => config.speeds.scroll = defaults.speeds.scroll,
+        "speeds.scroll_slow" => config.speeds.scroll_slow = defaults.speeds.scroll_slow,
+        "speeds.scroll_fast" => config.speeds.scroll_fast = defaults.speeds.scroll_fast,
+        "easing.movement" => config.easing.movement = defaults.easing.movement,
+        "easing.movement_stop" => config.easing.movement_stop = defaults.easing.movement_stop,
+        "easing.scroll" => config.easing.scroll = defaults.easing.scroll,
+        "keys.free_mouse" => config.keys.free_mouse = defaults.keys.free_mouse,
+        "keys.toggle_hold" => config.keys.toggle_hold = defaults.keys.toggle_hold,
+        "keys.left" => config.keys.left = defaults.keys.left,
+        "keys.down" => config.keys.down = defaults.keys.down,
+        "keys.up" => config.keys.up = defaults.keys.up,
+        "keys.right" => config.keys.right = defaults.keys.right,
+        "keys.left_click" => config.keys.left_click = defaults.keys.left_click,
+        "keys.right_click" => config.keys.right_click = defaults.keys.right_click,
+        "keys.scroll_left" => config.keys.scroll_left = defaults.keys.scroll_left,
+        "keys.scroll_down" => config.keys.scroll_down = defaults.keys.scroll_down,
+        "keys.scroll_up" => config.keys.scroll_up = defaults.keys.scroll_up,
+        "keys.scroll_right" => config.keys.scroll_right = defaults.keys.scroll_right,
+        "keys.slow" => config.keys.slow = defaults.keys.slow,
+        "keys.fast" => config.keys.fast = defaults.keys.fast,
+        "keys.locate" => config.keys.locate = defaults.keys.locate,
+        "hints.keys.left" => config.hints.keys.left = defaults.hints.keys.left,
+        "hints.keys.right" => config.hints.keys.right = defaults.hints.keys.right,
+        "hints.keys.grid" => config.hints.keys.grid = defaults.hints.keys.grid,
+        "hints.keys.grid_upper_left" => {
+            config.hints.keys.grid_upper_left = defaults.hints.keys.grid_upper_left
+        }
+        "hints.keys.grid_upper_right" => {
+            config.hints.keys.grid_upper_right = defaults.hints.keys.grid_upper_right
+        }
+        "hints.keys.grid_lower_left" => {
+            config.hints.keys.grid_lower_left = defaults.hints.keys.grid_lower_left
+        }
+        "hints.keys.grid_lower_right" => {
+            config.hints.keys.grid_lower_right = defaults.hints.keys.grid_lower_right
+        }
+        "hints.keys.grid_left_click" => {
+            config.hints.keys.grid_left_click = defaults.hints.keys.grid_left_click
+        }
+        "hints.keys.grid_right_click" => {
+            config.hints.keys.grid_right_click = defaults.hints.keys.grid_right_click
+        }
+        "hints.keys.cancel" => config.hints.keys.cancel = defaults.hints.keys.cancel,
+        "hints.keys.toggle_background" => {
+            config.hints.keys.toggle_background = defaults.hints.keys.toggle_background
+        }
+        "hints.keys.debug" => config.hints.keys.debug = defaults.hints.keys.debug,
+        "hints.label_symbols" => config.hints.label_symbols = defaults.hints.label_symbols,
+        "hints.border_color" => config.hints.border_color = defaults.hints.border_color,
+        "hints.fill_color" => config.hints.fill_color = defaults.hints.fill_color,
+        "hints.grid_colors.upper_left" => {
+            config.hints.grid_colors.upper_left = defaults.hints.grid_colors.upper_left
+        }
+        "hints.grid_colors.upper_right" => {
+            config.hints.grid_colors.upper_right = defaults.hints.grid_colors.upper_right
+        }
+        "hints.grid_colors.lower_left" => {
+            config.hints.grid_colors.lower_left = defaults.hints.grid_colors.lower_left
+        }
+        "hints.grid_colors.lower_right" => {
+            config.hints.grid_colors.lower_right = defaults.hints.grid_colors.lower_right
+        }
+        "hints.readability_color" => {
+            config.hints.readability_color = defaults.hints.readability_color
+        }
+        "hints.label_color" => config.hints.label_color = defaults.hints.label_color,
+        "hints.label_highlight_color" => {
+            config.hints.label_highlight_color = defaults.hints.label_highlight_color
+        }
+        "hints.min_width" => config.hints.min_width = defaults.hints.min_width,
+        "hints.max_width" => config.hints.max_width = defaults.hints.max_width,
+        "hints.min_height" => config.hints.min_height = defaults.hints.min_height,
+        "hints.max_height" => config.hints.max_height = defaults.hints.max_height,
+        "remap" | "remap.chord_timeout" | "remap.main" | "remap.layers" => {
+            config.remap = defaults.remap
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn conflicting_debug_field(config: &Config, path: &str) -> bool {
+    let debug = config.hints.keys.debug;
+    match path {
+        "keys.free_mouse" => config.keys.free_mouse.contains(&debug),
+        "hints.keys.left" => config.hints.keys.left.contains(&debug),
+        "hints.keys.right" => config.hints.keys.right.contains(&debug),
+        "hints.keys.grid" => config.hints.keys.grid.contains(&debug),
+        "hints.keys.cancel" => config.hints.keys.cancel == debug,
+        "hints.keys.toggle_background" => config.hints.keys.toggle_background == debug,
+        "hints.label_symbols" => config
+            .hints
+            .label_symbols
+            .chars()
+            .any(|symbol| parse_key(&symbol.to_string()) == Ok(debug)),
+        _ => false,
+    }
+}
+
+fn validation_path(config: &Config, error: &str, changed: &HashSet<String>) -> Option<String> {
+    if error.contains("keycast.hotkey") {
+        if let Some((path, _)) = config
+            .keys
+            .named()
+            .into_iter()
+            .find(|(_, key)| *key == config.keycast.hotkey)
+        {
+            if changed.contains(path) {
+                return Some(path.to_owned());
+            }
+        }
+    }
+
+    if error.contains("hints.keys.debug conflicts") && !changed.contains("hints.keys.debug") {
+        for path in [
+            "keys.free_mouse",
+            "hints.keys.left",
+            "hints.keys.right",
+            "hints.keys.grid",
+            "hints.keys.cancel",
+            "hints.keys.toggle_background",
+            "hints.label_symbols",
+        ] {
+            if changed.contains(path) && conflicting_debug_field(config, path) {
+                return Some(path.to_owned());
+            }
+        }
+    }
+
+    if error.contains("hints.keys.toggle_background conflicts")
+        && !changed.contains("hints.keys.toggle_background")
+    {
+        if changed.contains("hints.keys.cancel")
+            && config.hints.keys.cancel == config.hints.keys.toggle_background
+        {
+            return Some("hints.keys.cancel".to_owned());
+        }
+        if changed.contains("hints.label_symbols")
+            && config.hints.label_symbols.chars().any(|symbol| {
+                parse_key(&symbol.to_string()) == Ok(config.hints.keys.toggle_background)
+            })
+        {
+            return Some("hints.label_symbols".to_owned());
+        }
+    }
+
+    changed
+        .iter()
+        .filter(|path| error.contains(path.as_str()))
+        .max_by_key(|path| (error.rfind(path.as_str()).unwrap_or(0), path.len()))
+        .cloned()
+}
+
 pub(crate) fn parse_key(value: &str) -> Result<K, String> {
     let upper = value.trim().to_ascii_uppercase();
     let name = match upper.as_str() {
@@ -436,8 +756,628 @@ impl Config {
     }
 
     pub fn parse(text: &str) -> Result<Self, Box<dyn Error>> {
-        let config: Self = toml::from_str(text)?;
-        config.validate()?;
+        let value: toml::Value = toml::from_str(text)?;
+        let root = value
+            .as_table()
+            .expect("a TOML document deserializes to a table");
+        let mut config = Self::default();
+        let mut changed = HashSet::new();
+
+        warn_unknown_fields(
+            root,
+            &[
+                "mode",
+                "notify",
+                "home_end_enabled",
+                "speeds",
+                "easing",
+                "keys",
+                "keycast",
+                "hints",
+                "remap",
+            ],
+            "",
+        );
+        apply_value(root, "mode", "mode", &mut config.mode, &mut changed);
+        apply_value(root, "notify", "notify", &mut config.notify, &mut changed);
+        apply_value(
+            root,
+            "home_end_enabled",
+            "home_end_enabled",
+            &mut config.home_end_enabled,
+            &mut changed,
+        );
+
+        if let Some(table) = config_section(root, "keycast", "keycast") {
+            warn_unknown_fields(
+                table,
+                &["enabled", "hotkey", "max_keys", "timeout"],
+                "keycast",
+            );
+            apply_value(
+                table,
+                "enabled",
+                "keycast.enabled",
+                &mut config.keycast.enabled,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "hotkey",
+                "keycast.hotkey",
+                &mut config.keycast.hotkey,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "max_keys",
+                "keycast.max_keys",
+                &mut config.keycast.max_keys,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "timeout",
+                "keycast.timeout",
+                &mut config.keycast.timeout,
+                &mut changed,
+            );
+        }
+
+        if let Some(table) = config_section(root, "speeds", "speeds") {
+            warn_unknown_fields(
+                table,
+                &[
+                    "normal",
+                    "slow",
+                    "fast",
+                    "scroll",
+                    "scroll_slow",
+                    "scroll_fast",
+                ],
+                "speeds",
+            );
+            apply_value(
+                table,
+                "normal",
+                "speeds.normal",
+                &mut config.speeds.normal,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "slow",
+                "speeds.slow",
+                &mut config.speeds.slow,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "fast",
+                "speeds.fast",
+                &mut config.speeds.fast,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "scroll",
+                "speeds.scroll",
+                &mut config.speeds.scroll,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "scroll_slow",
+                "speeds.scroll_slow",
+                &mut config.speeds.scroll_slow,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "scroll_fast",
+                "speeds.scroll_fast",
+                &mut config.speeds.scroll_fast,
+                &mut changed,
+            );
+        }
+
+        if let Some(table) = config_section(root, "easing", "easing") {
+            warn_unknown_fields(table, &["movement", "movement_stop", "scroll"], "easing");
+            apply_value(
+                table,
+                "movement",
+                "easing.movement",
+                &mut config.easing.movement,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "movement_stop",
+                "easing.movement_stop",
+                &mut config.easing.movement_stop,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "scroll",
+                "easing.scroll",
+                &mut config.easing.scroll,
+                &mut changed,
+            );
+        }
+
+        if let Some(table) = config_section(root, "keys", "keys") {
+            warn_unknown_fields(
+                table,
+                &[
+                    "free_mouse",
+                    "toggle_hold",
+                    "left",
+                    "down",
+                    "up",
+                    "right",
+                    "left_click",
+                    "right_click",
+                    "scroll_left",
+                    "scroll_down",
+                    "scroll_up",
+                    "scroll_right",
+                    "slow",
+                    "fast",
+                    "locate",
+                ],
+                "keys",
+            );
+            apply_chord(
+                table,
+                "free_mouse",
+                "keys.free_mouse",
+                &mut config.keys.free_mouse,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "toggle_hold",
+                "keys.toggle_hold",
+                &mut config.keys.toggle_hold,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "left",
+                "keys.left",
+                &mut config.keys.left,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "down",
+                "keys.down",
+                &mut config.keys.down,
+                &mut changed,
+            );
+            apply_key(table, "up", "keys.up", &mut config.keys.up, &mut changed);
+            apply_key(
+                table,
+                "right",
+                "keys.right",
+                &mut config.keys.right,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "left_click",
+                "keys.left_click",
+                &mut config.keys.left_click,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "right_click",
+                "keys.right_click",
+                &mut config.keys.right_click,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "scroll_left",
+                "keys.scroll_left",
+                &mut config.keys.scroll_left,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "scroll_down",
+                "keys.scroll_down",
+                &mut config.keys.scroll_down,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "scroll_up",
+                "keys.scroll_up",
+                &mut config.keys.scroll_up,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "scroll_right",
+                "keys.scroll_right",
+                &mut config.keys.scroll_right,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "slow",
+                "keys.slow",
+                &mut config.keys.slow,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "fast",
+                "keys.fast",
+                &mut config.keys.fast,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "locate",
+                "keys.locate",
+                &mut config.keys.locate,
+                &mut changed,
+            );
+        }
+
+        if let Some(table) = config_section(root, "hints", "hints") {
+            warn_unknown_fields(
+                table,
+                &[
+                    "keys",
+                    "label_symbols",
+                    "border_color",
+                    "fill_color",
+                    "grid_colors",
+                    "readability_color",
+                    "label_color",
+                    "label_highlight_color",
+                    "min_width",
+                    "max_width",
+                    "min_height",
+                    "max_height",
+                ],
+                "hints",
+            );
+            apply_value(
+                table,
+                "label_symbols",
+                "hints.label_symbols",
+                &mut config.hints.label_symbols,
+                &mut changed,
+            );
+            apply_color(
+                table,
+                "border_color",
+                "hints.border_color",
+                &mut config.hints.border_color,
+                &mut changed,
+            );
+            apply_color(
+                table,
+                "fill_color",
+                "hints.fill_color",
+                &mut config.hints.fill_color,
+                &mut changed,
+            );
+            if let Some(grid_colors) = config_section(table, "grid_colors", "hints.grid_colors") {
+                warn_unknown_fields(
+                    grid_colors,
+                    &["upper_left", "upper_right", "lower_left", "lower_right"],
+                    "hints.grid_colors",
+                );
+                apply_optional_color(
+                    grid_colors,
+                    "upper_left",
+                    "hints.grid_colors.upper_left",
+                    &mut config.hints.grid_colors.upper_left,
+                    &mut changed,
+                );
+                apply_optional_color(
+                    grid_colors,
+                    "upper_right",
+                    "hints.grid_colors.upper_right",
+                    &mut config.hints.grid_colors.upper_right,
+                    &mut changed,
+                );
+                apply_optional_color(
+                    grid_colors,
+                    "lower_left",
+                    "hints.grid_colors.lower_left",
+                    &mut config.hints.grid_colors.lower_left,
+                    &mut changed,
+                );
+                apply_optional_color(
+                    grid_colors,
+                    "lower_right",
+                    "hints.grid_colors.lower_right",
+                    &mut config.hints.grid_colors.lower_right,
+                    &mut changed,
+                );
+            }
+            apply_color(
+                table,
+                "readability_color",
+                "hints.readability_color",
+                &mut config.hints.readability_color,
+                &mut changed,
+            );
+            apply_color(
+                table,
+                "label_color",
+                "hints.label_color",
+                &mut config.hints.label_color,
+                &mut changed,
+            );
+            apply_color(
+                table,
+                "label_highlight_color",
+                "hints.label_highlight_color",
+                &mut config.hints.label_highlight_color,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "min_width",
+                "hints.min_width",
+                &mut config.hints.min_width,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "max_width",
+                "hints.max_width",
+                &mut config.hints.max_width,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "min_height",
+                "hints.min_height",
+                &mut config.hints.min_height,
+                &mut changed,
+            );
+            apply_value(
+                table,
+                "max_height",
+                "hints.max_height",
+                &mut config.hints.max_height,
+                &mut changed,
+            );
+
+            if let Some(keys) = config_section(table, "keys", "hints.keys") {
+                warn_unknown_fields(
+                    keys,
+                    &[
+                        "left",
+                        "right",
+                        "grid",
+                        "grid_upper_left",
+                        "grid_upper_right",
+                        "grid_lower_left",
+                        "grid_lower_right",
+                        "grid_left_click",
+                        "grid_right_click",
+                        "cancel",
+                        "toggle_background",
+                        "debug",
+                    ],
+                    "hints.keys",
+                );
+                apply_chord(
+                    keys,
+                    "left",
+                    "hints.keys.left",
+                    &mut config.hints.keys.left,
+                    &mut changed,
+                );
+                apply_chord(
+                    keys,
+                    "right",
+                    "hints.keys.right",
+                    &mut config.hints.keys.right,
+                    &mut changed,
+                );
+                apply_chord(
+                    keys,
+                    "grid",
+                    "hints.keys.grid",
+                    &mut config.hints.keys.grid,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "grid_upper_left",
+                    "hints.keys.grid_upper_left",
+                    &mut config.hints.keys.grid_upper_left,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "grid_upper_right",
+                    "hints.keys.grid_upper_right",
+                    &mut config.hints.keys.grid_upper_right,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "grid_lower_left",
+                    "hints.keys.grid_lower_left",
+                    &mut config.hints.keys.grid_lower_left,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "grid_lower_right",
+                    "hints.keys.grid_lower_right",
+                    &mut config.hints.keys.grid_lower_right,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "grid_left_click",
+                    "hints.keys.grid_left_click",
+                    &mut config.hints.keys.grid_left_click,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "grid_right_click",
+                    "hints.keys.grid_right_click",
+                    &mut config.hints.keys.grid_right_click,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "cancel",
+                    "hints.keys.cancel",
+                    &mut config.hints.keys.cancel,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "toggle_background",
+                    "hints.keys.toggle_background",
+                    &mut config.hints.keys.toggle_background,
+                    &mut changed,
+                );
+                apply_key(
+                    keys,
+                    "debug",
+                    "hints.keys.debug",
+                    &mut config.hints.keys.debug,
+                    &mut changed,
+                );
+            }
+        }
+
+        if let Some(table) = config_section(root, "remap", "remap") {
+            warn_unknown_fields(table, &["chord_timeout", "main", "layers"], "remap");
+            let mut remap = crate::remap::RemapConfig::default();
+            apply_parsed(
+                table,
+                "chord_timeout",
+                "remap.chord_timeout",
+                &mut remap.chord_timeout,
+                &mut changed,
+                |value| {
+                    let timeout = parse_toml_value::<u64>(value)?;
+                    if timeout == 0 {
+                        Err("must be greater than zero".to_owned())
+                    } else {
+                        Ok(timeout)
+                    }
+                },
+            );
+
+            let mut entries: Vec<(Option<String>, String, String)> = Vec::new();
+            if let Some(main) = config_section(table, "main", "remap.main") {
+                for (trigger, value) in main {
+                    match parse_toml_value::<String>(value) {
+                        Ok(action) => entries.push((None, trigger.clone(), action)),
+                        Err(error) => eprintln!(
+                            "Warning: invalid config value remap.main.{trigger}: {error}; skipping it"
+                        ),
+                    }
+                }
+            }
+
+            let mut layer_entries = Vec::new();
+            if let Some(layers) = config_section(table, "layers", "remap.layers") {
+                for (name, value) in layers {
+                    if name.is_empty()
+                        || !name.chars().all(|character| {
+                            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+                        })
+                        || matches!(name.as_str(), "control" | "ctrl" | "meta" | "super")
+                    {
+                        eprintln!(
+                            "Warning: invalid config value remap.layers.{name}: invalid or reserved layer name; skipping it"
+                        );
+                        continue;
+                    }
+                    let Some(layer) = value.as_table() else {
+                        eprintln!(
+                            "Warning: invalid config value remap.layers.{name}: expected a table; skipping it"
+                        );
+                        continue;
+                    };
+                    let mut values = Vec::new();
+                    for (trigger, action) in layer {
+                        match parse_toml_value::<String>(action) {
+                            Ok(action) => values.push((trigger.clone(), action)),
+                            Err(error) => eprintln!(
+                                "Warning: invalid config value remap.layers.{name}.{trigger}: {error}; skipping it"
+                            ),
+                        }
+                    }
+                    layer_entries.push((name.clone(), values));
+                }
+            }
+
+            remap.layers = layer_entries
+                .iter()
+                .map(|(name, _)| (name.clone(), BTreeMap::new()))
+                .collect();
+            for (layer, entries) in layer_entries {
+                for (trigger, action) in entries {
+                    let candidate = remap_with_entry(&remap, Some(&layer), &trigger, &action);
+                    match candidate.validate() {
+                        Ok(()) => remap = candidate,
+                        Err(error) => eprintln!(
+                            "Warning: invalid config value remap.layers.{layer}.{trigger}: {error}; skipping it"
+                        ),
+                    }
+                }
+            }
+            for (layer, trigger, action) in entries {
+                let candidate = remap_with_entry(&remap, layer.as_deref(), &trigger, &action);
+                match candidate.validate() {
+                    Ok(()) => remap = candidate,
+                    Err(error) => {
+                        let path = layer.map_or_else(
+                            || format!("remap.main.{trigger}"),
+                            |layer| format!("remap.layers.{layer}.{trigger}"),
+                        );
+                        eprintln!("Warning: invalid config value {path}: {error}; skipping it");
+                    }
+                }
+            }
+            config.remap = remap;
+            changed.insert("remap".to_owned());
+        }
+
+        if let Err(error) = config.remap.validate() {
+            eprintln!("Warning: invalid config value remap: {error}; skipping remapping settings");
+            config.remap = crate::remap::RemapConfig::default();
+            changed.remove("remap");
+        }
+
+        while let Err(error) = config.validate() {
+            let path = validation_path(&config, &error, &changed)
+                .or_else(|| changed.iter().max().cloned());
+            let Some(path) = path else {
+                eprintln!("Warning: invalid config value: {error}; using remaining defaults");
+                config = Self::default();
+                break;
+            };
+            if !reset_config_value(&mut config, &path) {
+                warn_invalid_config_value(&path, &error);
+                config = Self::default();
+                break;
+            }
+            warn_invalid_config_value(&path, &error);
+            changed.remove(&path);
+        }
         Ok(config)
     }
 
@@ -462,15 +1402,29 @@ impl Config {
             || self.keycast.timeout <= 0.0
             || self.keycast.timeout > 60.0
         {
-            return Err("keycast.timeout: must be finite, greater than zero, and at most 60 seconds".to_owned());
+            return Err(
+                "keycast.timeout: must be finite, greater than zero, and at most 60 seconds"
+                    .to_owned(),
+            );
         }
         if self.keycast.enabled
-            && self.keys.named().iter().any(|(_, key)| *key == self.keycast.hotkey)
+            && self
+                .keys
+                .named()
+                .iter()
+                .any(|(_, key)| *key == self.keycast.hotkey)
         {
-            return Err("keycast.hotkey must differ from Free Mouse Mode activation and control keys".to_owned());
+            return Err(
+                "keycast.hotkey must differ from Free Mouse Mode activation and control keys"
+                    .to_owned(),
+            );
         }
         for (name, value) in [
             ("movement", self.easing.movement),
+            (
+                "movement_stop",
+                self.easing.movement_stop.unwrap_or(self.easing.movement),
+            ),
             ("scroll", self.easing.scroll),
         ] {
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -572,16 +1526,29 @@ impl Config {
         }
         validate_limits(self.hints.min_width, self.hints.max_width, "width")?;
         let debug = self.hints.keys.debug;
-        if [K::KEY_RESERVED, K::KEY_UNKNOWN, K::KEY_ESC, K::KEY_BACKSPACE,
-            self.hints.keys.cancel, toggle].contains(&debug)
+        if [
+            K::KEY_RESERVED,
+            K::KEY_UNKNOWN,
+            K::KEY_ESC,
+            K::KEY_BACKSPACE,
+            self.hints.keys.cancel,
+            toggle,
+        ]
+        .contains(&debug)
             || self.hints.keys.left.contains(&debug)
             || self.hints.keys.right.contains(&debug)
             || self.hints.keys.grid.contains(&debug)
             || self.keys.free_mouse.contains(&debug)
-            || self.hints.label_symbols.chars()
+            || self
+                .hints
+                .label_symbols
+                .chars()
                 .any(|symbol| parse_key(&symbol.to_string()) == Ok(debug))
         {
-            return Err("hints.keys.debug conflicts with reserved, label, cancel, peek, or activation keys".to_owned());
+            return Err(
+                "hints.keys.debug conflicts with reserved, label, cancel, peek, or activation keys"
+                    .to_owned(),
+            );
         }
         validate_limits(self.hints.min_height, self.hints.max_height, "height")?;
         let mut assigned = BTreeMap::new();
@@ -712,17 +1679,40 @@ mod tests {
     fn link_detection_is_not_configurable() {
         assert!(Config::parse("").is_ok());
         assert!(Config::parse(include_str!("../fievel.config")).is_ok());
-        assert!(Config::parse("[hints]\ncolor_links = false").is_err());
-        assert!(Config::parse("[hints]\nunderline_links = false").is_err());
+        assert!(Config::parse("[hints]\ncolor_links = false").is_ok());
+        assert!(Config::parse("[hints]\nunderline_links = false").is_ok());
     }
 
     #[test]
     fn debug_key_defaults_customization_and_conflicts() {
         assert_eq!(Config::parse("").unwrap().hints.keys.debug, K::KEY_F8);
-        assert_eq!(Config::parse("[hints.keys]\ndebug = 'f9'").unwrap().hints.keys.debug, K::KEY_F9);
-        for key in ["reserved", "unknown", "not-a-key", "esc", "enter", "backspace",
-            "leftctrl", "leftmeta", "space", "i", "z", "f3", "f8+f9"] {
-            assert!(Config::parse(&format!("[hints.keys]\ndebug = '{key}'")).is_err(), "{key}");
+        assert_eq!(
+            Config::parse("[hints.keys]\ndebug = 'f9'")
+                .unwrap()
+                .hints
+                .keys
+                .debug,
+            K::KEY_F9
+        );
+        for key in [
+            "reserved",
+            "unknown",
+            "not-a-key",
+            "esc",
+            "enter",
+            "backspace",
+            "leftctrl",
+            "leftmeta",
+            "space",
+            "i",
+            "z",
+            "f3",
+            "f8+f9",
+        ] {
+            assert!(
+                Config::parse(&format!("[hints.keys]\ndebug = '{key}'")).is_ok(),
+                "{key}"
+            );
         }
         for text in [
             "[hints.keys]\ndebug = 'f9'\ncancel = 'f9'",
@@ -731,9 +1721,16 @@ mod tests {
             "[hints.keys]\ndebug = 'f9'\nright = 'leftmeta+f9'",
             "[hints.keys]\ndebugg = 'f9'",
         ] {
-            assert!(Config::parse(text).is_err(), "{text}");
+            assert!(Config::parse(text).is_ok(), "{text}");
         }
-        assert_eq!(Config::parse(include_str!("../fievel.config")).unwrap().hints.keys.debug, K::KEY_F8);
+        assert_eq!(
+            Config::parse(include_str!("../fievel.config"))
+                .unwrap()
+                .hints
+                .keys
+                .debug,
+            K::KEY_F8
+        );
     }
 
     #[test]
@@ -772,9 +1769,9 @@ mod tests {
 
     #[test]
     fn keycast_configuration_and_validation() {
-        let config = Config::parse(
-            "[keycast]\nenabled = true\nhotkey = 'F8'\nmax_keys = 6\ntimeout = 2.5",
-        ).unwrap();
+        let config =
+            Config::parse("[keycast]\nenabled = true\nhotkey = 'F8'\nmax_keys = 6\ntimeout = 2.5")
+                .unwrap();
         assert!(config.keycast.enabled);
         assert_eq!(config.keycast.hotkey, K::KEY_F8);
         assert_eq!(config.keycast.max_keys, 6);
@@ -783,17 +1780,30 @@ mod tests {
         assert!(Config::default().mouse_controls().contains(&K::KEY_Q));
         assert!(!Config::default().mouse_controls().contains(&K::KEY_ESC));
         for text in [
-            "enabled = 'true'", "hotkey = 'not-a-key'", "hotkey = 'a+b'",
-            "max_keys = 0", "max_keys = 33", "max_keys = -1",
-            "timeout = 0", "timeout = -1", "timeout = 61",
-            "timeout = nan", "timeout = inf", "timout = 3",
-            "enabled = true\nhotkey = 'h'", "enabled = true\nhotkey = 'f3'",
+            "enabled = 'true'",
+            "hotkey = 'not-a-key'",
+            "hotkey = 'a+b'",
+            "max_keys = 0",
+            "max_keys = 33",
+            "max_keys = -1",
+            "timeout = 0",
+            "timeout = -1",
+            "timeout = 61",
+            "timeout = nan",
+            "timeout = inf",
+            "timout = 3",
+            "enabled = true\nhotkey = 'h'",
+            "enabled = true\nhotkey = 'f3'",
         ] {
-            assert!(Config::parse(&format!("[keycast]\n{text}")).is_err(), "{text}");
+            assert!(
+                Config::parse(&format!("[keycast]\n{text}")).is_ok(),
+                "{text}"
+            );
         }
         assert!(Config::parse(
             "[keys]\nfree_mouse = 'leftalt+space'\n[keycast]\nenabled = true\nhotkey = 'leftalt'"
-        ).is_err());
+        )
+        .is_ok());
     }
 
     #[test]
@@ -807,6 +1817,7 @@ mod tests {
     fn easing_defaults_overrides_and_validation() {
         let default = Config::parse("").unwrap();
         assert_eq!(default.easing.movement, 0.2);
+        assert_eq!(default.easing.movement_stop, None);
         assert_eq!(default.easing.scroll, 0.3);
         let config = Config::parse("[easing]\nmovement = 0").unwrap();
         assert_eq!(config.easing.movement, 0.0);
@@ -814,12 +1825,23 @@ mod tests {
         let config = Config::parse("[easing]\nmovement = 1\nscroll = 0.5").unwrap();
         assert_eq!(config.easing.movement, 1.0);
         assert_eq!(config.easing.scroll, 0.5);
-        for field in ["movement", "scroll"] {
+        for field in ["movement", "movement_stop", "scroll"] {
             for value in ["-0.1", "1.01", "nan", "inf", "-inf", "'0.2'", "true"] {
-                assert!(Config::parse(&format!("[easing]\n{field} = {value}")).is_err());
+                assert!(Config::parse(&format!("[easing]\n{field} = {value}")).is_ok());
             }
         }
-        assert!(Config::parse("[easing]\nmovment = 0.2").is_err());
+        assert!(Config::parse("[easing]\nmovment = 0.2").is_ok());
+    }
+
+    #[test]
+    fn movement_stop_easing_is_optional_and_validated() {
+        let config = Config::parse("[easing]\nmovement = 0.1\nmovement_stop = 1").unwrap();
+        assert_eq!(
+            (config.easing.movement, config.easing.movement_stop),
+            (0.1, Some(1.0))
+        );
+        let config = Config::parse("[easing]\nmovement_stop = 1.5").unwrap();
+        assert_eq!(config.easing.movement_stop, None);
     }
 
     #[test]
@@ -828,7 +1850,7 @@ mod tests {
         assert_eq!(Config::parse("mode = 'hold'").unwrap().mode, Mode::Hold);
         assert_eq!(Config::parse("mode = 'toggle'").unwrap().mode, Mode::Toggle);
         for text in ["mode = 'tap'", "mode = true", "mode = 1"] {
-            assert!(Config::parse(text).is_err());
+            assert!(Config::parse(text).is_ok());
         }
     }
 
@@ -841,12 +1863,12 @@ mod tests {
         );
         for binding in ["h", "f3", "z", "space"] {
             assert!(
-                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_err(),
+                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_ok(),
                 "{binding}"
             );
         }
-        assert!(Config::parse("[keys]\nlocater = 'f9'").is_err());
-        assert!(Config::parse("[keys]\nleft = 'q'").is_err());
+        assert!(Config::parse("[keys]\nlocater = 'f9'").is_ok());
+        assert!(Config::parse("[keys]\nleft = 'q'").is_ok());
     }
 
     #[test]
@@ -857,7 +1879,7 @@ mod tests {
         assert!(Config::parse("notify = true").unwrap().notify);
         assert!(!Config::parse("notify = false").unwrap().notify);
         for text in ["notify = 'true'", "notify = 1", "notify = []"] {
-            assert!(Config::parse(text).is_err(), "{text}");
+            assert!(Config::parse(text).is_ok(), "{text}");
         }
     }
 
@@ -876,7 +1898,7 @@ mod tests {
                 .home_end_enabled
         );
         for value in ["'true'", "1", "[]"] {
-            assert!(Config::parse(&format!("home_end_enabled = {value}")).is_err());
+            assert!(Config::parse(&format!("home_end_enabled = {value}")).is_ok());
         }
     }
 
@@ -897,10 +1919,46 @@ mod tests {
     }
 
     #[test]
+    fn invalid_values_and_unknown_keys_do_not_discard_valid_settings() {
+        let config = Config::parse(
+            "notify = false\nmdoe = 'toggle'\n[speeds]\nnormal = 450\nfast = 0\n[keys]\nleft = 'not-a-key'\nright = 'd'\n[hints]\nlabel_color = 'red'\nmin_width = 12",
+        )
+        .unwrap();
+
+        assert!(!config.notify);
+        assert_eq!(config.mode, Mode::Hold);
+        assert_eq!(config.speeds.normal, 450.0);
+        assert_eq!(config.speeds.fast, Speeds::default().fast);
+        assert_eq!(config.keys.left, Keys::default().left);
+        assert_eq!(config.keys.right, K::KEY_D);
+        assert_eq!(config.hints.label_color, Hints::default().label_color);
+        assert_eq!(config.hints.min_width, 12);
+
+        let config = Config::parse("notify = false\n[hints.keys]\nleft = 'f8'").unwrap();
+        assert!(!config.notify);
+        assert_eq!(config.hints.keys.left, HintKeys::default().left);
+    }
+
+    #[test]
+    fn invalid_remap_entries_do_not_discard_valid_entries() {
+        let config = Config::parse(
+            "[remap]\nchord_timeout = 10\n[remap.main]\n'a+s' = 'ctrl'\n'b+d' = 'not-a-key'",
+        )
+        .unwrap();
+
+        assert_eq!(config.remap.chord_timeout, 10);
+        assert_eq!(config.remap.main.len(), 1);
+        assert_eq!(config.remap.main["a+s"], "ctrl");
+    }
+
+    #[test]
     fn cursor_locator_key_is_configurable_and_cannot_conflict_with_controls() {
         assert_eq!(Config::parse("").unwrap().keys.locate, K::KEY_Q);
         assert_eq!(
-            Config::parse("[keys]\nfree_mouse = 'f3'").unwrap().keys.locate,
+            Config::parse("[keys]\nfree_mouse = 'f3'")
+                .unwrap()
+                .keys
+                .locate,
             K::KEY_Q
         );
         assert_eq!(
@@ -909,13 +1967,13 @@ mod tests {
         );
         for binding in ["h", "f3", "z", "space"] {
             assert!(
-                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_err(),
+                Config::parse(&format!("[keys]\nlocate = '{binding}'")).is_ok(),
                 "{binding}"
             );
         }
-        assert!(Config::parse("[keys]\nfree_mouse = 'q'").is_err());
-        assert!(Config::parse("[keys]\nlocater = 'f9'").is_err());
-        assert!(Config::parse("[keys]\nleft = 'q'").is_err());
+        assert!(Config::parse("[keys]\nfree_mouse = 'q'").is_ok());
+        assert!(Config::parse("[keys]\nlocater = 'f9'").is_ok());
+        assert!(Config::parse("[keys]\nleft = 'q'").is_ok());
     }
 
     #[test]
@@ -1013,7 +2071,7 @@ mod tests {
             "[hints.keys]\nleft = 'leftmeta+space'\ngrid = 'leftmeta+space'",
             "[hints]\ncolor = '#00ff00'",
         ] {
-            assert!(Config::parse(text).is_err(), "{text}");
+            assert!(Config::parse(text).is_ok(), "{text}");
         }
     }
 
@@ -1059,11 +2117,11 @@ mod tests {
         assert!(Config::parse(
             "[hints.keys]\ncancel = 'rightctrl'\ntoggle_background = 'rightctrl'"
         )
-        .is_err());
+        .is_ok());
     }
 
     #[test]
-    fn rejects_invalid_speeds_bindings_and_typos() {
+    fn skips_invalid_speeds_bindings_and_typos() {
         for text in [
             "[speeds]\nnormal = 0",
             "[speeds]\nslow = -1",
@@ -1091,10 +2149,10 @@ mod tests {
             "[speeds]\nnromal = 900",
             "[unknown]\nnormal = 900",
             "[keys]\nleft = 35",
-            "invalid toml",
         ] {
-            assert!(Config::parse(text).is_err(), "{text}");
+            assert!(Config::parse(text).is_ok(), "{text}");
         }
+        assert!(Config::parse("invalid toml").is_err());
     }
 
     #[test]
