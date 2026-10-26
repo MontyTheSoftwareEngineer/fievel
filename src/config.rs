@@ -90,6 +90,8 @@ impl Default for Speeds {
 #[serde(default, deny_unknown_fields)]
 pub struct Easing {
     pub movement: f64,
+    /// Easing while the pointer slows down or stops; unset uses `movement`.
+    pub movement_stop: Option<f64>,
     pub scroll: f64,
 }
 
@@ -97,6 +99,7 @@ impl Default for Easing {
     fn default() -> Self {
         Self {
             movement: 0.2,
+            movement_stop: None,
             scroll: 0.3,
         }
     }
@@ -368,6 +371,10 @@ impl Config {
         }
         for (name, value) in [
             ("movement", self.easing.movement),
+            (
+                "movement_stop",
+                self.easing.movement_stop.unwrap_or(self.easing.movement),
+            ),
             ("scroll", self.easing.scroll),
         ] {
             if !value.is_finite() || !(0.0..=1.0).contains(&value) {
@@ -620,6 +627,7 @@ mod tests {
     fn easing_defaults_overrides_and_validation() {
         let default = Config::parse("").unwrap();
         assert_eq!(default.easing.movement, 0.2);
+        assert_eq!(default.easing.movement_stop, None);
         assert_eq!(default.easing.scroll, 0.3);
         let config = Config::parse("[easing]\nmovement = 0").unwrap();
         assert_eq!(config.easing.movement, 0.0);
@@ -627,12 +635,26 @@ mod tests {
         let config = Config::parse("[easing]\nmovement = 1\nscroll = 0.5").unwrap();
         assert_eq!(config.easing.movement, 1.0);
         assert_eq!(config.easing.scroll, 0.5);
-        for field in ["movement", "scroll"] {
+        for field in ["movement", "movement_stop", "scroll"] {
             for value in ["-0.1", "1.01", "nan", "inf", "-inf", "'0.2'", "true"] {
                 assert!(Config::parse(&format!("[easing]\n{field} = {value}")).is_err());
             }
         }
         assert!(Config::parse("[easing]\nmovment = 0.2").is_err());
+    }
+
+    #[test]
+    fn movement_stop_easing_is_optional_and_validated() {
+        let config = Config::parse("[easing]\nmovement = 0.1\nmovement_stop = 1").unwrap();
+        assert_eq!(
+            (config.easing.movement, config.easing.movement_stop),
+            (0.1, Some(1.0))
+        );
+        let error = Config::parse("[easing]\nmovement_stop = 1.5").unwrap_err();
+        assert!(
+            error.to_string().starts_with("easing.movement_stop"),
+            "{error}"
+        );
     }
 
     #[test]

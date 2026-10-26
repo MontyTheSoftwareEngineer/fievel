@@ -384,11 +384,27 @@ impl Engine {
         let length = f64::from(direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
         for (axis, direction) in direction.into_iter().enumerate() {
             let target = f64::from(direction) / length.max(1.0) * self.speed();
+            let easing = &self.config.easing;
+            let velocity = &mut self.velocity[axis];
+            let mut factor = easing.movement;
+            if target.abs() < velocity.abs() || target * *velocity < 0.0 {
+                let stop = easing.movement_stop.unwrap_or(easing.movement);
+                if instant(stop) {
+                    // Drop to target speed, or stop first on a reversal.
+                    *velocity = if target * *velocity < 0.0 {
+                        0.0
+                    } else {
+                        target
+                    };
+                } else {
+                    factor = stop;
+                }
+            }
             let amount = advance_axis(
                 &mut self.motion[axis],
-                &mut self.velocity[axis],
+                velocity,
                 target,
-                self.config.easing.movement,
+                factor,
                 seconds,
                 1.0,
             );
@@ -1485,6 +1501,45 @@ mod tests {
             assert_eq!(e.velocity[0] == 0.0, instant(movement));
             assert_eq!(e.scroll_velocity[1] == 0.0, instant(scroll));
         }
+    }
+
+    #[test]
+    fn stop_easing_ramps_up_gently_and_stops_without_coasting() {
+        let mut config = Config::default();
+        config.speeds.normal = 1000.0;
+        config.easing.movement = 0.1;
+        config.easing.movement_stop = Some(1.0);
+        let mut e = Engine::new(config);
+        let moved = |output: Output| {
+            events(&output.mouse)
+                .iter()
+                .map(|event| event.2)
+                .sum::<i32>()
+        };
+        let tick = Duration::from_millis(10);
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        let first = moved(e.advance(tick));
+        assert!((0..3).contains(&first), "starts gently: {first}");
+        let mut last = 0;
+        for _ in 0..100 {
+            last = moved(e.advance(tick));
+        }
+        assert!(last >= 9, "reaches full speed: {last}");
+        e.key(K::KEY_L, 0);
+        assert!(e.advance(tick).mouse.is_empty(), "stops without coasting");
+
+        e.key(K::KEY_L, 1);
+        for _ in 0..100 {
+            e.advance(tick);
+        }
+        e.key(K::KEY_L, 0);
+        e.key(K::KEY_H, 1);
+        let reversed = moved(e.advance(tick));
+        assert!(
+            (-3..=0).contains(&reversed),
+            "reversal restarts from rest: {reversed}"
+        );
     }
 
     #[test]
