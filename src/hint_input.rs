@@ -12,12 +12,14 @@ use crate::{
 pub enum HintInputEvent {
     Key(K, i32),
     Shortcut(ClickKind),
+    GridShortcut,
 }
 
 pub struct HintInput {
     remapper: Remapper,
     shortcuts: Shortcuts,
     now: Duration,
+    grid_mode: bool,
 }
 
 struct Shortcuts {
@@ -36,6 +38,7 @@ impl HintInput {
             .left
             .iter()
             .chain(&config.hints.keys.right)
+            .chain(&config.hints.keys.grid)
             .copied()
             .chain([config.hints.keys.toggle_background, config.hints.keys.debug])
             .collect();
@@ -49,10 +52,16 @@ impl HintInput {
                 timeout: Duration::from_millis(config.remap.chord_timeout),
             },
             now: Duration::ZERO,
+            grid_mode: false,
         })
     }
 
+    pub fn set_grid_mode(&mut self, active: bool) {
+        self.grid_mode = active;
+    }
+
     pub fn begin(&mut self, held: impl IntoIterator<Item = K>) {
+        self.grid_mode = false;
         self.remapper.clear();
         self.shortcuts.held.clear();
         self.shortcuts.pending.clear();
@@ -96,6 +105,21 @@ impl HintInput {
         if value == 1 && (key == K::KEY_ESC || key == self.shortcuts.keys.cancel) {
             return vec![HintInputEvent::Key(key, value)];
         }
+        if self.grid_mode
+            && ([
+                self.shortcuts.keys.grid_upper_left,
+                self.shortcuts.keys.grid_upper_right,
+                self.shortcuts.keys.grid_lower_left,
+                self.shortcuts.keys.grid_lower_right,
+                self.shortcuts.keys.grid_left_click,
+                self.shortcuts.keys.grid_right_click,
+            ]
+            .contains(&key))
+        {
+            let mut output = self.shortcuts.advance(self.now);
+            output.extend(self.shortcuts.key_without_shortcut(key, value));
+            return self.guard_debug_transition(output);
+        }
         let mut output = self.shortcuts.advance(self.now);
         let shortcuts = &mut self.shortcuts;
         let now = self.now;
@@ -123,6 +147,9 @@ impl HintInput {
     }
 
     fn guard_debug_transition(&mut self, mut output: Vec<HintInputEvent>) -> Vec<HintInputEvent> {
+        if output.contains(&HintInputEvent::GridShortcut) {
+            self.grid_mode = !self.grid_mode;
+        }
         let keys = &self.shortcuts.keys;
         if output.contains(&HintInputEvent::Key(keys.debug, 1)) {
             // A chord timeout can release a buffered label in the same batch
@@ -131,7 +158,7 @@ impl HintInput {
                 HintInputEvent::Key(key, _) => {
                     [keys.debug, keys.cancel, K::KEY_ESC, keys.toggle_background].contains(key)
                 }
-                HintInputEvent::Shortcut(_) => true,
+                HintInputEvent::Shortcut(_) | HintInputEvent::GridShortcut => true,
             });
             self.shortcuts.pending.clear();
             self.shortcuts.deadline = None;
@@ -198,6 +225,53 @@ mod tests {
             input.begin([]);
             assert_eq!(press(&mut input, &keys), [Shortcut(ClickKind::Right)]);
             assert!(input.advance(Duration::from_millis(50)).is_empty());
+        }
+    }
+
+    #[test]
+    fn grid_shortcut_is_consumed_in_either_press_order() {
+        for keys in [[K::KEY_LEFTMETA, K::KEY_G], [K::KEY_G, K::KEY_LEFTMETA]] {
+            let mut input = plain();
+            input.begin([]);
+            assert_eq!(press(&mut input, &keys), [HintInputEvent::GridShortcut]);
+        }
+    }
+
+    #[test]
+    fn grid_controls_bypass_home_row_remappings_and_hint_shortcuts() {
+        let mut input = home_row();
+        input.begin([K::KEY_LEFTMETA]);
+        input.set_grid_mode(true);
+        for key in [K::KEY_U, K::KEY_I, K::KEY_J, K::KEY_K] {
+            let mut actions = input.key(key, 1);
+            actions.extend(input.key(key, 0));
+            assert!(actions.contains(&Key(key, 1)), "{key:?}: {actions:?}");
+            assert!(!actions.iter().any(|action| matches!(action, Shortcut(_))));
+        }
+
+        for (key, expected) in [
+            (K::KEY_SPACE, Key(K::KEY_SPACE, 1)),
+            (K::KEY_R, Key(K::KEY_R, 1)),
+        ] {
+            assert_eq!(input.key(key, 1), [expected]);
+            assert_eq!(input.key(key, 0), [Key(key, 0)]);
+        }
+    }
+
+    #[test]
+    fn configured_grid_keys_bypass_remappings() {
+        let config = Config::parse(
+            "[hints.keys]\ngrid_upper_left = 'a'\ngrid_upper_right = 's'\n\
+             grid_lower_left = 'd'\ngrid_lower_right = 'f'\n\
+             [remap.main]\na = 'left'\ns = 'right'\nd = 'up'\nf = 'down'",
+        )
+        .unwrap();
+        let mut input = HintInput::new(&config).unwrap();
+        input.begin([]);
+        input.set_grid_mode(true);
+        for key in [K::KEY_A, K::KEY_S, K::KEY_D, K::KEY_F] {
+            assert_eq!(input.key(key, 1), [Key(key, 1)]);
+            assert_eq!(input.key(key, 0), [Key(key, 0)]);
         }
     }
 
@@ -445,17 +519,23 @@ impl Shortcuts {
             return vec![HintInputEvent::Key(key, value)];
         }
         for (chord, click) in [
-            (&self.keys.left, ClickKind::Left),
-            (&self.keys.right, ClickKind::Right),
+            (&self.keys.left, Some(ClickKind::Left)),
+            (&self.keys.right, Some(ClickKind::Right)),
+            (&self.keys.grid, None),
         ] {
             if chord.contains(&key) && chord.iter().all(|member| self.held.contains(member)) {
                 self.pending.clear();
                 self.deadline = None;
-                return vec![HintInputEvent::Shortcut(click)];
+                return vec![match click {
+                    Some(click) => HintInputEvent::Shortcut(click),
+                    None => HintInputEvent::GridShortcut,
+                }];
             }
         }
         if key != self.keys.toggle_background
-            && (self.keys.left.contains(&key) || self.keys.right.contains(&key))
+            && (self.keys.left.contains(&key)
+                || self.keys.right.contains(&key)
+                || self.keys.grid.contains(&key))
         {
             self.pending.push((key, value));
             self.deadline
@@ -465,6 +545,23 @@ impl Shortcuts {
             let mut output = self.drain();
             output.push(HintInputEvent::Key(key, value));
             output
+        }
+    }
+
+    fn key_without_shortcut(&mut self, key: K, value: i32) -> Vec<HintInputEvent> {
+        match value {
+            0 => {
+                self.held.remove(&key);
+                let mut output = self.drain();
+                output.push(HintInputEvent::Key(key, value));
+                output
+            }
+            1 if self.held.insert(key) => {
+                let mut output = self.drain();
+                output.push(HintInputEvent::Key(key, value));
+                output
+            }
+            _ => Vec::new(),
         }
     }
 }

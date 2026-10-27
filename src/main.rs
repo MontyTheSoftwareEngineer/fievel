@@ -3,6 +3,7 @@ mod detect;
 mod engine;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
 mod font;
+mod grid;
 mod hint_input;
 mod input;
 mod keycast;
@@ -23,6 +24,8 @@ mod indicator_render;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod platform;
+#[cfg(all(target_os = "linux", test))]
+pub(crate) use platform::handle_hint_input;
 
 #[cfg(target_os = "macos")]
 #[path = "macos_hints.rs"]
