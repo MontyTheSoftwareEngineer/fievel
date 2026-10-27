@@ -191,6 +191,15 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | A | Hold for slow movement and scrolling; release for normal speed |
 | Q | Show a brief red pulse around the cursor |
 
+Press **Super+E** to open macro registers. This shortcut can be changed with
+`macros.hotkey`. Press **R**, choose a letter register to record, then press the
+shortcut again or **Esc** to stop. Press **P** and choose a register to play it;
+**Esc** stops playback. Recordings include typed key events, Free Mouse Mode
+output, and hint clicks at their selected screen position. Registers are kept
+in `macros.toml` beside the active config file and persist across restarts.
+Since typed input is recorded to this file, avoid recording passwords or other
+sensitive text.
+
 The locator key is configurable with `keys.locate` and defaults to Q.
 It is consumed only while Free Mouse Mode is active.
 On Linux, the locator compares Wayland screencopy frames with and without the
@@ -369,6 +378,10 @@ mappings described below.
 mode = "hold" # "hold" (default) or "toggle"
 notify = true # Persistent, faint Free Mouse Mode indicator
 home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
+
+[macros]
+enabled = true
+hotkey = "leftmeta + e" # Open macro registers; configurable
 
 [speeds]
 normal = 300
