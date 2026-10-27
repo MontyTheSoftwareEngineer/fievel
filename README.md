@@ -54,6 +54,16 @@ cargo build --release
 ./target/release/fievel
 ```
 
+Fievel shows a cursor icon in the menu bar while running. To embed a custom
+PNG or ICNS icon in the build, set `FIEVEL_MENU_BAR_ICON` to the image file:
+
+```sh
+FIEVEL_MENU_BAR_ICON=./assets/fievel.png cargo build --release
+```
+
+The icon is embedded in the binary, so the release archive does not need the
+image file. If the variable is unset, Fievel uses the macOS cursor symbol.
+
 To create a macOS release archive after building:
 
 ```sh

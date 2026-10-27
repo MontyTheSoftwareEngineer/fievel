@@ -23,6 +23,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod menu_bar_icon {
+    include!(concat!(env!("OUT_DIR"), "/menu_bar_icon.rs"));
+}
+
 const TICK: Duration = Duration::from_millis(4);
 
 #[derive(Parser)]
@@ -173,7 +177,8 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     ] {
         signal_hook::flag::register(signal, Arc::clone(&stop))?;
     }
-    let mut indicator = Overlays::new(config.notify, config.keycast.enabled);
+    let icon = menu_bar_icon::MENU_BAR_ICON.unwrap_or(&[]);
+    let mut indicator = Overlays::new(config.notify, config.keycast.enabled, icon)?;
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
     if !unsafe { fievel_input_start() } {
         return Err(
@@ -436,7 +441,7 @@ fn emit(output: Output, odometer: &mut odometer::Odometer) -> io::Result<()> {
     flush_motion(&mut dx, &mut dy)?;
     for click in output.macro_clicks {
         crate::hints::macro_click_at(click.x, click.y, click.right)
-            .map_err(io::Error::other)?;
+            .map_err(|error| io::Error::other(error.to_string()))?;
     }
     odometer.counter.record(&output.mouse);
     Ok(())

@@ -62,6 +62,8 @@ typedef struct {
 
 static NSWindow *overlay_window;
 static NSView *overlay_view;
+static NSStatusItem *menu_bar_status_item;
+static NSImage *menu_bar_icon;
 static NSArray<NSDictionary *> *hint_items;
 static bool hints_hidden;
 static bool indicator_visible;
@@ -184,12 +186,30 @@ static void fievel_release_posted_inputs(void);
 }
 @end
 
+static bool fievel_ui_set_menu_bar_image(NSImage *image) {
+    if (menu_bar_status_item == nil) {
+        menu_bar_status_item = [[NSStatusBar systemStatusBar]
+            statusItemWithLength:NSSquareStatusItemLength];
+    }
+    if (menu_bar_status_item == nil) {
+        return false;
+    }
+    NSButton *status_button = menu_bar_status_item.button;
+    status_button.image = image;
+    status_button.imageScaling = NSImageScaleProportionallyDown;
+    status_button.toolTip = @"Fievel is running";
+    return true;
+}
+
 static void fievel_ui_ensure(void) {
     if (overlay_window != nil) {
         return;
     }
     [NSApplication sharedApplication];
     [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+    if (menu_bar_status_item == nil) {
+        fievel_ui_set_menu_bar_image(menu_bar_icon);
+    }
     NSRect frame = NSZeroRect;
     for (NSScreen *screen in NSScreen.screens) {
         frame = NSIsEmptyRect(frame) ? screen.frame : NSUnionRect(frame, screen.frame);
@@ -214,9 +234,31 @@ static void fievel_ui_ensure(void) {
     [NSApp activateIgnoringOtherApps:YES];
 }
 
-void fievel_ui_init(void) {
+bool fievel_ui_init(const uint8_t *icon_data, size_t icon_size) {
     @autoreleasepool {
-        fievel_ui_ensure();
+        NSImage *image;
+        if (icon_size > 0) {
+            if (icon_data == NULL) {
+                return false;
+            }
+            NSData *data = [NSData dataWithBytes:icon_data length:icon_size];
+            image = [[NSImage alloc] initWithData:data];
+            if (image == nil) {
+                return false;
+            }
+        } else {
+            image = [NSImage imageWithSystemSymbolName:@"cursorarrow"
+                accessibilityDescription:@"Fievel"];
+            if (image == nil) {
+                return false;
+            }
+            image.template = YES;
+        }
+        image.size = NSMakeSize(18, 18);
+        menu_bar_icon = image;
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        return fievel_ui_set_menu_bar_image(menu_bar_icon);
     }
 }
 

@@ -1,8 +1,8 @@
 use crate::engine::SpeedMode;
-use std::ffi::CString;
+use std::{ffi::CString, io};
 
 unsafe extern "C" {
-    fn fievel_ui_init();
+    fn fievel_ui_init(icon_data: *const u8, icon_len: usize) -> bool;
     fn fievel_ui_set_indicator(visible: bool, locked: bool, label: *const std::ffi::c_char);
 }
 
@@ -12,12 +12,16 @@ pub struct Overlays {
 }
 
 impl Overlays {
-    pub fn new(enabled: bool, keycast_enabled: bool) -> Self {
-        unsafe { fievel_ui_init() };
-        Self {
+    pub fn new(enabled: bool, keycast_enabled: bool, menu_bar_icon: &[u8]) -> io::Result<Self> {
+        if !unsafe { fievel_ui_init(menu_bar_icon.as_ptr(), menu_bar_icon.len()) } {
+            return Err(io::Error::other(
+                "cannot initialize the macOS menu bar icon; check that FIEVEL_MENU_BAR_ICON points to a valid PNG or ICNS image",
+            ));
+        }
+        Ok(Self {
             enabled,
             keycast_enabled,
-        }
+        })
     }
 
     pub fn update(
