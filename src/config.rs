@@ -84,7 +84,7 @@ pub struct Macros {
 impl Default for Macros {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: false,
             hotkey: vec![K::KEY_LEFTMETA, K::KEY_E],
         }
     }
@@ -268,6 +268,7 @@ impl Keys {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Hints {
+    pub recursive_grid_enabled: bool,
     pub keys: HintKeys,
     pub label_symbols: String,
     #[serde(deserialize_with = "deserialize_color")]
@@ -290,6 +291,7 @@ pub struct Hints {
 impl Default for Hints {
     fn default() -> Self {
         Self {
+            recursive_grid_enabled: false,
             keys: HintKeys::default(),
             label_symbols: "abcdefghijklmnopqrstuvwxyz".to_owned(),
             border_color: Color::rgba(0x00, 0xff, 0x00, 0xe0),
@@ -626,6 +628,9 @@ fn reset_config_value(config: &mut Config, path: &str) -> bool {
             config.hints.keys.toggle_background = defaults.hints.keys.toggle_background
         }
         "hints.keys.debug" => config.hints.keys.debug = defaults.hints.keys.debug,
+        "hints.recursive_grid_enabled" => {
+            config.hints.recursive_grid_enabled = defaults.hints.recursive_grid_enabled
+        }
         "hints.label_symbols" => config.hints.label_symbols = defaults.hints.label_symbols,
         "hints.border_color" => config.hints.border_color = defaults.hints.border_color,
         "hints.fill_color" => config.hints.fill_color = defaults.hints.fill_color,
@@ -1072,6 +1077,7 @@ impl Config {
                 table,
                 &[
                     "keys",
+                    "recursive_grid_enabled",
                     "label_symbols",
                     "border_color",
                     "fill_color",
@@ -1085,6 +1091,13 @@ impl Config {
                     "max_height",
                 ],
                 "hints",
+            );
+            apply_value(
+                table,
+                "recursive_grid_enabled",
+                "hints.recursive_grid_enabled",
+                &mut config.hints.recursive_grid_enabled,
+                &mut changed,
             );
             apply_value(
                 table,
@@ -2053,6 +2066,7 @@ mod tests {
     #[test]
     fn hint_defaults_and_validation_cover_symbols_sizes_and_conflicts() {
         let config = Config::parse("").unwrap();
+        assert!(!config.hints.recursive_grid_enabled);
         assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTMETA, K::KEY_SPACE]);
         assert_eq!(config.hints.keys.right, vec![K::KEY_LEFTMETA, K::KEY_I]);
         assert_eq!(config.hints.keys.grid, vec![K::KEY_LEFTMETA, K::KEY_G]);
@@ -2123,6 +2137,19 @@ mod tests {
         ] {
             assert!(Config::parse(text).is_ok(), "{text}");
         }
+    }
+
+    #[test]
+    fn recursive_grid_and_macros_are_opt_in() {
+        let defaults = Config::parse("").unwrap();
+        assert!(!defaults.hints.recursive_grid_enabled);
+        assert!(!defaults.macros.enabled);
+
+        let enabled =
+            Config::parse("[hints]\nrecursive_grid_enabled = true\n[macros]\nenabled = true")
+                .unwrap();
+        assert!(enabled.hints.recursive_grid_enabled);
+        assert!(enabled.macros.enabled);
     }
 
     #[test]

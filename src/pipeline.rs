@@ -29,6 +29,7 @@ pub struct InputEngine {
 
 struct HintActivation {
     keys: HintKeys,
+    grid_enabled: bool,
     held: BTreeSet<KeyCode>,
     pending: Option<HintRequest>,
 }
@@ -38,7 +39,7 @@ impl HintActivation {
         if !can_activate || value != 1 || self.held.contains(&key) || self.pending.is_some() {
             return false;
         }
-        [&self.keys.left, &self.keys.right, &self.keys.grid]
+        [&self.keys.left, &self.keys.right]
             .into_iter()
             .any(|chord| {
                 chord.contains(&key)
@@ -47,12 +48,20 @@ impl HintActivation {
                         .iter()
                         .all(|member| *member == key || self.held.contains(member))
             })
+            || (self.grid_enabled
+                && self.keys.grid.contains(&key)
+                && !self.chord_held(&self.keys.grid)
+                && self
+                    .keys
+                    .grid
+                    .iter()
+                    .all(|member| *member == key || self.held.contains(member)))
     }
 
     fn key(&mut self, key: KeyCode, value: i32, can_activate: bool) -> bool {
         let left_before = self.chord_held(&self.keys.left);
         let right_before = self.chord_held(&self.keys.right);
-        let grid_before = self.chord_held(&self.keys.grid);
+        let grid_before = self.grid_enabled && self.chord_held(&self.keys.grid);
         match value {
             1 => {
                 self.held.insert(key);
@@ -67,7 +76,7 @@ impl HintActivation {
                 self.pending = Some(HintRequest::Click(ClickKind::Left));
             } else if !right_before && self.chord_held(&self.keys.right) {
                 self.pending = Some(HintRequest::Click(ClickKind::Right));
-            } else if !grid_before && self.chord_held(&self.keys.grid) {
+            } else if self.grid_enabled && !grid_before && self.chord_held(&self.keys.grid) {
                 self.pending = Some(HintRequest::Grid);
             }
         }
@@ -83,17 +92,23 @@ impl InputEngine {
     pub fn new(config: Config) -> Result<Self, String> {
         let mut remapper = Remapper::new(config.remap.clone())?;
         remapper.set_mouse_controls(config.mouse_controls());
-        let macro_chord: &[KeyCode] = if config.macros.enabled {
-            &config.macros.hotkey
+        let macro_chord = &config.macros.hotkey;
+        let (macro_hotkey, logical_macro_hotkey) = if config.macros.enabled {
+            (
+                MacroHotkey::new(macro_chord),
+                MacroHotkey::new_logical(macro_chord),
+            )
         } else {
-            &[]
+            (
+                MacroHotkey::new_passthrough(macro_chord),
+                MacroHotkey::new_logical_passthrough(macro_chord),
+            )
         };
-        let macro_hotkey = MacroHotkey::new(macro_chord);
-        let logical_macro_hotkey = MacroHotkey::new_logical(macro_chord);
         Ok(Self {
             remapper,
             hints: HintActivation {
                 keys: config.hints.keys.clone(),
+                grid_enabled: config.hints.recursive_grid_enabled,
                 held: BTreeSet::new(),
                 pending: None,
             },
@@ -441,7 +456,8 @@ mod tests {
 
     #[test]
     fn macro_hotkey_records_and_replays_typed_input() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
+        let config = Config::parse("[macros]\nenabled = true").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
 
         assert!(macro_shortcut(&mut engine).keyboard.is_empty());
         release_macro_shortcut(&mut engine);
@@ -469,7 +485,8 @@ mod tests {
 
     #[test]
     fn remapped_super_can_activate_macro_hotkey() {
-        let config = Config::parse("[remap.main]\n'a+s' = 'super'").unwrap();
+        let config =
+            Config::parse("[macros]\nenabled = true\n[remap.main]\n'a+s' = 'super'").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
 
         assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
@@ -488,7 +505,8 @@ mod tests {
 
     #[test]
     fn remapped_escape_closes_macro_menu() {
-        let config = Config::parse("[remap.main]\n'a+s' = 'escape'").unwrap();
+        let config = Config::parse("[remap.main]\n'a+s' = 'escape'\n[macros]\nenabled = true")
+            .unwrap();
         let mut engine = InputEngine::new(config).unwrap();
 
         macro_shortcut(&mut engine);
@@ -502,7 +520,8 @@ mod tests {
 
     #[test]
     fn opening_macro_mode_releases_held_remapped_keys() {
-        let config = Config::parse("[remap.main]\n'a+s' = 'ctrl'").unwrap();
+        let config = Config::parse("[remap.main]\n'a+s' = 'ctrl'\n[macros]\nenabled = true")
+            .unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
         assert_eq!(
@@ -668,7 +687,8 @@ mod tests {
             [K::KEY_LEFTMETA, K::KEY_G],
             [K::KEY_G, K::KEY_LEFTMETA],
         ] {
-            let mut engine = InputEngine::new(Config::default()).unwrap();
+            let config = Config::parse("[hints]\nrecursive_grid_enabled = true").unwrap();
+            let mut engine = InputEngine::new(config).unwrap();
             for key in keys_pressed {
                 let output = engine.key(key, 1);
                 assert!(output.mouse.is_empty());
@@ -676,6 +696,53 @@ mod tests {
             assert_eq!(engine.take_hint_request(), Some(HintRequest::Grid));
             assert_eq!(engine.take_hint_request(), None);
         }
+    }
+
+    #[test]
+    fn recursive_grid_shortcut_is_passthrough_by_default() {
+        let mut engine = InputEngine::new(Config::default()).unwrap();
+        assert!(engine.key(K::KEY_LEFTMETA, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_G, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1), (K::KEY_G, 1)]
+        );
+        assert_eq!(engine.take_hint_request(), None);
+    }
+
+    #[test]
+    fn macro_hotkey_is_passthrough_by_default() {
+        let mut engine = InputEngine::new(Config::default()).unwrap();
+        assert!(engine.key(K::KEY_LEFTMETA, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_E, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1), (K::KEY_E, 1)]
+        );
+        assert_eq!(
+            keys(&engine.key(K::KEY_E, 0).keyboard),
+            [(K::KEY_E, 0)]
+        );
+        assert_eq!(
+            keys(&engine.key(K::KEY_LEFTMETA, 0).keyboard),
+            [(K::KEY_LEFTMETA, 0)]
+        );
+        assert!(engine.macro_status().is_none());
+    }
+
+    #[test]
+    fn remapped_macro_hotkey_is_passthrough_by_default() {
+        let config = Config::parse("[remap.main]\n'a+s' = 'super'").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_S, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1)]
+        );
+        assert!(engine.key(K::KEY_E, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_E, 0).keyboard),
+            [(K::KEY_E, 1), (K::KEY_E, 0)]
+        );
+        assert!(engine.macro_status().is_none());
     }
 
     #[test]

@@ -449,6 +449,7 @@ pub enum HotkeyResult {
 pub struct MacroHotkey {
     chord: BTreeSet<KeyCode>,
     allow_forwarded: bool,
+    activates: bool,
     held: BTreeSet<KeyCode>,
     forwarded: BTreeSet<KeyCode>,
     pending: Vec<(KeyCode, i32)>,
@@ -457,17 +458,26 @@ pub struct MacroHotkey {
 
 impl MacroHotkey {
     pub fn new(chord: &[KeyCode]) -> Self {
-        Self::with_forwarded(chord, false)
+        Self::with_forwarded(chord, false, true)
     }
 
     pub fn new_logical(chord: &[KeyCode]) -> Self {
-        Self::with_forwarded(chord, true)
+        Self::with_forwarded(chord, true, true)
     }
 
-    fn with_forwarded(chord: &[KeyCode], allow_forwarded: bool) -> Self {
+    pub fn new_passthrough(chord: &[KeyCode]) -> Self {
+        Self::with_forwarded(chord, false, false)
+    }
+
+    pub fn new_logical_passthrough(chord: &[KeyCode]) -> Self {
+        Self::with_forwarded(chord, true, false)
+    }
+
+    fn with_forwarded(chord: &[KeyCode], allow_forwarded: bool, activates: bool) -> Self {
         Self {
             chord: chord.iter().copied().collect(),
             allow_forwarded,
+            activates,
             held: BTreeSet::new(),
             forwarded: BTreeSet::new(),
             pending: Vec::new(),
@@ -573,6 +583,11 @@ impl MacroHotkey {
         if self.chord.iter().all(|member| self.held.contains(member))
             && (self.allow_forwarded || self.forwarded.is_disjoint(&self.chord))
         {
+            if !self.activates {
+                let pending = std::mem::take(&mut self.pending);
+                self.forward_pending(&pending);
+                return HotkeyResult::Forward(pending);
+            }
             self.swallowed.extend(
                 self.chord
                     .iter()
