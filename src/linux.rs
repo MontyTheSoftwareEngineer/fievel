@@ -339,6 +339,7 @@ fn attach_new_keyboards(
                     engine.keycast_keys(),
                     engine.speed_mode(),
                     engine.hold_locked(),
+                    engine.macro_status().as_deref(),
                 );
             }
         }
@@ -510,6 +511,13 @@ impl Outputs {
         } else {
             self.mouse.emit(&output.mouse)
         };
+        let macro_clicks = output.macro_clicks.into_iter().try_for_each(|click| {
+            let output_index = click
+                .output_index
+                .ok_or_else(|| io::Error::other("recorded hint click has no Wayland output"))?;
+            crate::hints::macro_click_at(output_index, click.x, click.y, click.right)
+                .map_err(|error| io::Error::other(error.to_string()))
+        });
         if mouse.is_ok() {
             self.odometer.record(&output.mouse);
         }
@@ -518,7 +526,7 @@ impl Outputs {
         } else {
             Ok(())
         };
-        keyboard.and(mouse).and(locator)
+        keyboard.and(mouse).and(macro_clicks).and(locator)
     }
 }
 
@@ -568,11 +576,12 @@ fn event_loop(
                 engine.keycast_keys(),
                 engine.speed_mode(),
                 engine.hold_locked(),
+                engine.macro_status().as_deref(),
             );
             activate_pending_hints(engine, &mut hint_mode, &mut hint_input, held, config);
         } else {
             let actions = hint_input.advance(now.duration_since(last));
-            handle_hint_input(actions, &mut hint_mode, config);
+            handle_hint_input(actions, &mut hint_mode, config, engine);
         }
         last = now;
 
@@ -593,7 +602,7 @@ fn event_loop(
                                 continue;
                             }
                             let actions = hint_input.key(key, value);
-                            handle_hint_input(actions, &mut hint_mode, config);
+                            handle_hint_input(actions, &mut hint_mode, config, engine);
                             continue;
                         }
                         if changed {
@@ -603,6 +612,7 @@ fn event_loop(
                                 engine.keycast_keys(),
                                 engine.speed_mode(),
                                 engine.hold_locked(),
+                                engine.macro_status().as_deref(),
                             );
                             activate_pending_hints(
                                 engine,
@@ -639,7 +649,7 @@ fn event_loop(
                 for key in held.remove(index) {
                     if hint_mode.is_some() {
                         let actions = hint_input.key(key, 0);
-                        handle_hint_input(actions, &mut hint_mode, config);
+                        handle_hint_input(actions, &mut hint_mode, config, engine);
                     } else {
                         outputs.emit(engine.key(key, 0))?;
                     }
@@ -649,6 +659,7 @@ fn event_loop(
                     engine.keycast_keys(),
                     engine.speed_mode(),
                     engine.hold_locked(),
+                    engine.macro_status().as_deref(),
                 );
                 if inputs.is_empty() {
                     eprintln!("All keyboards disconnected; waiting for a keyboard");
@@ -696,6 +707,7 @@ fn activate_pending_hints(
                         vec![HintInputEvent::Key(config.hints.keys.toggle_background, 1)],
                         hint_mode,
                         config,
+                        engine,
                     );
                 }
             }
@@ -708,6 +720,7 @@ pub(crate) fn handle_hint_input(
     actions: Vec<HintInputEvent>,
     hint_mode: &mut Option<ActiveHints>,
     config: &Config,
+    engine: &mut Engine,
 ) {
     for action in actions {
         let Some(hints) = hint_mode.as_mut() else {
@@ -740,7 +753,11 @@ pub(crate) fn handle_hint_input(
             }
             HintInputEvent::Key(key, value) => match hints.handle_key(key, value, &config.hints) {
                 Ok(HintResult::Continue) => {}
-                Ok(HintResult::Cancelled | HintResult::Clicked) => *hint_mode = None,
+                Ok(HintResult::Cancelled) => *hint_mode = None,
+                Ok(HintResult::Clicked(click)) => {
+                    engine.record_hint_click(click);
+                    *hint_mode = None;
+                }
                 Err(error) => {
                     ActiveHints::warning(error.as_ref());
                     *hint_mode = None;
@@ -804,7 +821,11 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
         format!("Cannot create uinput devices: {error}. Check /dev/uinput access")
     })?;
     outputs.odometer = odometer.counter.clone();
-    let mut indicator = Indicator::new(config.notify, config.keycast.enabled);
+    let mut indicator = Indicator::new(
+        config.notify,
+        config.keycast.enabled,
+        config.macros.enabled,
+    );
     // Keep discovery alive outside the loop so shutdown releases input before
     // waiting for an in-flight scan to finish.
     let mut scanner = KeyboardScanner::default();
@@ -855,7 +876,10 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
         },
         config.keys.free_mouse,
     );
-    let mut engine = Engine::new(config.clone())?;
+    let mut engine = Engine::new_with_macro_store(
+        config.clone(),
+        config_path.with_file_name("macros.toml"),
+    )?;
     // Seeding held keys preserves modifiers if the process starts mid-keypress.
     let result = (|| -> io::Result<()> {
         for (index, (_, input)) in grabbed.iter().enumerate() {
@@ -867,6 +891,7 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
                         engine.keycast_keys(),
                         engine.speed_mode(),
                         engine.hold_locked(),
+                        engine.macro_status().as_deref(),
                     );
                 }
             }

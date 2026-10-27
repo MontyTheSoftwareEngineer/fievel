@@ -5,6 +5,7 @@ use crate::{
     grid::{GridQuadrant, GridRect, GridSelection},
     input::KeyCode as K,
     label::{AppendResult, LabelAlphabet, LabelSelection},
+    macros::HintClick,
     windows_ui::{HintColors, Overlay, OverlayHint},
 };
 use std::{
@@ -33,7 +34,7 @@ pub enum ClickKind {
 pub enum HintResult {
     Continue,
     Cancelled,
-    Clicked,
+    Clicked(HintClick),
 }
 
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
@@ -223,13 +224,19 @@ impl ActiveHints {
             }
             if key == config.keys.grid_left_click || key == config.keys.grid_right_click {
                 let (x, y) = grid.cursor();
+                let click = HintClick {
+                    output_index: None,
+                    x: f64::from(self.origin.0) + x,
+                    y: f64::from(self.origin.1) + y,
+                    right: key == config.keys.grid_right_click,
+                };
                 overlay.click_at(
                     self.origin.0 + x.round() as i32,
                     self.origin.1 + y.round() as i32,
                     key == config.keys.grid_right_click,
                 )?;
                 self.cancel(overlay)?;
-                return Ok(HintResult::Clicked);
+                return Ok(HintResult::Clicked(click));
             }
             let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
                 return Ok(HintResult::Continue);
@@ -268,9 +275,15 @@ impl ActiveHints {
                     let region = &self.regions[target_index].rect;
                     let x = self.origin.0 + region.x as i32 + (region.width / 2) as i32;
                     let y = self.origin.1 + region.y as i32 + (region.height / 2) as i32;
+                    let click = HintClick {
+                        output_index: None,
+                        x: f64::from(x),
+                        y: f64::from(y),
+                        right: self.click == ClickKind::Right,
+                    };
                     overlay.click_at(x, y, self.click == ClickKind::Right)?;
                     self.cancel(overlay)?;
-                    return Ok(HintResult::Clicked);
+                    return Ok(HintResult::Clicked(click));
                 }
                 self.redraw(config, overlay)?;
             }

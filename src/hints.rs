@@ -4,6 +4,7 @@ use crate::{
     font::{Canvas, Color},
     grid::{GridQuadrant, GridRect, GridSelection},
     label::{AppendResult, LabelAlphabet, LabelSelection},
+    macros::HintClick,
 };
 use evdev::KeyCode as K;
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
@@ -53,11 +54,29 @@ pub fn locate_cursor() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+pub fn macro_click_at(
+    output_index: usize,
+    x: f64,
+    y: f64,
+    right: bool,
+) -> Result<(), Box<dyn Error>> {
+    let mut backend = WaylandHints::connect()?;
+    backend.prepare_overlays()?;
+    let click = if right {
+        ClickKind::Right
+    } else {
+        ClickKind::Left
+    };
+    let result = backend.click_grid(output_index, x, y, click);
+    backend.destroy();
+    result.map(|_| ())
+}
+
 #[derive(Debug)]
 pub enum HintResult {
     Continue,
     Cancelled,
-    Clicked,
+    Clicked(HintClick),
 }
 
 #[derive(Clone, Debug)]
@@ -254,10 +273,11 @@ impl ActiveHints {
                 } else {
                     ClickKind::Right
                 };
-                self.backend
+                let click = self
+                    .backend
                     .click_grid(self.grid_output.unwrap(), x, y, click)?;
                 self.backend.destroy();
-                return Ok(HintResult::Clicked);
+                return Ok(HintResult::Clicked(click));
             }
             let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
                 return Ok(HintResult::Continue);
@@ -293,9 +313,9 @@ impl ActiveHints {
             AppendResult::Success => {
                 if let Some(target_index) = self.selection.resolve() {
                     let region = &self.regions[target_index];
-                    self.backend.click(region, self.click)?;
+                    let click = self.backend.click(region, self.click)?;
                     self.backend.destroy();
-                    return Ok(HintResult::Clicked);
+                    return Ok(HintResult::Clicked(click));
                 }
                 self.redraw(config)?;
             }
@@ -1105,11 +1125,24 @@ impl WaylandHints {
         }
     }
 
-    fn click(&mut self, region: &HintRegion, click: ClickKind) -> Result<(), Box<dyn Error>> {
+    fn click(
+        &mut self,
+        region: &HintRegion,
+        click: ClickKind,
+    ) -> Result<HintClick, Box<dyn Error>> {
         let output = self.state.outputs[region.output_index].output.clone();
         let overlay = &self.state.overlays[region.output_index];
-        let (x, y, extent_width, extent_height) =
-            click_coordinates(region.rect, overlay.width, overlay.height);
+        let (x, y, extent_width, extent_height) = click_coordinates(
+            region.rect,
+            overlay.width,
+            overlay.height,
+        );
+        let click_position = HintClick {
+            output_index: Some(region.output_index),
+            x: f64::from(x) * f64::from(overlay.logical_width) / f64::from(extent_width),
+            y: f64::from(y) * f64::from(overlay.logical_height) / f64::from(extent_height),
+            right: click == ClickKind::Right,
+        };
 
         // Unmap before moving so the compositor can restore the underlying
         // surface's focus. A flush alone does not acknowledge request handling.
@@ -1135,7 +1168,8 @@ impl WaylandHints {
         // Keep the connection/device alive until release has been processed,
         // and acknowledge device destruction even when an earlier step failed.
         let cleanup = self.sync(INPUT_TIMEOUT);
-        result.and(cleanup)
+        result.and(cleanup)?;
+        Ok(click_position)
     }
 
     fn click_grid(
@@ -1144,9 +1178,25 @@ impl WaylandHints {
         x: f64,
         y: f64,
         click: ClickKind,
-    ) -> Result<(), Box<dyn Error>> {
-        let output = self.state.outputs[output_index].output.clone();
-        let overlay = &self.state.overlays[output_index];
+    ) -> Result<HintClick, Box<dyn Error>> {
+        let output = self
+            .state
+            .outputs
+            .get(output_index)
+            .ok_or_else(|| io::Error::other("recorded hint click references an unavailable output"))?
+            .output
+            .clone();
+        let overlay = self
+            .state
+            .overlays
+            .get(output_index)
+            .ok_or_else(|| io::Error::other("recorded hint click references an unavailable overlay"))?;
+        let click_position = HintClick {
+            output_index: Some(output_index),
+            x,
+            y,
+            right: click == ClickKind::Right,
+        };
         let (x, y, extent_width, extent_height) = grid_pointer_coordinates(
             x,
             y,
@@ -1176,7 +1226,8 @@ impl WaylandHints {
             .and_then(|()| self.click_button(&pointer, click));
         pointer.destroy();
         let cleanup = self.sync(INPUT_TIMEOUT);
-        result.and(cleanup)
+        result.and(cleanup)?;
+        Ok(click_position)
     }
 
     fn move_grid_cursor(
@@ -2631,10 +2682,14 @@ mod click_protocol_tests {
                 backend,
             };
 
-            assert!(matches!(
-                hints.handle_key(key, 1, &config).unwrap(),
-                HintResult::Clicked
-            ));
+            let HintResult::Clicked(click) = hints.handle_key(key, 1, &config).unwrap() else {
+                panic!("expected grid click");
+            };
+            assert_eq!(click.output_index, Some(0));
+            assert_eq!(
+                (click.x, click.y, click.right),
+                (123.0, 234.0, key == config.keys.grid_right_click)
+            );
             drop(hints);
 
             let mut expected = successful_sequence(button);
@@ -2703,6 +2758,7 @@ mod click_protocol_tests {
                 WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
             backend.prepare_overlays().unwrap();
             let config = crate::config::Config::parse(include_str!("../fievel.config")).unwrap();
+            let mut engine = crate::pipeline::InputEngine::new(config.clone()).unwrap();
             let mut luma = vec![255; 640 * 480];
             for index in 0..count {
                 let x = 10 + index % 9 * 60;
@@ -2766,16 +2822,16 @@ mod click_protocol_tests {
                 input.begin([]);
                 let mut mode = Some(hints);
                 for (key, value) in [(K::KEY_S, 1), (K::KEY_D, 1)] {
-                    crate::handle_hint_input(input.key(key, value), &mut mode, &config);
+                    crate::handle_hint_input(input.key(key, value), &mut mode, &config, &mut engine);
                 }
                 assert!(mode.as_ref().unwrap().backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
                 crate::handle_hint_input(
                     vec![crate::hint_input::HintInputEvent::Key(config.hints.keys.debug, 1)],
-                    &mut mode, &config,
+                    &mut mode, &config, &mut engine,
                 );
                 assert_eq!(mode.as_ref().unwrap().backend.debug_view, view);
-                crate::handle_hint_input(input.key(K::KEY_S, 0), &mut mode, &config);
-                crate::handle_hint_input(input.key(K::KEY_D, 0), &mut mode, &config);
+                crate::handle_hint_input(input.key(K::KEY_S, 0), &mut mode, &config, &mut engine);
+                crate::handle_hint_input(input.key(K::KEY_D, 0), &mut mode, &config, &mut engine);
                 hints = mode.unwrap();
                 assert_eq!(hints.backend.debug_view, view);
                 assert_eq!(hints.backend.state.overlays[0].pixels, visible);
@@ -2792,16 +2848,16 @@ mod click_protocol_tests {
             hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
             let mut mode = Some(hints);
             crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Shortcut(ClickKind::Right)],
-                &mut mode, &config);
+                &mut mode, &config, &mut engine);
             assert_eq!(mode.as_ref().unwrap().click_kind(), ClickKind::Right);
             assert_eq!(mode.as_ref().unwrap().backend.debug_view, DebugView::Edges);
             mode.as_mut().unwrap().backend.sync(INPUT_TIMEOUT).unwrap();
             if count == 0 {
                 crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Key(K::KEY_ESC, 1)],
-                    &mut mode, &config);
+                    &mut mode, &config, &mut engine);
             } else {
                 crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Shortcut(ClickKind::Right)],
-                    &mut mode, &config);
+                    &mut mode, &config, &mut engine);
             }
             assert!(mode.is_none());
             let requests = server.join().unwrap();

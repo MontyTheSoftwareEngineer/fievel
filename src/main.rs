@@ -8,6 +8,7 @@ mod hint_input;
 mod input;
 mod keycast;
 mod label;
+mod macros;
 mod pipeline;
 mod remap;
 

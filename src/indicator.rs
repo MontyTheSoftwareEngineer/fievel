@@ -39,6 +39,7 @@ mod render;
 struct KeycastFrame {
     keys: Vec<evdev::KeyCode>,
     speed: SpeedMode,
+    status: Option<String>,
 }
 
 #[derive(Default)]
@@ -48,6 +49,7 @@ struct State {
     stop: AtomicBool,
     mapped: AtomicBool,
     keycast: bool,
+    macro_status: bool,
     frame: Mutex<KeycastFrame>,
     revision: AtomicU64,
 }
@@ -65,20 +67,22 @@ pub struct Indicator(Option<Worker>);
 pub struct Overlays {
     indicator: Indicator,
     keycast: Indicator,
+    macro_status: Indicator,
 }
 
 impl Overlays {
-    pub fn new(notify: bool, keycast_enabled: bool) -> Self {
+    pub fn new(notify: bool, keycast_enabled: bool, macros_enabled: bool) -> Self {
         Self {
             indicator: Indicator::new(notify),
             keycast: if keycast_enabled {
-                Indicator::start_kind(true).unwrap_or_else(|error| {
+                Indicator::start_kind(true, false).unwrap_or_else(|error| {
                     warn_keycast(&error);
                     Indicator(None)
                 })
             } else {
                 Indicator(None)
             },
+            macro_status: Indicator::new_status(macros_enabled),
         }
     }
 
@@ -88,13 +92,15 @@ impl Overlays {
         keys: &[evdev::KeyCode],
         speed: SpeedMode,
         hold_locked: bool,
+        macro_status: Option<&str>,
     ) {
         self.indicator.set_active(active, hold_locked);
         self.keycast.set_keys(if active { keys } else { &[] }, speed);
+        self.macro_status.set_status(macro_status);
     }
 
     pub fn clear(&mut self) {
-        self.update(false, &[], SpeedMode::Normal, false);
+        self.update(false, &[], SpeedMode::Normal, false, None);
     }
 }
 
@@ -113,21 +119,37 @@ impl Indicator {
     }
 
     fn start() -> io::Result<Self> {
-        Self::start_kind(false)
+        Self::start_kind(false, false)
     }
 
-    fn start_kind(keycast: bool) -> io::Result<Self> {
+    fn new_status(enabled: bool) -> Self {
+        if !enabled {
+            return Self(None);
+        }
+        match Self::start_kind(true, true) {
+            Ok(indicator) => indicator,
+            Err(error) => {
+                warn_status(&error);
+                Self(None)
+            }
+        }
+    }
+
+    fn start_kind(keycast: bool, macro_status: bool) -> io::Result<Self> {
         let (wake, receiver) = UnixStream::pair()?;
         wake.set_nonblocking(true)?;
         receiver.set_nonblocking(true)?;
         let state = Arc::new(State {
             keycast,
+            macro_status,
             ..State::default()
         });
         let shared = Arc::clone(&state);
         let thread = thread::Builder::new()
             .name(
-                if keycast {
+                if macro_status {
+                    "fievel-macro-status"
+                } else if keycast {
                     "fievel-keycast"
                 } else {
                     "fievel-indicator"
@@ -138,7 +160,9 @@ impl Indicator {
                 let result = display(Arc::clone(&shared), receiver);
                 shared.mapped.store(false, Ordering::SeqCst);
                 if let Err(error) = result {
-                    if keycast {
+                    if macro_status {
+                        warn_status(error.as_ref());
+                    } else if keycast {
                         warn_keycast(error.as_ref());
                     } else {
                         warn(error.as_ref());
@@ -172,16 +196,40 @@ impl Indicator {
             let keys = &keys[keys.len().saturating_sub(32)..];
             let speed = if keys.is_empty() { SpeedMode::Normal } else { speed };
             let mut current = worker.state.frame.lock().unwrap();
-            if current.keys.as_slice() == keys && current.speed == speed {
+            if current.keys.as_slice() == keys && current.speed == speed && current.status.is_none()
+            {
                 return;
             }
             current.keys.clear();
             current.keys.extend_from_slice(keys);
             current.speed = speed;
+            current.status = None;
             worker
                 .state
                 .active
                 .store(!keys.is_empty(), Ordering::SeqCst);
+            worker.state.revision.fetch_add(1, Ordering::SeqCst);
+            drop(current);
+            worker.wake();
+        }
+    }
+
+    fn set_status(&mut self, status: Option<&str>) {
+        if let Some(worker) = &mut self.0 {
+            if !worker.state.macro_status {
+                return;
+            }
+            let mut current = worker.state.frame.lock().unwrap();
+            if current.status.as_deref() == status && current.keys.is_empty() {
+                return;
+            }
+            current.keys.clear();
+            current.speed = SpeedMode::Normal;
+            current.status = status.map(str::to_owned);
+            worker
+                .state
+                .active
+                .store(status.is_some(), Ordering::SeqCst);
             worker.state.revision.fetch_add(1, Ordering::SeqCst);
             drop(current);
             worker.wake();
@@ -238,6 +286,13 @@ fn warn_keycast(error: &dyn Error) {
         "fievel: keycast overlay unavailable: {error}. \
          Continuing without keycast; keyboard control is unaffected. \
          Requires a Wayland session with wlr-layer-shell (e.g. Hyprland/Sway)."
+    );
+}
+
+fn warn_status(error: &dyn Error) {
+    eprintln!(
+        "fievel: macro status overlay unavailable: {error}. \
+         Macro recording and playback continue without the on-screen status."
     );
 }
 
@@ -317,7 +372,10 @@ impl Display {
             self.revision = self.shared.revision.load(Ordering::SeqCst);
             drop(shared);
             self.layout = if frame.keys.is_empty() {
-                None
+                frame
+                    .status
+                    .as_deref()
+                    .map(render::Layout::new_text)
             } else {
                 Some(render::Layout::new(&frame.keys))
             };
@@ -359,7 +417,9 @@ impl Display {
                 &surface,
                 None,
                 Layer::Overlay,
-                if self.shared.keycast {
+                if self.shared.macro_status {
+                    "fievel-macro-status"
+                } else if self.shared.keycast {
                     "fievel-keycast"
                 } else {
                     "fievel-indicator"
@@ -370,17 +430,21 @@ impl Display {
             );
             layer.set_size(size.0, size.1);
             layer.set_anchor(
-                Anchor::Bottom
-                    | if self.shared.keycast {
-                        Anchor::Right
-                    } else {
-                        Anchor::Left
-                    },
+                if self.shared.macro_status {
+                    Anchor::Top | Anchor::Right
+                } else {
+                    Anchor::Bottom
+                        | if self.shared.keycast {
+                            Anchor::Right
+                        } else {
+                            Anchor::Left
+                        }
+                },
             );
             layer.set_margin(
-                0,
+                if self.shared.macro_status { 12 } else { 0 },
                 if self.shared.keycast { 12 } else { 0 },
-                12,
+                if self.shared.macro_status { 0 } else { 12 },
                 if self.shared.keycast { 0 } else { 12 },
             );
             layer.set_exclusive_zone(-1);
@@ -791,11 +855,12 @@ mod tests {
 
     #[test]
     fn disabled_overlays_never_start_workers() {
-        let mut overlays = Overlays::new(false, false);
-        overlays.update(true, &[K::KEY_K], SpeedMode::Normal, false);
+        let mut overlays = Overlays::new(false, false, false);
+        overlays.update(true, &[K::KEY_K], SpeedMode::Normal, false, None);
         overlays.clear();
         assert!(overlays.indicator.0.is_none());
         assert!(overlays.keycast.0.is_none());
+        assert!(overlays.macro_status.0.is_none());
     }
 
     #[test]
@@ -814,6 +879,7 @@ mod tests {
                 wake,
                 thread: None,
             })),
+            macro_status: Indicator(None),
         };
         let keys = [K::KEY_K, K::KEY_L];
         for (index, speed) in [
@@ -826,17 +892,17 @@ mod tests {
         .into_iter()
         .enumerate()
         {
-            overlays.update(true, &keys, speed, false);
+            overlays.update(true, &keys, speed, false, None);
             assert_eq!(shared.revision.load(Ordering::SeqCst), index as u64 + 1);
             assert_eq!(shared.frame.lock().unwrap().speed, speed);
             assert_eq!(shared.frame.lock().unwrap().keys, keys);
             assert_eq!(receiver.read(&mut [0; 64]).unwrap(), 1);
-            overlays.update(true, &keys, speed, false);
+            overlays.update(true, &keys, speed, false, None);
             assert_eq!(receiver.read(&mut [0; 64]).unwrap_err().kind(), io::ErrorKind::WouldBlock);
         }
         overlays.clear();
         let revision = shared.revision.load(Ordering::SeqCst);
-        overlays.update(true, &[], SpeedMode::Fast, false);
+        overlays.update(true, &[], SpeedMode::Fast, false, None);
         assert_eq!(shared.revision.load(Ordering::SeqCst), revision);
         assert!(!shared.active.load(Ordering::SeqCst));
     }
@@ -857,16 +923,17 @@ mod tests {
                 wake,
                 thread: None,
             })),
+            macro_status: Indicator(None),
         };
         let keys = [K::KEY_K, K::KEY_L, K::KEY_COMMA, K::KEY_DOT, K::KEY_SPACE];
-        overlays.update(true, &keys, SpeedMode::Normal, false);
+        overlays.update(true, &keys, SpeedMode::Normal, false, None);
         assert!(shared.active.load(Ordering::SeqCst));
         assert_eq!(shared.frame.lock().unwrap().keys, keys);
         assert_eq!(shared.revision.load(Ordering::SeqCst), 1);
         assert_eq!(receiver.read(&mut [0; 64]).unwrap(), 1);
         let allocation = shared.frame.lock().unwrap().keys.as_ptr();
         for _ in 0..1000 {
-            overlays.update(true, &keys, SpeedMode::Normal, false);
+            overlays.update(true, &keys, SpeedMode::Normal, false, None);
         }
         assert_eq!(shared.frame.lock().unwrap().keys.as_ptr(), allocation);
         assert_eq!(shared.revision.load(Ordering::SeqCst), 1);
@@ -874,20 +941,20 @@ mod tests {
             receiver.read(&mut [0; 64]).unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
-        overlays.update(true, &[K::KEY_L, K::KEY_K], SpeedMode::Normal, false);
+        overlays.update(true, &[K::KEY_L, K::KEY_K], SpeedMode::Normal, false, None);
         assert_eq!(shared.frame.lock().unwrap().keys, [K::KEY_L, K::KEY_K]);
         assert_eq!(shared.revision.load(Ordering::SeqCst), 2);
-        overlays.update(true, &[], SpeedMode::Normal, false);
+        overlays.update(true, &[], SpeedMode::Normal, false, None);
         assert!(!shared.active.load(Ordering::SeqCst));
         assert!(shared.frame.lock().unwrap().keys.is_empty());
-        overlays.update(true, &keys, SpeedMode::Normal, false);
-        overlays.update(false, &keys, SpeedMode::Normal, false);
+        overlays.update(true, &keys, SpeedMode::Normal, false, None);
+        overlays.update(false, &keys, SpeedMode::Normal, false, None);
         assert!(!shared.active.load(Ordering::SeqCst));
         assert!(shared.frame.lock().unwrap().keys.is_empty());
-        overlays.update(true, &[K::KEY_A; 40], SpeedMode::Normal, false);
+        overlays.update(true, &[K::KEY_A; 40], SpeedMode::Normal, false, None);
         assert_eq!(shared.frame.lock().unwrap().keys.len(), 32);
         let revision = shared.revision.load(Ordering::SeqCst);
-        overlays.update(true, &[K::KEY_A; 32], SpeedMode::Normal, false);
+        overlays.update(true, &[K::KEY_A; 32], SpeedMode::Normal, false, None);
         assert_eq!(shared.revision.load(Ordering::SeqCst), revision);
         overlays.clear();
         assert!(!shared.active.load(Ordering::SeqCst));
@@ -1021,7 +1088,7 @@ mod tests {
     #[test]
     #[ignore = "requires a Wayland compositor with wlr-layer-shell; no input devices are opened"]
     fn wayland_keycast_lifecycle_without_mode_indicator() {
-        let mut overlays = Overlays::new(false, true);
+        let mut overlays = Overlays::new(false, true, false);
         assert!(overlays.indicator.0.is_none());
         assert!(overlays.keycast.0.is_some());
         for _ in 0..2 {
@@ -1030,17 +1097,23 @@ mod tests {
                 vec![K::KEY_BRIGHTNESSUP; 32],
                 vec![K::KEY_A],
             ] {
-                overlays.update(true, &keys, SpeedMode::Normal, false);
+                overlays.update(true, &keys, SpeedMode::Normal, false, None);
                 thread::sleep(Duration::from_secs(1));
                 let worker = overlays.keycast.0.as_ref().unwrap();
                 assert!(worker.state.mapped.load(Ordering::SeqCst));
                 assert!(!worker.thread.as_ref().unwrap().is_finished());
             }
             for count in 1..=128 {
-                overlays.update(true, &vec![K::KEY_LEFTCTRL; count % 32 + 1], SpeedMode::Normal, false);
+                overlays.update(
+                    true,
+                    &vec![K::KEY_LEFTCTRL; count % 32 + 1],
+                    SpeedMode::Normal,
+                    false,
+                    None,
+                );
                 thread::sleep(Duration::from_millis(4));
             }
-            overlays.update(true, &[K::KEY_K, K::KEY_L], SpeedMode::Normal, false);
+            overlays.update(true, &[K::KEY_K, K::KEY_L], SpeedMode::Normal, false, None);
             thread::sleep(Duration::from_millis(200));
             assert!(!overlays
                 .keycast

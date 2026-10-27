@@ -2,7 +2,10 @@ use crate::input::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use crate::config::{Config, Mode};
+use crate::{
+    config::{Config, Mode},
+    macros::HintClick,
+};
 use KeyCode as K;
 use RelativeAxisCode as R;
 
@@ -21,6 +24,7 @@ pub enum SpeedMode {
 pub struct Output {
     pub keyboard: Vec<InputEvent>,
     pub mouse: Vec<InputEvent>,
+    pub macro_clicks: Vec<HintClick>,
     pub locate: bool,
 }
 

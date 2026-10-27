@@ -3,6 +3,7 @@ use crate::{
     detect::{self, DetectionLimits, Outcome, Rect, Source},
     grid::{GridQuadrant, GridRect, GridSelection},
     label::{AppendResult, LabelAlphabet, LabelSelection},
+    macros::HintClick,
 };
 use evdev::KeyCode as K;
 use std::{error::Error, ffi::CString, os::raw::c_char, ptr};
@@ -17,7 +18,7 @@ pub enum ClickKind {
 pub enum HintResult {
     Continue,
     Cancelled,
-    Clicked,
+    Clicked(HintClick),
 }
 
 #[repr(C)]
@@ -124,6 +125,14 @@ unsafe extern "C" {
     fn fievel_ui_clear_hints();
     fn fievel_move_pointer_to(x: f64, y: f64) -> bool;
     fn fievel_click_at(x: f64, y: f64, right: bool) -> bool;
+}
+
+pub fn macro_click_at(x: f64, y: f64, right: bool) -> Result<(), Box<dyn Error>> {
+    if unsafe { fievel_click_at(x, y, right) } {
+        Ok(())
+    } else {
+        Err("failed to replay the recorded macOS hint click".into())
+    }
 }
 
 struct CaptureGuard {
@@ -263,8 +272,14 @@ impl ActiveHints {
                 if !unsafe { fievel_click_at(x, y, right) } {
                     return Err("failed to synthesize the macOS grid click".into());
                 }
+                let click = HintClick {
+                    output_index: None,
+                    x,
+                    y,
+                    right,
+                };
                 self.cancel();
-                return Ok(HintResult::Clicked);
+                return Ok(HintResult::Clicked(click));
             }
             let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
                 return Ok(HintResult::Continue);
@@ -309,8 +324,14 @@ impl ActiveHints {
                     if !unsafe { fievel_click_at(x, y, self.click == ClickKind::Right) } {
                         return Err("failed to synthesize the macOS hint click".into());
                     }
+                    let click = HintClick {
+                        output_index: None,
+                        x,
+                        y,
+                        right: self.click == ClickKind::Right,
+                    };
                     self.cancel();
-                    return Ok(HintResult::Clicked);
+                    return Ok(HintResult::Clicked(click));
                 }
                 self.redraw(config);
             }
