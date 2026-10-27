@@ -38,6 +38,8 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
 const INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 const HINT_NAMESPACE: &str = "fievel-hints";
 const CURSOR_PULSE_DURATION: Duration = Duration::from_millis(750);
+// wl_fixed has 8 fractional bits, so this is the smallest nonzero motion.
+const CURSOR_WAKE_NUDGE: f64 = 1.0 / 256.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickKind {
@@ -47,7 +49,15 @@ pub enum ClickKind {
 
 pub fn locate_cursor() -> Result<(), Box<dyn Error>> {
     let mut backend = WaylandHints::connect_for_locator()?;
-    let (output_index, center, _) = backend.capture_cursor_position(false)?;
+    let position = match backend.capture_cursor_position(false)? {
+        Some(position) => Some(position),
+        None => {
+            backend.nudge_cursor()?;
+            backend.capture_cursor_position(false)?
+        }
+    };
+    let (output_index, center, _) =
+        position.ok_or("cursor remained invisible after virtual pointer nudge")?;
     backend.draw_cursor_pulse(output_index, center)?;
     std::thread::sleep(CURSOR_PULSE_DURATION);
     Ok(())
@@ -146,7 +156,9 @@ impl ActiveHints {
             .map_err(|error| format!("hints.label_symbols: {error}"))?;
         let mut backend = WaylandHints::connect()?;
         let (output_index, cursor_position, cursor_visible) =
-            backend.capture_cursor_position(true)?;
+            backend
+                .capture_cursor_position(true)?
+                .ok_or("no cursor position is available for grid selection")?;
         let overlay = &backend.state.overlays[output_index];
         let mut grid = GridSelection::new(GridRect {
             x: 0.0,
@@ -573,7 +585,7 @@ impl WaylandHints {
     fn capture_cursor_position(
         &mut self,
         fallback_to_first_output: bool,
-    ) -> Result<(usize, (i32, i32), bool), Box<dyn Error>> {
+    ) -> Result<Option<(usize, (i32, i32), bool)>, Box<dyn Error>> {
         self.prepare_overlays()?;
         self.state.captures.clear();
         let screencopy = self.state.screencopy.as_ref().unwrap().clone();
@@ -647,7 +659,7 @@ impl WaylandHints {
             }
         }
         if let Some((_, output_index, center)) = best {
-            return Ok((output_index, center, true));
+            return Ok(Some((output_index, center, true)));
         }
         if fallback_to_first_output {
             // Wayland exposes no global cursor position when screencopy cannot see it.
@@ -656,19 +668,39 @@ impl WaylandHints {
                 .overlays
                 .first()
                 .ok_or("no Wayland outputs are available for grid selection")?;
-            return Ok((
+            return Ok(Some((
                 overlay.output_index,
                 (
                     (overlay.logical_width / 2) as i32,
                     (overlay.logical_height / 2) as i32,
                 ),
                 false,
-            ));
+            )));
         }
         if valid_pairs == 0 {
             return Err("failed to capture cursor screenshots from any output".into());
         }
-        Err("cursor was not visible in the Wayland screencopy frames".into())
+        Ok(None)
+    }
+
+    fn nudge_cursor(&mut self) -> Result<(), Box<dyn Error>> {
+        let manager = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .ok_or("compositor does not support zwlr_virtual_pointer_manager_v1")?
+            .clone();
+        let seat = self.state.seat.as_ref().ok_or("missing wl_seat")?.clone();
+        let pointer = manager.create_virtual_pointer_with_output(Some(&seat), None, &self.qh, ());
+        pointer.motion(time_ms(), CURSOR_WAKE_NUDGE, 0.0);
+        pointer.frame();
+        let nudge = self.sync(INPUT_TIMEOUT);
+        pointer.motion(time_ms(), -CURSOR_WAKE_NUDGE, 0.0);
+        pointer.frame();
+        let restore = self.sync(INPUT_TIMEOUT);
+        pointer.destroy();
+        let destroy = self.sync(INPUT_TIMEOUT);
+        nudge.and(restore).and(destroy)
     }
 
     fn draw_cursor_pulse(
