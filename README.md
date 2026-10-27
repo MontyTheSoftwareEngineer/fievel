@@ -201,14 +201,15 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | A | Hold for slow movement and scrolling; release for normal speed |
 | Q | Show a brief red pulse around the cursor |
 
-Press **Super+E** to open macro registers. This shortcut can be changed with
-`macros.hotkey`. Press **R**, choose a letter register to record, then press the
-shortcut again or **Esc** to stop. Press **P** and choose a register to play it;
-**Esc** stops playback. Recordings include typed key events, Free Mouse Mode
-output, and hint clicks at their selected screen position. Registers are kept
-in `macros.toml` beside the active config file and persist across restarts.
-Since typed input is recorded to this file, avoid recording passwords or other
-sensitive text.
+Macro recording and playback are disabled by default. Set
+`macros.enabled = true` in `[macros]` to enable them. Press **Super+E** to open
+macro registers; this shortcut can be changed with `macros.hotkey`.
+Press **R**, choose a letter register to record, then press the shortcut again
+or **Esc** to stop. Press **P** and choose a register to play it; **Esc** stops
+playback. Recordings include typed key events, Free Mouse Mode output, and hint
+clicks at their selected screen position. Registers are kept in `macros.toml`
+beside the active config file and persist across restarts. Since typed input is
+recorded to this file, avoid recording passwords or other sensitive text.
 
 The locator key is configurable with `keys.locate` and defaults to Q.
 It is consumed only while Free Mouse Mode is active.
@@ -233,14 +234,16 @@ are also separated from neutral icon contours, even when they touch.
 Type a label to click its center. As you type, non-matching hints disappear and
 matching letters are highlighted. **Backspace** removes the last letter.
 
-Press **Super+G** for a left-click grid on the display containing the pointer.
-Choose a quadrant with **U/I/J/K** (upper-left, upper-right, lower-left,
-lower-right) to subdivide recursively. The pointer follows the selected
-region's center as you type or backtrack. Press **Space** to left-click or **R**
-to right-click at the pointer. Configure quadrant keys using letters A-Z with
-`hints.keys.grid_upper_left`, `grid_upper_right`, `grid_lower_left`, and
-`grid_lower_right`; set `grid_left_click` and `grid_right_click` to change the
-click buttons. The overlay labels show your configured quadrant keys.
+Recursive grid hints are disabled by default. Set
+`hints.recursive_grid_enabled = true` in the `[hints]` config section to enable
+them. Then press **Super+G** for a left-click grid on the display containing
+the pointer. Choose a quadrant with **U/I/J/K** (upper-left, upper-right,
+lower-left, lower-right) to subdivide recursively. The pointer follows the
+selected region's center as you type or backtrack. Press **Space** to left-click
+or **R** to right-click at the pointer. Configure quadrant keys using letters
+A-Z with `hints.keys.grid_upper_left`, `grid_upper_right`, `grid_lower_left`,
+and `grid_lower_right`; set `grid_left_click` and `grid_right_click` to change
+the click buttons. The overlay labels show your configured quadrant keys.
 **Backspace** steps back, and **Escape** or **Enter** cancels.
 
 In label-hint mode, press the same shortcut again to cancel, or the other
@@ -390,7 +393,7 @@ notify = true # Persistent, faint Free Mouse Mode indicator
 home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
 
 [macros]
-enabled = true
+enabled = false # Set true to enable macro recording and playback
 hotkey = "leftmeta + e" # Open macro registers; configurable
 
 [speeds]
@@ -430,6 +433,7 @@ max_keys = 8
 timeout = 3
 
 [hints]
+recursive_grid_enabled = false # Set true to enable recursive grid hints
 label_symbols = "abcdefghijklmnopqrstuvwxyz"
 border_color = "#00ff00e0"
 fill_color = "#00ff0018"
