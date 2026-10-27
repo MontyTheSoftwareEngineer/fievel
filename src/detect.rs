@@ -1371,7 +1371,11 @@ mod tests {
         let mut pixels = image(200, 120);
         stroke_rect(&mut pixels, 200, 10, 10, 30, 20);
         stroke_rect(&mut pixels, 200, 70, 10, 50, 70);
-        let detection = detect_with_trace(&pixels, 200, 120, 1.0, DetectionLimits::default());
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
+        let detection = detect_with_trace(&pixels, 200, 120, 1.0, limits);
         assert_trace_consistent(&detection);
         let trace = detection.trace;
         assert_eq!((trace.width, trace.height, trace.edges.len()), (200, 120, 24000));
@@ -1584,17 +1588,37 @@ mod tests {
                 }
             }
         }
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
         for limits in [
-            DetectionLimits { max_width: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { max_height: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { min_width: 25.0, ..DetectionLimits::default() },
-            DetectionLimits { min_height: 25.0, ..DetectionLimits::default() },
+            DetectionLimits {
+                max_width: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                max_height: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_width: 25.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_height: 25.0,
+                ..limits
+            },
         ] {
             let detection = detect_rgb_with_trace(
                 &screenshot, (210, 56), (210, 56), limits, false, false,
             );
             assert_trace_consistent(&detection);
-            assert!(!detection.regions.iter().any(|rect| covers(rect, 80, 29)));
+            assert!(
+                !detection.regions.iter().any(|rect| covers(rect, 80, 29)),
+                "limits={limits:?}, regions={:?}",
+                detection.regions
+            );
         }
     }
 
@@ -1666,17 +1690,37 @@ mod tests {
     #[test]
     fn icon_fallback_respects_size_limits_and_does_not_duplicate_standalone_icons() {
         let screenshot = notification_toolbar();
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
         for limits in [
-            DetectionLimits { max_width: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { max_height: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { min_width: 25.0, ..DetectionLimits::default() },
-            DetectionLimits { min_height: 25.0, ..DetectionLimits::default() },
+            DetectionLimits {
+                max_width: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                max_height: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_width: 25.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_height: 25.0,
+                ..limits
+            },
         ] {
             let detection = detect_rgb_with_trace(
                 &screenshot, (244, 56), (244, 56), limits, false, false,
             );
             assert_trace_consistent(&detection);
-            assert!(!detection.regions.iter().any(|rect| covers(rect, 156, 27)));
+            assert!(
+                !detection.regions.iter().any(|rect| covers(rect, 156, 27)),
+                "limits={limits:?}, regions={:?}",
+                detection.regions
+            );
             assert!(detection.trace.components.iter().any(|component|
                 component.source == Source::Icon
                     && matches!(component.outcome, Outcome::TooSmall | Outcome::TooLarge)
@@ -1790,10 +1834,14 @@ mod tests {
         assert!(targets(&[], 0, 0).is_empty());
         let mut pixels = image(200, 100);
         stroke_rect(&mut pixels, 200, 12, 12, 100, 60);
-        assert!(targets(&pixels, 200, 100).is_empty());
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
+        assert!(detect_regions_from_luma(&pixels, 200, 100, 1.0, limits).is_empty());
         let limits = DetectionLimits {
             max_height: 80.0,
-            ..DetectionLimits::default()
+            ..limits
         };
         assert_eq!(
             detect_regions_from_luma(&pixels, 200, 100, 1.0, limits).len(),
