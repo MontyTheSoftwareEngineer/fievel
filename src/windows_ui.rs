@@ -385,16 +385,17 @@ impl Overlay {
         keys: &[KeyCode],
         speed: SpeedMode,
         locked: bool,
+        macro_status: Option<&str>,
     ) -> io::Result<()> {
-        let label = if !active {
+        let label = if !active && macro_status.is_none() {
             None
         } else {
-            let mut label = if locked {
+            let mut label = if active && locked {
                 "HOLD".to_owned()
             } else {
                 "fievel".to_owned()
             };
-            if !keys.is_empty() {
+            if active && !keys.is_empty() {
                 label.push_str("  ");
                 label.push_str(
                     &keys
@@ -409,11 +410,17 @@ impl Overlay {
                         .join(" "),
                 );
             }
-            match speed {
-                SpeedMode::Normal => {}
-                SpeedMode::Fast => label.push_str("  FAST"),
-                SpeedMode::SuperFast => label.push_str("  SUPER FAST"),
-                SpeedMode::Slow => label.push_str("  SLOW"),
+            if active {
+                match speed {
+                    SpeedMode::Normal => {}
+                    SpeedMode::Fast => label.push_str("  FAST"),
+                    SpeedMode::SuperFast => label.push_str("  SUPER FAST"),
+                    SpeedMode::Slow => label.push_str("  SLOW"),
+                }
+            }
+            if let Some(status) = macro_status {
+                label.push_str("  ");
+                label.push_str(status);
             }
             Some(label)
         };

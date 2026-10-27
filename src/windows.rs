@@ -554,7 +554,10 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
         },
         config.keys.free_mouse,
     );
-    let mut engine = InputEngine::new(config.clone())?;
+    let mut engine = InputEngine::new_with_macro_store(
+        config.clone(),
+        config_path.with_file_name("macros.toml"),
+    )?;
     let mut hint_input = HintInput::new(&config).map_err(io::Error::other)?;
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
@@ -577,7 +580,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 );
             } else {
                 let actions = hint_input.advance(elapsed);
-                handle_hint_input(actions, &mut hints, &config, &mut overlay)?;
+                handle_hint_input(actions, &mut hints, &config, &mut overlay, &mut engine)?;
             }
 
             match hooks.receiver.recv_timeout(TICK) {
@@ -594,7 +597,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                     if changed {
                         if hints.is_some() {
                             let actions = hint_input.key(key, value);
-                            handle_hint_input(actions, &mut hints, &config, &mut overlay)?;
+                            handle_hint_input(actions, &mut hints, &config, &mut overlay, &mut engine)?;
                         } else {
                             emit(engine.key(key, value), &mut odometer, &mut overlay)?;
                             update_indicator(&mut overlay, &config, &engine)?;
@@ -669,6 +672,7 @@ fn update_indicator(
         keys,
         engine.speed_mode(),
         config.notify && engine.hold_locked(),
+        engine.macro_status().as_deref(),
     )
 }
 
@@ -700,6 +704,7 @@ fn activate_pending_hints(
                         mode,
                         config,
                         overlay,
+                        engine,
                     )
                     .unwrap_or_else(|error| ActiveHints::warning(error.as_ref()));
                 }
@@ -714,6 +719,7 @@ fn handle_hint_input(
     mode: &mut Option<ActiveHints>,
     config: &Config,
     overlay: &mut Overlay,
+    engine: &mut InputEngine,
 ) -> Result<(), Box<dyn Error>> {
     for action in actions {
         let Some(hints) = mode.as_mut() else {
@@ -747,7 +753,11 @@ fn handle_hint_input(
             HintInputEvent::Key(key, value) => {
                 match hints.handle_key(key, value, &config.hints, overlay)? {
                     HintResult::Continue => {}
-                    HintResult::Cancelled | HintResult::Clicked => *mode = None,
+                    HintResult::Cancelled => *mode = None,
+                    HintResult::Clicked(click) => {
+                        engine.record_hint_click(click);
+                        *mode = None;
+                    }
                 }
             }
         }
@@ -797,6 +807,13 @@ fn emit(
         }
     }
     flush_motion(&mut dx, &mut dy)?;
+    for click in output.macro_clicks {
+        overlay.click_at(
+            click.x.round() as i32,
+            click.y.round() as i32,
+            click.right,
+        )?;
+    }
     odometer.counter.record(&output.mouse);
     Ok(())
 }

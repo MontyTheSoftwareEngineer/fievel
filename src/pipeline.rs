@@ -1,11 +1,12 @@
-use std::{collections::BTreeSet, time::Duration};
+use std::{collections::BTreeSet, path::PathBuf, time::Duration};
 
-use crate::input::KeyCode;
+use crate::input::{EventType, InputEvent, KeyCode};
 
 use crate::{
     config::{Config, HintKeys},
     engine::{Engine, Output},
     hints::ClickKind,
+    macros::{HintClick, HotkeyResult, MacroController, MacroHotkey},
     remap::{Event, Remapper},
 };
 
@@ -19,6 +20,11 @@ pub struct InputEngine {
     remapper: Remapper,
     mouse: Engine,
     hints: HintActivation,
+    macros: MacroController,
+    macro_hotkey: MacroHotkey,
+    logical_macro_hotkey: MacroHotkey,
+    physical_held: BTreeSet<KeyCode>,
+    forwarded_keys: BTreeSet<KeyCode>,
 }
 
 struct HintActivation {
@@ -28,6 +34,21 @@ struct HintActivation {
 }
 
 impl HintActivation {
+    fn would_activate(&self, key: KeyCode, value: i32, can_activate: bool) -> bool {
+        if !can_activate || value != 1 || self.held.contains(&key) || self.pending.is_some() {
+            return false;
+        }
+        [&self.keys.left, &self.keys.right, &self.keys.grid]
+            .into_iter()
+            .any(|chord| {
+                chord.contains(&key)
+                    && !self.chord_held(chord)
+                    && chord
+                        .iter()
+                        .all(|member| *member == key || self.held.contains(member))
+            })
+    }
+
     fn key(&mut self, key: KeyCode, value: i32, can_activate: bool) -> bool {
         let left_before = self.chord_held(&self.keys.left);
         let right_before = self.chord_held(&self.keys.right);
@@ -62,6 +83,13 @@ impl InputEngine {
     pub fn new(config: Config) -> Result<Self, String> {
         let mut remapper = Remapper::new(config.remap.clone())?;
         remapper.set_mouse_controls(config.mouse_controls());
+        let macro_chord: &[KeyCode] = if config.macros.enabled {
+            &config.macros.hotkey
+        } else {
+            &[]
+        };
+        let macro_hotkey = MacroHotkey::new(macro_chord);
+        let logical_macro_hotkey = MacroHotkey::new_logical(macro_chord);
         Ok(Self {
             remapper,
             hints: HintActivation {
@@ -69,8 +97,25 @@ impl InputEngine {
                 held: BTreeSet::new(),
                 pending: None,
             },
+            macros: MacroController::default(),
+            macro_hotkey,
+            logical_macro_hotkey,
+            physical_held: BTreeSet::new(),
+            forwarded_keys: BTreeSet::new(),
             mouse: Engine::new(config),
         })
+    }
+
+    pub fn new_with_macro_store(
+        config: Config,
+        path: impl Into<PathBuf>,
+    ) -> Result<Self, String> {
+        let macros_enabled = config.macros.enabled;
+        let mut engine = Self::new(config)?;
+        if macros_enabled {
+            engine.macros.load_store(path)?;
+        }
+        Ok(engine)
     }
 
     pub fn active(&self) -> bool {
@@ -90,24 +135,109 @@ impl InputEngine {
     }
 
     pub fn key(&mut self, key: KeyCode, value: i32) -> Output {
+        match value {
+            1 => {
+                self.physical_held.insert(key);
+            }
+            0 => {
+                self.physical_held.remove(&key);
+            }
+            _ => {}
+        }
+        if self.macros.active() && !self.macros.recording() {
+            let mut output = Output::default();
+            self.process_key(key, value, &mut output);
+            return output;
+        }
+        if self
+            .hints
+            .would_activate(key, value, !self.mouse.active())
+        {
+            let mut output = Output::default();
+            for (key, value) in self.macro_hotkey.forward_for_hint(key, value) {
+                self.process_key(key, value, &mut output);
+            }
+            return output;
+        }
+        if let Some(result) = self.macro_hotkey.key(key, value) {
+            match result {
+                HotkeyResult::Buffered | HotkeyResult::Suppressed => return Output::default(),
+                HotkeyResult::Activated => {
+                    let mut output = Output::default();
+                    self.enter_macro_mode(&mut output);
+                    return output;
+                }
+                HotkeyResult::Forward(events) => {
+                    let mut output = Output::default();
+                    for (key, value) in events {
+                        self.process_key(key, value, &mut output);
+                    }
+                    return output;
+                }
+            }
+        }
         let mut output = Output::default();
-        let mouse = &mut self.mouse;
-        let hints = &mut self.hints;
-        self.remapper.key_with(key, value, &mut |event| {
-            dispatch(mouse, hints, &mut output, event)
-        });
-        self.clear_hint_inputs();
+        self.process_key(key, value, &mut output);
         output
     }
 
-    pub fn advance(&mut self, elapsed: Duration) -> Output {
-        let mut output = self.mouse.advance(elapsed);
+    fn process_key(&mut self, key: KeyCode, value: i32, output: &mut Output) {
         let mouse = &mut self.mouse;
         let hints = &mut self.hints;
-        self.remapper.advance_with(elapsed, &mut |event| {
-            dispatch(mouse, hints, &mut output, event)
+        let macros = &mut self.macros;
+        let macro_hotkey = &mut self.logical_macro_hotkey;
+        let mut activate_macro = false;
+        let mut next = Output::default();
+        self.remapper.key_with(key, value, &mut |event| {
+            dispatch(
+                mouse,
+                hints,
+                macros,
+                macro_hotkey,
+                &mut next,
+                &mut activate_macro,
+                event,
+            )
         });
         self.clear_hint_inputs();
+        self.track_keyboard(&next);
+        if activate_macro {
+            self.enter_macro_mode(&mut next);
+        }
+        self.macros.record_output(&next);
+        append(output, next);
+    }
+
+    pub fn advance(&mut self, elapsed: Duration) -> Output {
+        let mut output = if self.macros.active() && !self.macros.recording() {
+            self.macros.advance(elapsed)
+        } else {
+            let output = self.mouse.advance(elapsed);
+            self.macros.advance(elapsed);
+            output
+        };
+        let mouse = &mut self.mouse;
+        let hints = &mut self.hints;
+        let macros = &mut self.macros;
+        let macro_hotkey = &mut self.logical_macro_hotkey;
+        let mut activate_macro = false;
+        self.remapper.advance_with(elapsed, &mut |event| {
+            dispatch(
+                mouse,
+                hints,
+                macros,
+                macro_hotkey,
+                &mut output,
+                &mut activate_macro,
+                event,
+            )
+        });
+        self.clear_hint_inputs();
+        self.track_keyboard(&output);
+        if activate_macro {
+            self.enter_macro_mode(&mut output);
+        }
+        self.macros.record_output(&output);
         output
     }
 
@@ -126,11 +256,124 @@ impl InputEngine {
         self.remapper.clear();
         self.hints.held.clear();
         self.hints.pending = None;
-        self.mouse.release_all()
+        self.macro_hotkey.clear();
+        self.logical_macro_hotkey.clear();
+        let mut output = self.mouse.release_all();
+        self.track_keyboard(&output);
+        output.keyboard.extend(
+            std::mem::take(&mut self.forwarded_keys)
+                .into_iter()
+                .map(|key| InputEvent::new(EventType::KEY.0, key.0, 0)),
+        );
+        append(&mut output, self.macros.stop());
+        self.physical_held.clear();
+        output
+    }
+
+    fn enter_macro_mode(&mut self, output: &mut Output) {
+        self.macros.shortcut();
+        self.macros
+            .consume_until_release(self.physical_held.iter().copied());
+        self.remapper.clear();
+        self.hints.held.clear();
+        self.hints.pending = None;
+        self.macro_hotkey.clear();
+        self.logical_macro_hotkey.clear();
+        let mut cleanup = self.mouse.release_all();
+        self.track_keyboard(&cleanup);
+        cleanup.keyboard.extend(
+            std::mem::take(&mut self.forwarded_keys)
+                .into_iter()
+                .map(|key| InputEvent::new(EventType::KEY.0, key.0, 0)),
+        );
+        append(output, cleanup);
+    }
+
+    pub fn record_hint_click(&mut self, click: HintClick) {
+        self.macros.record_hint_click(click);
+    }
+
+    pub fn macro_status(&self) -> Option<String> {
+        self.macros.status()
+    }
+
+    fn track_keyboard(&mut self, output: &Output) {
+        for event in &output.keyboard {
+            if event.event_type() != EventType::KEY {
+                continue;
+            }
+            let key = KeyCode(event.code());
+            match event.value() {
+                1 => {
+                    self.forwarded_keys.insert(key);
+                }
+                0 => {
+                    self.forwarded_keys.remove(&key);
+                }
+                _ => {}
+            }
+        }
     }
 }
 
 fn dispatch(
+    mouse: &mut Engine,
+    hints: &mut HintActivation,
+    macros: &mut MacroController,
+    macro_hotkey: &mut MacroHotkey,
+    output: &mut Output,
+    activate_macro: &mut bool,
+    event: Event,
+) -> bool {
+    if *activate_macro {
+        return false;
+    }
+
+    if let Event::Key(key, value) = event {
+        if macro_hotkey.swallows(key) {
+            let _ = macro_hotkey.key(key, value);
+            return false;
+        }
+        if let Some(next) = macros.key(key, value) {
+            append(output, next);
+            return false;
+        }
+        if !macros.active() || macros.recording() {
+            if let Some(result) = macro_hotkey.key(key, value) {
+                match result {
+                    HotkeyResult::Buffered => {
+                        for (key, value) in macro_hotkey.forward_buffered() {
+                            dispatch_unbuffered(
+                                mouse,
+                                hints,
+                                output,
+                                Event::Key(key, value),
+                            );
+                        }
+                        return false;
+                    }
+                    HotkeyResult::Suppressed => return false,
+                    HotkeyResult::Activated => {
+                        *activate_macro = true;
+                        return false;
+                    }
+                    HotkeyResult::Forward(events) => {
+                        for (key, value) in events {
+                            dispatch_unbuffered(mouse, hints, output, Event::Key(key, value));
+                        }
+                        return false;
+                    }
+                }
+            }
+        }
+    } else if macros.active() && !macros.recording() {
+        return false;
+    }
+
+    dispatch_unbuffered(mouse, hints, output, event)
+}
+
+fn dispatch_unbuffered(
     mouse: &mut Engine,
     hints: &mut HintActivation,
     output: &mut Output,
@@ -158,6 +401,7 @@ fn dispatch(
 fn append(output: &mut Output, next: Output) {
     output.keyboard.extend(next.keyboard);
     output.mouse.extend(next.mouse);
+    output.macro_clicks.extend(next.macro_clicks);
     output.locate |= next.locate;
 }
 
@@ -179,6 +423,102 @@ mod tests {
             .iter()
             .map(|event| (K(event.code()), event.value()))
             .collect()
+    }
+
+    fn macro_shortcut(engine: &mut InputEngine) -> Output {
+        let mut output = Output::default();
+        for key in [K::KEY_LEFTMETA, K::KEY_E] {
+            output = engine.key(key, 1);
+        }
+        output
+    }
+
+    fn release_macro_shortcut(engine: &mut InputEngine) {
+        for key in [K::KEY_E, K::KEY_LEFTMETA] {
+            engine.key(key, 0);
+        }
+    }
+
+    #[test]
+    fn macro_hotkey_records_and_replays_typed_input() {
+        let mut engine = InputEngine::new(Config::default()).unwrap();
+
+        assert!(macro_shortcut(&mut engine).keyboard.is_empty());
+        release_macro_shortcut(&mut engine);
+        assert!(engine.macro_status().unwrap().contains("R RECORD"));
+
+        engine.key(K::KEY_R, 1);
+        engine.key(K::KEY_R, 0);
+        engine.key(K::KEY_A, 1);
+        engine.key(K::KEY_A, 0);
+        assert_eq!(keys(&engine.key(K::KEY_B, 1).keyboard), [(K::KEY_B, 1)]);
+        assert_eq!(keys(&engine.key(K::KEY_B, 0).keyboard), [(K::KEY_B, 0)]);
+
+        macro_shortcut(&mut engine);
+        release_macro_shortcut(&mut engine);
+        assert!(engine.macro_status().unwrap().contains("[A]"));
+
+        engine.key(K::KEY_P, 1);
+        engine.key(K::KEY_P, 0);
+        let played = engine.key(K::KEY_A, 1);
+        assert_eq!(
+            keys(&played.keyboard),
+            [(K::KEY_B, 1), (K::KEY_B, 0)]
+        );
+    }
+
+    #[test]
+    fn remapped_super_can_activate_macro_hotkey() {
+        let config = Config::parse("[remap.main]\n'a+s' = 'super'").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+
+        assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_S, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1)]
+        );
+        assert!(engine.key(K::KEY_E, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_E, 0).keyboard),
+            [(K::KEY_LEFTMETA, 0)]
+        );
+
+        assert!(engine.macro_status().unwrap().contains("R RECORD"));
+    }
+
+    #[test]
+    fn remapped_escape_closes_macro_menu() {
+        let config = Config::parse("[remap.main]\n'a+s' = 'escape'").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+
+        macro_shortcut(&mut engine);
+        release_macro_shortcut(&mut engine);
+        assert!(engine.macro_status().is_some());
+
+        assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
+        assert!(engine.key(K::KEY_S, 1).keyboard.is_empty());
+        assert!(engine.macro_status().is_none());
+    }
+
+    #[test]
+    fn opening_macro_mode_releases_held_remapped_keys() {
+        let config = Config::parse("[remap.main]\n'a+s' = 'ctrl'").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_S, 1).keyboard),
+            [(K::KEY_LEFTCTRL, 1)]
+        );
+
+        engine.key(K::KEY_LEFTMETA, 1);
+        assert_eq!(
+            keys(&engine.key(K::KEY_E, 1).keyboard),
+            [(K::KEY_LEFTCTRL, 0)]
+        );
+        engine.key(K::KEY_LEFTMETA, 0);
+        engine.key(K::KEY_E, 0);
+        assert!(engine.key(K::KEY_A, 0).keyboard.is_empty());
+        assert!(engine.key(K::KEY_S, 0).keyboard.is_empty());
     }
 
     #[test]
@@ -255,7 +595,10 @@ mod tests {
 
             engine.key(K::KEY_LEFTMETA, 1);
             let output = engine.key(K::KEY_SPACE, 1);
-            assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
+            assert_eq!(
+                keys(&output.keyboard),
+                [(K::KEY_LEFTMETA, 1), (K::KEY_LEFTMETA, 0)]
+            );
             assert!(output.mouse.is_empty());
             assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
             assert!(!engine.active());
@@ -302,12 +645,12 @@ mod tests {
             (K::KEY_I, ClickKind::Right),
         ] {
             let mut engine = InputEngine::new(Config::default()).unwrap();
-            assert_eq!(
-                keys(&engine.key(K::KEY_LEFTMETA, 1).keyboard),
-                [(K::KEY_LEFTMETA, 1)]
-            );
+            assert!(engine.key(K::KEY_LEFTMETA, 1).keyboard.is_empty());
             let output = engine.key(key, 1);
-            assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
+            assert_eq!(
+                keys(&output.keyboard),
+                [(K::KEY_LEFTMETA, 1), (K::KEY_LEFTMETA, 0)]
+            );
             assert!(output.mouse.is_empty());
             assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(click)));
             assert_eq!(engine.take_hint_request(), None);

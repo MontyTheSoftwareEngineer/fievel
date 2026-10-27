@@ -25,6 +25,14 @@ pub(super) struct Layout {
 impl Layout {
     pub(super) fn new(keys: &[KeyCode]) -> Self {
         let labels: Vec<_> = keys.iter().map(|key| key_label(*key)).collect();
+        Self::from_labels(labels)
+    }
+
+    pub(super) fn new_text(text: &str) -> Self {
+        Self::from_labels(vec![text.to_owned()])
+    }
+
+    fn from_labels(labels: Vec<String>) -> Self {
         let lines = wrap(&labels, COLUMNS);
         let columns = lines.iter().map(String::len).max().unwrap_or(1);
         let size = (

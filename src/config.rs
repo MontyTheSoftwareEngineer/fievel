@@ -19,6 +19,7 @@ pub struct Config {
     pub easing: Easing,
     pub keys: Keys,
     pub keycast: Keycast,
+    pub macros: Macros,
     pub hints: Hints,
     pub remap: crate::remap::RemapConfig,
 }
@@ -65,8 +66,26 @@ impl Default for Config {
             easing: Easing::default(),
             keys: Keys::default(),
             keycast: Keycast::default(),
+            macros: Macros::default(),
             hints: Hints::default(),
             remap: crate::remap::RemapConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Macros {
+    pub enabled: bool,
+    #[serde(deserialize_with = "deserialize_chord")]
+    pub hotkey: Vec<K>,
+}
+
+impl Default for Macros {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            hotkey: vec![K::KEY_LEFTMETA, K::KEY_E],
         }
     }
 }
@@ -773,6 +792,7 @@ impl Config {
                 "easing",
                 "keys",
                 "keycast",
+                "macros",
                 "hints",
                 "remap",
             ],
@@ -787,6 +807,24 @@ impl Config {
             &mut config.home_end_enabled,
             &mut changed,
         );
+
+        if let Some(table) = config_section(root, "macros", "macros") {
+            warn_unknown_fields(table, &["enabled", "hotkey"], "macros");
+            apply_value(
+                table,
+                "enabled",
+                "macros.enabled",
+                &mut config.macros.enabled,
+                &mut changed,
+            );
+            apply_chord(
+                table,
+                "hotkey",
+                "macros.hotkey",
+                &mut config.macros.hotkey,
+                &mut changed,
+            );
+        }
 
         if let Some(table) = config_section(root, "keycast", "keycast") {
             warn_unknown_fields(
@@ -1395,6 +1433,18 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), String> {
         self.remap.validate()?;
+        if self.macros.enabled {
+            validate_chord("macros.hotkey", &self.macros.hotkey)?;
+            if self.macros.hotkey.len() < 2 {
+                return Err("macros.hotkey must be a chord of at least two keys".to_owned());
+            }
+            if self.macros.hotkey == self.hints.keys.left
+                || self.macros.hotkey == self.hints.keys.right
+                || self.macros.hotkey == self.hints.keys.grid
+            {
+                return Err("macros.hotkey must differ from hint activation chords".to_owned());
+            }
+        }
         if !(1..=32).contains(&self.keycast.max_keys) {
             return Err("keycast.max_keys: must be between 1 and 32".to_owned());
         }
