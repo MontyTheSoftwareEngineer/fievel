@@ -1445,6 +1445,17 @@ impl Config {
     }
 
     pub fn load(path: &Path, required: bool) -> Result<Self, Box<dyn Error>> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Cannot create config directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
         match fs::read_to_string(path) {
             Ok(text) => Self::parse(&text)
                 .map_err(|error| format!("Invalid config {}: {error}", path.display()).into()),
@@ -2306,13 +2317,22 @@ mod tests {
 
     #[test]
     fn missing_optional_file_defaults_but_required_file_errors() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target/nonexistent-config-directory/fievel.config");
+        let directory = std::env::temp_dir().join(format!(
+            "fievel-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("nested/fievel.config");
         assert_eq!(
             Config::load(&path, false).unwrap().keys.free_mouse,
             vec![K::KEY_F3]
         );
+        assert!(path.parent().unwrap().is_dir());
         assert!(Config::load(&path, true).is_err());
         assert!(Config::load(Path::new(env!("CARGO_MANIFEST_DIR")), false).is_err());
+        fs::remove_dir_all(directory).unwrap();
     }
 }
