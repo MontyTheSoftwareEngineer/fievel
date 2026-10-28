@@ -64,13 +64,25 @@ FIEVEL_MENU_BAR_ICON=./assets/fievel.png cargo build --release
 The icon is embedded in the binary, so the release archive does not need the
 image file. If the variable is unset, Fievel uses the macOS cursor symbol.
 
-To create a macOS release archive after building:
+To create a macOS app bundle and release archive after building:
 
 ```sh
 ./scripts/package-release-macos.sh
 ```
 
-The archive is written to `target/release/fievel-<version>-macos-<arch>.tar.gz`.
+The app is written to `target/release/Fievel.app`; open it from Finder to run
+Fievel without a terminal. The script also keeps creating the standalone
+archive at `target/release/fievel-<version>-macos-<arch>.tar.gz`.
+The app bundle is ad-hoc signed with a stable identifier so macOS privacy
+permissions can be associated with Fievel across rebuilds; it is not Developer
+ID signed or notarized.
+The menu bar menu shows the config file Fievel loaded, or that it is using
+defaults when the optional config file is missing. It can open the config
+folder and reload configuration changes without restarting Fievel.
+
+The app bundle uses the generic macOS icon unless `assets/fievel.icns` exists.
+To provide a custom Finder icon, replace that optional file with an `.icns`
+icon (a 1024x1024 PNG is a good source image to convert to `.icns`).
 
 On first launch, allow **Input Monitoring** and **Accessibility** for the
 terminal or app running Fievel in **System Settings → Privacy & Security**.

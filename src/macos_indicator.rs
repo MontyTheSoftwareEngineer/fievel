@@ -68,6 +68,11 @@ impl Overlays {
         unsafe { fievel_ui_set_indicator(visible, locked, label.as_ptr()) };
     }
 
+    pub fn set_config(&mut self, enabled: bool, keycast_enabled: bool) {
+        self.enabled = enabled;
+        self.keycast_enabled = keycast_enabled;
+    }
+
     pub fn clear(&mut self) {
         let label = CString::new("").expect("empty label contains no NUL bytes");
         unsafe { fievel_ui_set_indicator(false, false, label.as_ptr()) };

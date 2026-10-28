@@ -39,11 +39,17 @@ archive_name=$(basename -- "$archive_path")
 mkdir -p "$archive_dir"
 archive_dir=$(CDPATH= cd -- "$archive_dir" && pwd)
 archive="$archive_dir/$archive_name"
+release_dir="$repo_root/target/release"
+app_path="$release_dir/Fievel.app"
+bundle_identifier=com.montythesoftwareengineer.fievel
+mkdir -p "$release_dir"
 
 staging=$(mktemp -d "${TMPDIR:-/tmp}/fievel-release.XXXXXX")
+app_staging=$(mktemp -d "$release_dir/.fievel-app.XXXXXX")
 archive_tmp=
 cleanup() {
     rm -rf -- "$staging"
+    rm -rf -- "$app_staging"
     if [ -n "$archive_tmp" ]; then
         rm -f -- "$archive_tmp"
     fi
@@ -57,8 +63,60 @@ cp -p "$repo_root/README.md" "$staging/README.md"
 cp -p "$repo_root/LICENSE" "$staging/LICENSE"
 cp -p "$repo_root/fievel.config" "$staging/fievel.config"
 
+app_bundle="$app_staging/Fievel.app"
+app_contents="$app_bundle/Contents"
+mkdir -p "$app_contents/MacOS" "$app_contents/Resources"
+cp -p "$binary" "$app_contents/MacOS/fievel"
+
+icon_plist_entry=
+if [ -f "$repo_root/assets/fievel.icns" ]; then
+    cp -p "$repo_root/assets/fievel.icns" "$app_contents/Resources/fievel.icns"
+    icon_plist_entry='<key>CFBundleIconFile</key><string>fievel.icns</string>'
+fi
+
+cat > "$app_contents/Info.plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleExecutable</key>
+    <string>fievel</string>
+    <key>CFBundleIdentifier</key>
+    <string>$bundle_identifier</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>Fievel</string>
+    <key>CFBundleDisplayName</key>
+    <string>Fievel</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>$version</string>
+    <key>CFBundleVersion</key>
+    <string>$version</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>LSUIElement</key>
+    <true/>
+    $icon_plist_entry
+</dict>
+</plist>
+EOF
+
+codesign --force --deep --sign - \
+    --identifier "$bundle_identifier" \
+    --requirements "=designated => identifier \"$bundle_identifier\"" \
+    "$app_bundle"
+
 tar -czf "$archive_tmp" -C "$staging" \
     fievel README.md LICENSE fievel.config
 mv -f -- "$archive_tmp" "$archive"
 
+rm -rf -- "$app_path"
+mv -- "$app_bundle" "$app_path"
+
 echo "Created $archive"
+echo "Created $app_path"
