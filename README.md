@@ -409,7 +409,7 @@ home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
 
 [macros]
 enabled = false # Set true to enable macro recording and playback
-hotkey = "leftmeta + e" # Open macro registers; configurable
+hotkey = "super + e" # Open macro registers; configurable
 
 [speeds]
 normal = 300
@@ -491,8 +491,11 @@ fine taps without coasting. Hint labels must use 2-26 unique lowercase ASCII
 letters, and hint size limits must stay positive with max >= min.
 
 Key names are case-insensitive Linux-style key names: `h`, `space`, `f4`, `leftshift`,
-`KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
-are accepted. Controls must use distinct single keys. Shift passes through to the focused app
+`KEY_LEFTCTRL`, etc. Modifier aliases `ctrl`/`control`, `super`/`meta`, `win`/`windows`,
+`cmd`/`command`, `alt`/`option`, and `shift` are accepted on every OS; aliases bind the
+corresponding left-side key (`cmd` is Command on macOS, `win` is the Windows key on Windows).
+`,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter` are also accepted.
+Controls must use distinct single keys. Shift passes through to the focused app
 in Free Mouse Mode unless a speed key is held. With the fast key (S by default),
 either Shift key enables double speed for movement and scrolling. `free_mouse` and
 `[hints.keys]` activators accept either a single distinct key or a `+`-separated

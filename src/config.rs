@@ -744,6 +744,10 @@ fn validation_path(config: &Config, error: &str, changed: &HashSet<String>) -> O
 pub(crate) fn parse_key(value: &str) -> Result<K, String> {
     let upper = value.trim().to_ascii_uppercase();
     let name = match upper.as_str() {
+        "CTRL" | "CONTROL" => "KEY_LEFTCTRL",
+        "SUPER" | "META" | "WIN" | "WINDOWS" | "CMD" | "COMMAND" => "KEY_LEFTMETA",
+        "ALT" | "OPTION" => "KEY_LEFTALT",
+        "SHIFT" => "KEY_LEFTSHIFT",
         "," => "COMMA",
         "." => "DOT",
         "ESCAPE" => "ESC",
@@ -2134,6 +2138,38 @@ mod tests {
     }
 
     #[test]
+    fn modifier_aliases_work_in_all_config_bindings() {
+        let config = Config::parse(
+            "[macros]\nhotkey = 'super + e'\n[keys]\nreload_config = 'ctrl + shift + r'\n\
+             [hints.keys]\nleft = 'command + space'\ntoggle_background = 'option'",
+        )
+        .unwrap();
+        assert_eq!(config.macros.hotkey, [K::KEY_LEFTMETA, K::KEY_E]);
+        assert_eq!(
+            config.keys.reload_config,
+            [K::KEY_LEFTCTRL, K::KEY_LEFTSHIFT, K::KEY_R]
+        );
+        assert_eq!(config.hints.keys.left, [K::KEY_LEFTMETA, K::KEY_SPACE]);
+        assert_eq!(config.hints.keys.toggle_background, K::KEY_LEFTALT);
+
+        for (alias, key) in [
+            ("ctrl", K::KEY_LEFTCTRL),
+            ("control", K::KEY_LEFTCTRL),
+            ("super", K::KEY_LEFTMETA),
+            ("meta", K::KEY_LEFTMETA),
+            ("win", K::KEY_LEFTMETA),
+            ("windows", K::KEY_LEFTMETA),
+            ("cmd", K::KEY_LEFTMETA),
+            ("command", K::KEY_LEFTMETA),
+            ("alt", K::KEY_LEFTALT),
+            ("option", K::KEY_LEFTALT),
+            ("shift", K::KEY_LEFTSHIFT),
+        ] {
+            assert_eq!(parse_key(alias), Ok(key), "{alias}");
+        }
+    }
+
+    #[test]
     fn activation_chords_accept_spaces_case_and_overlapping_controls() {
         let config = Config::parse(
             "[keys]\nfree_mouse = ' LeftAlt + KEY_SPACE '\n[hints.keys]\nleft = ' LeftMeta + space '\nright = 'leftmeta+KEY_I'",
@@ -2227,6 +2263,7 @@ mod tests {
         let defaults = Config::parse("").unwrap();
         assert!(!defaults.hints.recursive_grid_enabled);
         assert!(!defaults.macros.enabled);
+        assert_eq!(defaults.macros.hotkey, [K::KEY_LEFTMETA, K::KEY_E]);
 
         let enabled =
             Config::parse("[hints]\nrecursive_grid_enabled = true\n[macros]\nenabled = true")
