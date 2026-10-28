@@ -6,6 +6,7 @@ use crate::{
     indicator::Overlays,
     odometer,
     pipeline::{HintRequest, InputEngine},
+    reload,
 };
 use clap::Parser;
 use evdev::{EventType, KeyCode as K, RelativeAxisCode as R};
@@ -155,6 +156,7 @@ fn validate_key_mappings(config: &Config) -> Result<(), Box<dyn Error>> {
     if config.keycast.enabled {
         keys.push(config.keycast.hotkey);
     }
+    keys.extend(config.keys.reload_config.iter().copied());
     for key in keys {
         if mac_keycode(key).is_none() {
             return Err(format!(
@@ -229,6 +231,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     let mut last = Instant::now();
     let result = (|| -> Result<(), Box<dyn Error>> {
         while !stop.load(Ordering::Relaxed) {
+            let mut reload_requested = false;
             let now = Instant::now();
             let elapsed = now.saturating_duration_since(last);
             last = now;
@@ -272,6 +275,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         if suppressed_keys.contains(&key) {
                             if value == 0 {
                                 suppressed_keys.remove(&key);
+                                held.remove(&key);
                             }
                             continue;
                         }
@@ -285,7 +289,15 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                             _ => false,
                         };
                         if changed {
-                            if hints.is_some() {
+                            if reload::matches_press(
+                                &config.keys.reload_config,
+                                key,
+                                value,
+                                |key| held.contains(&key) || engine.key_is_held(key),
+                            ) {
+                                suppressed_keys.insert(key);
+                                reload_requested = true;
+                            } else if hints.is_some() {
                                 let actions = hint_input.key(key, value);
                                 handle_hint_input(actions, &mut hints, &config, &mut engine);
                             } else {
@@ -322,7 +334,8 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 unsafe { fievel_ui_set_odometer_stats(fievel_miles, physical_miles) };
                 last_menu_stats = Instant::now();
             }
-            if unsafe { fievel_ui_reload_requested() } {
+            let menu_reload_requested = unsafe { fievel_ui_reload_requested() };
+            if reload_requested || menu_reload_requested {
                 let reload_result: Result<_, Box<dyn Error>> = (|| {
                     let (new_path, new_config) = load_config(&args)?;
                     let new_hint_input =
@@ -353,10 +366,12 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                             &config_path,
                             if config_path.is_file() { 3 } else { 4 },
                         )?;
+                        crate::notifications::config_reload(true);
                     }
                     Err(error) => {
                         eprintln!("Fievel config reload failed: {error}");
                         set_config_menu_status(&config_path, 2)?;
+                        crate::notifications::config_reload(false);
                     }
                 }
             }

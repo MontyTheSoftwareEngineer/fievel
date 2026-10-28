@@ -39,8 +39,10 @@ with `--device`, it waits for that same event-node path to return.
 
 To customize, copy the source repository's [`fievel.config`](fievel.config) to
 `~/.config/fievel/fievel.config` (create the directory if needed), then stop
-and restart Fievel to reload it. This example also enables
-[home-row mods and navigation layers](#home-row-mods-and-navigation-layers),
+and restart Fievel to reload it, or press **Super+Shift+R** while Fievel is
+running. The reload shortcut can be changed with `keys.reload_config`, and a
+desktop notification confirms whether the reload succeeded. This example also
+enables [home-row mods and navigation layers](#home-row-mods-and-navigation-layers),
 including **D+F** for Free Mouse Mode alongside **F3**.
 
 See [Configuration](#configuration) for all settings.
@@ -424,6 +426,7 @@ scroll = 0.3
 
 [keys]
 free_mouse = "f3" # Also accepts chords such as "leftalt + space"
+reload_config = "leftmeta + leftshift + r" # Reload configuration on Linux, macOS, and Windows
 toggle_hold = "z" # Locks hold mode until pressed again or Free Mouse Mode is pressed
 left = "h"
 down = "j"
