@@ -10,6 +10,7 @@ clap = { version = "4", features = ["derive"] }
 signal-hook = "0.3"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+notify-rust = "4"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
 evdev = "0.13.2"

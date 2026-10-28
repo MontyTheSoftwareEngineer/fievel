@@ -6,6 +6,7 @@ use crate::{
     hints::{ActiveHints, HintResult},
     indicator::Overlays as Indicator,
     pipeline::{HintRequest, InputEngine as Engine},
+    reload,
 };
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
@@ -396,6 +397,12 @@ impl HeldKeys {
     fn push(&mut self) {
         self.sources.push(AttributeSet::new());
     }
+
+    fn clear(&mut self) {
+        self.sources
+            .iter_mut()
+            .for_each(|keys| *keys = AttributeSet::new());
+    }
 }
 
 fn merge_keys<'a>(
@@ -417,6 +424,13 @@ fn validate_input_keys(
         if !supported.contains(key) && !remapped_outputs.contains(&key) {
             return Err(format!(
                 "Selected keyboards do not support {action} = {key:?}; choose another input or binding"
+            ));
+        }
+    }
+    for key in &config.keys.reload_config {
+        if !supported.contains(*key) {
+            return Err(format!(
+                "Selected keyboards do not support keys.reload_config = {key:?}; choose another input or binding"
             ));
         }
     }
@@ -557,7 +571,10 @@ fn event_loop(
     held: &mut HeldKeys,
     outputs: &mut Outputs,
     engine: &mut Engine,
-    config: &Config,
+    args: &Args,
+    config_path: &mut PathBuf,
+    config: &mut Config,
+    supported: &AttributeSet<KeyCode>,
     stop: &AtomicBool,
     indicator: &mut Indicator,
     scanner: &mut KeyboardScanner,
@@ -567,6 +584,7 @@ fn event_loop(
     let mut next_scan = last + RESCAN_INTERVAL;
     let mut hint_mode: Option<ActiveHints> = None;
     let mut hint_input = HintInput::new(config).map_err(io::Error::other)?;
+    let mut suppressed_keys = std::collections::BTreeSet::new();
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if hint_mode.is_none() {
@@ -597,6 +615,36 @@ fn event_loop(
                         let key = KeyCode(event.code());
                         let value = event.value();
                         let changed = held.key(index, key, value);
+                        if suppressed_keys.contains(&key) {
+                            if value == 0 && !held.contains(key) {
+                                suppressed_keys.remove(&key);
+                            }
+                            continue;
+                        }
+                        if changed
+                            && reload::matches_press(
+                                &config.keys.reload_config,
+                                key,
+                                value,
+                                |key| held.contains(key) || engine.key_is_held(key),
+                            )
+                        {
+                            suppressed_keys.insert(key);
+                            reload_config(
+                                args,
+                                config_path,
+                                config,
+                                supported,
+                                outputs,
+                                engine,
+                                &mut hint_input,
+                                &mut hint_mode,
+                                held,
+                                &mut suppressed_keys,
+                                indicator,
+                            )?;
+                            continue;
+                        }
                         if hint_mode.is_some() {
                             if !changed {
                                 continue;
@@ -681,6 +729,75 @@ fn event_loop(
             )?;
         }
         thread::sleep(TICK.saturating_sub(now.elapsed()));
+    }
+    Ok(())
+}
+
+fn reload_config(
+    args: &Args,
+    config_path: &mut PathBuf,
+    config: &mut Config,
+    supported: &AttributeSet<KeyCode>,
+    outputs: &mut Outputs,
+    engine: &mut Engine,
+    hint_input: &mut HintInput,
+    hint_mode: &mut Option<ActiveHints>,
+    held: &mut HeldKeys,
+    suppressed_keys: &mut std::collections::BTreeSet<KeyCode>,
+    indicator: &mut Indicator,
+) -> io::Result<()> {
+    let reload_result: Result<_, Box<dyn Error>> = (|| {
+        let (new_path, new_config) = load_config(args)?;
+        validate_input_keys(supported, &new_config).map_err(io::Error::other)?;
+        let new_hint_input = HintInput::new(&new_config).map_err(io::Error::other)?;
+        let new_engine = Engine::new_with_macro_store(
+            new_config.clone(),
+            new_path.with_file_name("macros.toml"),
+        )?;
+        let mut new_outputs = Outputs::new(supported, &new_config)?;
+        new_outputs.odometer = outputs.odometer.clone();
+        Ok((
+            new_path,
+            new_config,
+            new_hint_input,
+            new_engine,
+            new_outputs,
+        ))
+    })();
+
+    match reload_result {
+        Ok((new_path, new_config, new_hint_input, new_engine, new_outputs)) => {
+            if let Some(active) = hint_mode.as_mut() {
+                active.cancel();
+            }
+            *hint_mode = None;
+            outputs.emit(engine.release_all())?;
+            suppressed_keys.extend(held.keys().iter());
+            held.clear();
+            indicator.clear();
+            indicator.set_config(
+                new_config.notify,
+                new_config.keycast.enabled,
+                new_config.macros.enabled,
+            );
+            *hint_input = new_hint_input;
+            *engine = new_engine;
+            *config = new_config;
+            *config_path = new_path;
+            *outputs = new_outputs;
+            indicator.update(
+                engine.active(),
+                engine.keycast_keys(),
+                engine.speed_mode(),
+                engine.hold_locked(),
+                engine.macro_status().as_deref(),
+            );
+            crate::notifications::config_reload(true);
+        }
+        Err(error) => {
+            eprintln!("fievel: config reload failed: {error}");
+            crate::notifications::config_reload(false);
+        }
     }
     Ok(())
 }
@@ -792,7 +909,7 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
-    let (config_path, config) = load_config(&args)?;
+    let (mut config_path, mut config) = load_config(&args)?;
     if args.check_config {
         println!("Config: {}\n{config:#?}", config_path.display());
         return Ok(());
@@ -901,7 +1018,10 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             &mut held,
             &mut outputs,
             &mut engine,
-            &config,
+            &args,
+            &mut config_path,
+            &mut config,
+            &available,
             &stop,
             &mut indicator,
             &mut scanner,
@@ -957,6 +1077,7 @@ mod tests {
             .map(|(_, key)| key)
             .chain(config.hints.keys.left.iter().copied())
             .chain(config.hints.keys.right.iter().copied())
+            .chain(config.keys.reload_config.iter().copied())
             .chain([
                 config.hints.keys.cancel,
                 config.hints.keys.debug,
@@ -1149,6 +1270,7 @@ mod tests {
             .map(|(_, key)| key)
             .chain(config.hints.keys.left.iter().copied())
             .chain(config.hints.keys.right.iter().copied())
+            .chain(config.keys.reload_config.iter().copied())
             .chain([
                 config.hints.keys.cancel,
                 config.hints.keys.debug,
@@ -1165,6 +1287,32 @@ mod tests {
         for key in [KeyCode::KEY_Z, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_F24] {
             assert!(output.contains(key));
         }
+    }
+
+    #[test]
+    fn reload_hotkey_requires_physical_input_keys() {
+        let config = Config::parse(
+            "[keys]\nreload_config = 'f8'\n[remap.main]\ncapslock = 'f8'",
+        )
+        .unwrap();
+        let mut supported: AttributeSet<KeyCode> = config
+            .keys
+            .named()
+            .into_iter()
+            .map(|(_, key)| key)
+            .chain(config.hints.keys.left.iter().copied())
+            .chain(config.hints.keys.right.iter().copied())
+            .chain([
+                config.hints.keys.cancel,
+                config.hints.keys.debug,
+                config.hints.keys.toggle_background,
+            ])
+            .collect();
+        supported.insert(KeyCode::KEY_CAPSLOCK);
+        supported.remove(KeyCode::KEY_F8);
+        assert!(validate_input_keys(&supported, &config)
+            .unwrap_err()
+            .contains("keys.reload_config"));
     }
 
     #[test]

@@ -86,6 +86,10 @@ impl Overlays {
         }
     }
 
+    pub fn set_config(&mut self, notify: bool, keycast_enabled: bool, macros_enabled: bool) {
+        *self = Self::new(notify, keycast_enabled, macros_enabled);
+    }
+
     pub fn update(
         &mut self,
         active: bool,

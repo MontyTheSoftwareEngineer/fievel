@@ -6,6 +6,7 @@ use crate::{
     input::{EventType, KeyCode as K, RelativeAxisCode as R},
     odometer,
     pipeline::{HintRequest, InputEngine},
+    reload,
     windows_ui::{Overlay, INPUT_MARKER},
 };
 use clap::Parser;
@@ -512,6 +513,7 @@ fn validate_key_mappings(config: &Config) -> Result<(), Box<dyn Error>> {
     if config.keycast.enabled {
         keys.push(config.keycast.hotkey);
     }
+    keys.extend(config.keys.reload_config.iter().copied());
     for key in keys {
         if scan_code_for_key(key).is_none() && virtual_key_for_key(key).is_none() {
             return Err(
@@ -531,7 +533,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
         odometer::reset()?;
         return Ok(());
     }
-    let (config_path, config) = load_config(&args)?;
+    let (mut config_path, mut config) = load_config(&args)?;
     if args.check_config {
         println!("Config: {}\n{config:#?}", config_path.display());
         return Ok(());
@@ -561,9 +563,11 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     let mut hint_input = HintInput::new(&config).map_err(io::Error::other)?;
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
+    let mut suppressed_keys = BTreeSet::new();
     let mut last = Instant::now();
     let result = (|| -> Result<(), Box<dyn Error>> {
         while !stop.load(Ordering::Relaxed) {
+            let mut reload_requested = false;
             let now = Instant::now();
             let elapsed = now.saturating_duration_since(last);
             last = now;
@@ -594,7 +598,18 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         2 => held.contains(&key),
                         _ => false,
                     };
-                    if changed {
+                    if suppressed_keys.contains(&key) {
+                        if value == 0 {
+                            suppressed_keys.remove(&key);
+                        }
+                    } else if changed
+                        && reload::matches_press(&config.keys.reload_config, key, value, |key| {
+                            held.contains(&key) || engine.key_is_held(key)
+                        })
+                    {
+                        suppressed_keys.insert(key);
+                        reload_requested = true;
+                    } else if changed {
                         if hints.is_some() {
                             let actions = hint_input.key(key, value);
                             handle_hint_input(actions, &mut hints, &config, &mut overlay, &mut engine)?;
@@ -615,6 +630,39 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err("Windows input hook stopped unexpectedly".into())
+                }
+            }
+            if reload_requested {
+                let reload_result: Result<_, Box<dyn Error>> = (|| {
+                    let (new_path, new_config) = load_config(&args)?;
+                    let new_hint_input = HintInput::new(&new_config).map_err(io::Error::other)?;
+                    let new_engine = InputEngine::new_with_macro_store(
+                        new_config.clone(),
+                        new_path.with_file_name("macros.toml"),
+                    )?;
+                    Ok((new_path, new_config, new_hint_input, new_engine))
+                })();
+                match reload_result {
+                    Ok((new_path, new_config, new_hint_input, new_engine)) => {
+                        if let Some(active) = hints.as_mut() {
+                            active.cancel(&mut overlay)?;
+                        }
+                        hints = None;
+                        overlay.set_indicator(None)?;
+                        emit(engine.release_all(), &mut odometer, &mut overlay)?;
+                        suppressed_keys.extend(held.iter().copied());
+                        held.clear();
+                        hint_input = new_hint_input;
+                        engine = new_engine;
+                        config = new_config;
+                        config_path = new_path;
+                        update_indicator(&mut overlay, &config, &engine)?;
+                        crate::notifications::config_reload(true);
+                    }
+                    Err(error) => {
+                        eprintln!("fievel: config reload failed: {error}");
+                        crate::notifications::config_reload(false);
+                    }
                 }
             }
             overlay.pump()?;

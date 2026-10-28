@@ -145,6 +145,10 @@ impl InputEngine {
         self.mouse.keycast_keys()
     }
 
+    pub fn key_is_held(&self, key: KeyCode) -> bool {
+        self.forwarded_keys.contains(&key)
+    }
+
     pub fn speed_mode(&self) -> crate::engine::SpeedMode {
         self.mouse.speed_mode()
     }
@@ -794,8 +798,23 @@ mod tests {
             for key in [first, second, K::KEY_SPACE] {
                 assert!(engine.key(key, 0).keyboard.is_empty());
             }
+
             assert_eq!(keys(&engine.key(K::KEY_Z, 1).keyboard), [(K::KEY_Z, 1)]);
         }
+    }
+
+    #[test]
+    fn remapped_super_is_tracked_as_logically_held() {
+        let config = Config::parse("[remap.main]\n'u+i' = 'super'").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        assert!(engine.key(K::KEY_U, 1).keyboard.is_empty());
+        assert_eq!(
+            keys(&engine.key(K::KEY_I, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1)]
+        );
+        assert!(engine.key_is_held(K::KEY_LEFTMETA));
+        engine.key(K::KEY_I, 0);
+        assert!(!engine.key_is_held(K::KEY_LEFTMETA));
     }
 
     #[test]

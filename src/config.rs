@@ -167,6 +167,8 @@ impl Default for Easing {
 pub struct Keys {
     #[serde(deserialize_with = "deserialize_chord")]
     pub free_mouse: Vec<K>,
+    #[serde(deserialize_with = "deserialize_chord")]
+    pub reload_config: Vec<K>,
     #[serde(deserialize_with = "deserialize_key")]
     pub toggle_hold: K,
     #[serde(deserialize_with = "deserialize_key")]
@@ -201,6 +203,7 @@ impl Default for Keys {
     fn default() -> Self {
         Self {
             free_mouse: vec![K::KEY_F3],
+            reload_config: vec![K::KEY_LEFTMETA, K::KEY_LEFTSHIFT, K::KEY_R],
             toggle_hold: K::KEY_Z,
             left: K::KEY_H,
             down: K::KEY_J,
@@ -588,6 +591,7 @@ fn reset_config_value(config: &mut Config, path: &str) -> bool {
         "easing.movement_stop" => config.easing.movement_stop = defaults.easing.movement_stop,
         "easing.scroll" => config.easing.scroll = defaults.easing.scroll,
         "keys.free_mouse" => config.keys.free_mouse = defaults.keys.free_mouse,
+        "keys.reload_config" => config.keys.reload_config = defaults.keys.reload_config,
         "keys.toggle_hold" => config.keys.toggle_hold = defaults.keys.toggle_hold,
         "keys.left" => config.keys.left = defaults.keys.left,
         "keys.down" => config.keys.down = defaults.keys.down,
@@ -954,6 +958,7 @@ impl Config {
                 table,
                 &[
                     "free_mouse",
+                    "reload_config",
                     "toggle_hold",
                     "left",
                     "down",
@@ -976,6 +981,13 @@ impl Config {
                 "free_mouse",
                 "keys.free_mouse",
                 &mut config.keys.free_mouse,
+                &mut changed,
+            );
+            apply_chord(
+                table,
+                "reload_config",
+                "keys.reload_config",
+                &mut config.keys.reload_config,
                 &mut changed,
             );
             apply_key(
@@ -1505,6 +1517,31 @@ impl Config {
             validate_speed(value).map_err(|error| format!("speeds.{name}: {error}"))?;
         }
         validate_chord("keys.free_mouse", &self.keys.free_mouse)?;
+        validate_chord("keys.reload_config", &self.keys.reload_config)?;
+        if !self
+            .keys
+            .reload_config
+            .iter()
+            .any(|key| !crate::reload::is_modifier(*key))
+        {
+            return Err("keys.reload_config must include a non-modifier key".to_owned());
+        }
+        for (name, chord) in [
+            ("keys.free_mouse", &self.keys.free_mouse),
+            ("hints.keys.left", &self.hints.keys.left),
+            ("hints.keys.right", &self.hints.keys.right),
+            ("hints.keys.grid", &self.hints.keys.grid),
+        ] {
+            validate_unique_chords("keys.reload_config", &self.keys.reload_config, name, chord)?;
+        }
+        if self.macros.enabled {
+            validate_unique_chords(
+                "keys.reload_config",
+                &self.keys.reload_config,
+                "macros.hotkey",
+                &self.macros.hotkey,
+            )?;
+        }
         validate_chord("hints.keys.left", &self.hints.keys.left)?;
         validate_chord("hints.keys.right", &self.hints.keys.right)?;
         validate_chord("hints.keys.grid", &self.hints.keys.grid)?;
@@ -1700,7 +1737,7 @@ fn validate_unique_chords(
     second_name: &str,
     second: &[K],
 ) -> Result<(), String> {
-    if first == second {
+    if first.len() == second.len() && first.iter().all(|key| second.contains(key)) {
         return Err(format!(
             "{first_name} and {second_name} both bind the same chord"
         ));
@@ -1874,6 +1911,41 @@ mod tests {
         let controls = Config::default().mouse_controls();
         assert!(controls.contains(&K::KEY_LEFTSHIFT));
         assert!(controls.contains(&K::KEY_RIGHTSHIFT));
+    }
+
+    #[test]
+    fn reload_config_chord_defaults_and_can_be_rebound() {
+        let default = vec![K::KEY_LEFTMETA, K::KEY_LEFTSHIFT, K::KEY_R];
+        assert_eq!(Config::default().keys.reload_config, default);
+        assert_eq!(Config::parse("").unwrap().keys.reload_config, default);
+        assert_eq!(
+            Config::parse("[keys]\nreload_config = 'rightmeta + f8'")
+                .unwrap()
+                .keys
+                .reload_config,
+            [K::KEY_RIGHTMETA, K::KEY_F8]
+        );
+        assert_eq!(
+            Config::parse("[keys]\nreload_config = 'f8 + f8'")
+                .unwrap()
+                .keys
+                .reload_config,
+            default
+        );
+        assert_eq!(
+            Config::parse("[keys]\nreload_config = 'space + leftmeta'")
+                .unwrap()
+                .keys
+                .reload_config,
+            default
+        );
+        assert_eq!(
+            Config::parse("[keys]\nreload_config = 'leftmeta + leftshift'")
+                .unwrap()
+                .keys
+                .reload_config,
+            default
+        );
     }
 
     #[test]

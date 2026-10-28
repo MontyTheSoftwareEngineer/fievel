@@ -9,8 +9,10 @@ mod input;
 mod keycast;
 mod label;
 mod macros;
+mod notifications;
 mod pipeline;
 mod remap;
+mod reload;
 
 #[cfg(target_os = "linux")]
 mod locator;
