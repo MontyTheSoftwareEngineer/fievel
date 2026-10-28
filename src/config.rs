@@ -12,6 +12,7 @@ use std::{
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub super_is_alt: bool,
     pub mode: Mode,
     pub notify: bool,
     pub home_end_enabled: bool,
@@ -58,7 +59,14 @@ fn is_letter_key(key: K) -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
+        Self::with_super_is_alt(cfg!(target_os = "windows"))
+    }
+}
+
+impl Config {
+    fn with_super_is_alt(super_is_alt: bool) -> Self {
+        let mut config = Self {
+            super_is_alt,
             mode: Mode::default(),
             notify: true,
             home_end_enabled: true,
@@ -69,7 +77,12 @@ impl Default for Config {
             macros: Macros::default(),
             hints: Hints::default(),
             remap: crate::remap::RemapConfig::default(),
+        };
+        config.remap.super_is_alt = super_is_alt;
+        if super_is_alt {
+            config.map_super_to_alt();
         }
+        config
     }
 }
 
@@ -572,7 +585,7 @@ fn remap_with_entry(
 }
 
 fn reset_config_value(config: &mut Config, path: &str) -> bool {
-    let defaults = Config::default();
+    let defaults = Config::with_super_is_alt(config.super_is_alt);
     match path {
         "mode" => config.mode = defaults.mode,
         "notify" => config.notify = defaults.notify,
@@ -777,6 +790,56 @@ pub fn validate_speed(speed: f64) -> Result<(), String> {
 }
 
 impl Config {
+    fn map_super_to_alt(&mut self) {
+        fn map_key(key: &mut K) {
+            *key = match *key {
+                K::KEY_LEFTMETA => K::KEY_LEFTALT,
+                K::KEY_RIGHTMETA => K::KEY_RIGHTALT,
+                key => key,
+            };
+        }
+        fn map_chord(chord: &mut [K]) {
+            for key in chord {
+                map_key(key);
+            }
+        }
+
+        map_chord(&mut self.macros.hotkey);
+        map_key(&mut self.keycast.hotkey);
+        map_chord(&mut self.keys.free_mouse);
+        map_chord(&mut self.keys.reload_config);
+        for key in [
+            &mut self.keys.toggle_hold,
+            &mut self.keys.left,
+            &mut self.keys.down,
+            &mut self.keys.up,
+            &mut self.keys.right,
+            &mut self.keys.left_click,
+            &mut self.keys.right_click,
+            &mut self.keys.scroll_left,
+            &mut self.keys.scroll_down,
+            &mut self.keys.scroll_up,
+            &mut self.keys.scroll_right,
+            &mut self.keys.slow,
+            &mut self.keys.fast,
+            &mut self.keys.locate,
+            &mut self.hints.keys.grid_upper_left,
+            &mut self.hints.keys.grid_upper_right,
+            &mut self.hints.keys.grid_lower_left,
+            &mut self.hints.keys.grid_lower_right,
+            &mut self.hints.keys.grid_left_click,
+            &mut self.hints.keys.grid_right_click,
+            &mut self.hints.keys.cancel,
+            &mut self.hints.keys.toggle_background,
+            &mut self.hints.keys.debug,
+        ] {
+            map_key(key);
+        }
+        map_chord(&mut self.hints.keys.left);
+        map_chord(&mut self.hints.keys.right);
+        map_chord(&mut self.hints.keys.grid);
+    }
+
     pub fn mouse_controls(&self) -> Vec<K> {
         let mut controls = self.keys.controls().to_vec();
         controls.push(self.keys.locate);
@@ -792,12 +855,24 @@ impl Config {
         let root = value
             .as_table()
             .expect("a TOML document deserializes to a table");
-        let mut config = Self::default();
+        let default_super_is_alt = cfg!(target_os = "windows");
+        let super_is_alt = match root.get("super_is_alt") {
+            Some(value) => match parse_toml_value::<bool>(value) {
+                Ok(value) => value,
+                Err(error) => {
+                    warn_invalid_config_value("super_is_alt", &error);
+                    default_super_is_alt
+                }
+            },
+            None => default_super_is_alt,
+        };
+        let mut config = Self::with_super_is_alt(super_is_alt);
         let mut changed = HashSet::new();
 
         warn_unknown_fields(
             root,
             &[
+                "super_is_alt",
                 "mode",
                 "notify",
                 "home_end_enabled",
@@ -1330,6 +1405,7 @@ impl Config {
         if let Some(table) = config_section(root, "remap", "remap") {
             warn_unknown_fields(table, &["chord_timeout", "main", "layers"], "remap");
             let mut remap = crate::remap::RemapConfig::default();
+            remap.super_is_alt = config.super_is_alt;
             apply_parsed(
                 table,
                 "chord_timeout",
@@ -1422,6 +1498,11 @@ impl Config {
             config.remap = remap;
             changed.insert("remap".to_owned());
         }
+
+        if config.super_is_alt {
+            config.map_super_to_alt();
+        }
+        config.remap.super_is_alt = config.super_is_alt;
 
         if let Err(error) = config.remap.validate() {
             eprintln!("Warning: invalid config value remap: {error}; skipping remapping settings");
@@ -1790,6 +1871,22 @@ fn validate_limits(min: u32, max: u32, axis: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
+    fn configured_super() -> K {
+        if cfg!(target_os = "windows") {
+            K::KEY_LEFTALT
+        } else {
+            K::KEY_LEFTMETA
+        }
+    }
+
+    fn configured_right_super() -> K {
+        if cfg!(target_os = "windows") {
+            K::KEY_RIGHTALT
+        } else {
+            K::KEY_RIGHTMETA
+        }
+    }
+
     #[test]
     fn link_detection_is_not_configurable() {
         assert!(Config::parse("").is_ok());
@@ -1930,7 +2027,7 @@ mod tests {
 
     #[test]
     fn reload_config_chord_defaults_and_can_be_rebound() {
-        let default = vec![K::KEY_LEFTMETA, K::KEY_LEFTSHIFT, K::KEY_R];
+        let default = vec![configured_super(), K::KEY_LEFTSHIFT, K::KEY_R];
         assert_eq!(Config::default().keys.reload_config, default);
         assert_eq!(Config::parse("").unwrap().keys.reload_config, default);
         assert_eq!(
@@ -1938,7 +2035,7 @@ mod tests {
                 .unwrap()
                 .keys
                 .reload_config,
-            [K::KEY_RIGHTMETA, K::KEY_F8]
+            [configured_right_super(), K::KEY_F8]
         );
         assert_eq!(
             Config::parse("[keys]\nreload_config = 'f8 + f8'")
@@ -2064,7 +2161,7 @@ mod tests {
         assert_eq!(config.keys.left, K::KEY_W);
         assert_eq!(config.keys.locate, K::KEY_Q);
         assert_eq!(config.keys.scroll_up, K::KEY_COMMA);
-        assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTMETA, K::KEY_J]);
+        assert_eq!(config.hints.keys.left, vec![configured_super(), K::KEY_J]);
         Config::parse("").unwrap();
     }
 
@@ -2086,7 +2183,7 @@ mod tests {
 
         let config = Config::parse("notify = false\n[hints.keys]\nleft = 'f8'").unwrap();
         assert!(!config.notify);
-        assert_eq!(config.hints.keys.left, HintKeys::default().left);
+        assert_eq!(config.hints.keys.left, [configured_super(), K::KEY_SPACE]);
     }
 
     #[test]
@@ -2144,12 +2241,12 @@ mod tests {
              [hints.keys]\nleft = 'command + space'\ntoggle_background = 'option'",
         )
         .unwrap();
-        assert_eq!(config.macros.hotkey, [K::KEY_LEFTMETA, K::KEY_E]);
+        assert_eq!(config.macros.hotkey, [configured_super(), K::KEY_E]);
         assert_eq!(
             config.keys.reload_config,
             [K::KEY_LEFTCTRL, K::KEY_LEFTSHIFT, K::KEY_R]
         );
-        assert_eq!(config.hints.keys.left, [K::KEY_LEFTMETA, K::KEY_SPACE]);
+        assert_eq!(config.hints.keys.left, [configured_super(), K::KEY_SPACE]);
         assert_eq!(config.hints.keys.toggle_background, K::KEY_LEFTALT);
 
         for (alias, key) in [
@@ -2172,7 +2269,7 @@ mod tests {
     #[test]
     fn activation_chords_accept_spaces_case_and_overlapping_controls() {
         let config = Config::parse(
-            "[keys]\nfree_mouse = ' LeftAlt + KEY_SPACE '\n[hints.keys]\nleft = ' LeftMeta + space '\nright = 'leftmeta+KEY_I'",
+            "super_is_alt = false\n[keys]\nfree_mouse = ' LeftAlt + KEY_SPACE '\n[hints.keys]\nleft = ' LeftMeta + space '\nright = 'leftmeta+KEY_I'",
         )
         .unwrap();
         assert_eq!(config.keys.free_mouse, vec![K::KEY_LEFTALT, K::KEY_SPACE]);
@@ -2186,9 +2283,12 @@ mod tests {
     fn hint_defaults_and_validation_cover_symbols_sizes_and_conflicts() {
         let config = Config::parse("").unwrap();
         assert!(!config.hints.recursive_grid_enabled);
-        assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTMETA, K::KEY_SPACE]);
-        assert_eq!(config.hints.keys.right, vec![K::KEY_LEFTMETA, K::KEY_I]);
-        assert_eq!(config.hints.keys.grid, vec![K::KEY_LEFTMETA, K::KEY_G]);
+        assert_eq!(
+            config.hints.keys.left,
+            vec![configured_super(), K::KEY_SPACE]
+        );
+        assert_eq!(config.hints.keys.right, vec![configured_super(), K::KEY_I]);
+        assert_eq!(config.hints.keys.grid, vec![configured_super(), K::KEY_G]);
         assert_eq!(config.hints.keys.grid_upper_left, K::KEY_U);
         assert_eq!(config.hints.keys.grid_upper_right, K::KEY_I);
         assert_eq!(config.hints.keys.grid_lower_left, K::KEY_J);
@@ -2259,11 +2359,44 @@ mod tests {
     }
 
     #[test]
+    fn super_is_alt_defaults_on_windows_and_maps_custom_bindings() {
+        assert_eq!(Config::default().super_is_alt, cfg!(target_os = "windows"));
+        let config = Config::parse(
+            "super_is_alt = true\n\
+             [macros]\nhotkey = 'super + e'\n\
+             [keys]\nreload_config = 'rightmeta + shift + r'\n\
+             [hints.keys]\nleft = 'meta + space'\n\
+             [remap.main]\nsuper = 'rightmeta'",
+        )
+        .unwrap();
+        assert!(config.super_is_alt);
+        assert_eq!(config.macros.hotkey, [K::KEY_LEFTALT, K::KEY_E]);
+        assert_eq!(
+            config.keys.reload_config,
+            [K::KEY_RIGHTALT, K::KEY_LEFTSHIFT, K::KEY_R]
+        );
+        assert_eq!(config.hints.keys.left, [K::KEY_LEFTALT, K::KEY_SPACE]);
+        assert_eq!(config.remap.input_keys().unwrap(), [K::KEY_LEFTALT]);
+        assert_eq!(config.remap.output_keys().unwrap(), [K::KEY_RIGHTALT]);
+
+        let config = Config::parse(
+            "super_is_alt = false\n\
+             [keys]\nreload_config = 'rightmeta + f8'\n\
+             [remap.main]\nsuper = 'rightmeta'",
+        )
+        .unwrap();
+        assert!(!config.super_is_alt);
+        assert_eq!(config.keys.reload_config, [K::KEY_RIGHTMETA, K::KEY_F8]);
+        assert_eq!(config.remap.input_keys().unwrap(), [K::KEY_LEFTMETA]);
+        assert_eq!(config.remap.output_keys().unwrap(), [K::KEY_RIGHTMETA]);
+    }
+
+    #[test]
     fn recursive_grid_and_macros_are_opt_in() {
         let defaults = Config::parse("").unwrap();
         assert!(!defaults.hints.recursive_grid_enabled);
         assert!(!defaults.macros.enabled);
-        assert_eq!(defaults.macros.hotkey, [K::KEY_LEFTMETA, K::KEY_E]);
+        assert_eq!(defaults.macros.hotkey, [configured_super(), K::KEY_E]);
 
         let enabled =
             Config::parse("[hints]\nrecursive_grid_enabled = true\n[macros]\nenabled = true")

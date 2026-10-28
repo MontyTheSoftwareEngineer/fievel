@@ -121,10 +121,7 @@ impl InputEngine {
         })
     }
 
-    pub fn new_with_macro_store(
-        config: Config,
-        path: impl Into<PathBuf>,
-    ) -> Result<Self, String> {
+    pub fn new_with_macro_store(config: Config, path: impl Into<PathBuf>) -> Result<Self, String> {
         let macros_enabled = config.macros.enabled;
         let mut engine = Self::new(config)?;
         if macros_enabled {
@@ -168,10 +165,7 @@ impl InputEngine {
             self.process_key(key, value, &mut output);
             return output;
         }
-        if self
-            .hints
-            .would_activate(key, value, !self.mouse.active())
-        {
+        if self.hints.would_activate(key, value, !self.mouse.active()) {
             let mut output = Output::default();
             for (key, value) in self.macro_hotkey.forward_for_hint(key, value) {
                 self.process_key(key, value, &mut output);
@@ -362,12 +356,7 @@ fn dispatch(
                 match result {
                     HotkeyResult::Buffered => {
                         for (key, value) in macro_hotkey.forward_buffered() {
-                            dispatch_unbuffered(
-                                mouse,
-                                hints,
-                                output,
-                                Event::Key(key, value),
-                            );
+                            dispatch_unbuffered(mouse, hints, output, Event::Key(key, value));
                         }
                         return false;
                     }
@@ -431,10 +420,18 @@ mod tests {
     use crate::input::{InputEvent, KeyCode as K, RelativeAxisCode as R};
 
     fn config() -> Config {
-        let mut config = Config::parse(include_str!("../fievel.config")).unwrap();
+        let mut config = legacy_config(include_str!("../fievel.config")).unwrap();
         config.easing.movement = 0.0;
         config.easing.scroll = 0.0;
         config
+    }
+
+    fn legacy_config(text: &str) -> Result<Config, Box<dyn std::error::Error>> {
+        Config::parse(&format!("super_is_alt = false\n{text}"))
+    }
+
+    fn default_config() -> Config {
+        Config::parse("super_is_alt = false").unwrap()
     }
 
     fn keys(events: &[InputEvent]) -> Vec<(K, i32)> {
@@ -460,7 +457,7 @@ mod tests {
 
     #[test]
     fn macro_hotkey_records_and_replays_typed_input() {
-        let config = Config::parse("[macros]\nenabled = true").unwrap();
+        let config = legacy_config("[macros]\nenabled = true").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
 
         assert!(macro_shortcut(&mut engine).keyboard.is_empty());
@@ -481,16 +478,13 @@ mod tests {
         engine.key(K::KEY_P, 1);
         engine.key(K::KEY_P, 0);
         let played = engine.key(K::KEY_A, 1);
-        assert_eq!(
-            keys(&played.keyboard),
-            [(K::KEY_B, 1), (K::KEY_B, 0)]
-        );
+        assert_eq!(keys(&played.keyboard), [(K::KEY_B, 1), (K::KEY_B, 0)]);
     }
 
     #[test]
     fn remapped_super_can_activate_macro_hotkey() {
         let config =
-            Config::parse("[macros]\nenabled = true\n[remap.main]\n'a+s' = 'super'").unwrap();
+            legacy_config("[macros]\nenabled = true\n[remap.main]\n'a+s' = 'super'").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
 
         assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
@@ -508,9 +502,19 @@ mod tests {
     }
 
     #[test]
+    fn super_is_alt_uses_alt_for_macro_hotkey() {
+        let config = Config::parse("super_is_alt = true\n[macros]\nenabled = true").unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+
+        assert!(engine.key(K::KEY_LEFTALT, 1).keyboard.is_empty());
+        assert!(engine.key(K::KEY_E, 1).keyboard.is_empty());
+        assert!(engine.macro_status().unwrap().contains("R RECORD"));
+    }
+
+    #[test]
     fn remapped_escape_closes_macro_menu() {
-        let config = Config::parse("[remap.main]\n'a+s' = 'escape'\n[macros]\nenabled = true")
-            .unwrap();
+        let config =
+            legacy_config("[remap.main]\n'a+s' = 'escape'\n[macros]\nenabled = true").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
 
         macro_shortcut(&mut engine);
@@ -524,8 +528,8 @@ mod tests {
 
     #[test]
     fn opening_macro_mode_releases_held_remapped_keys() {
-        let config = Config::parse("[remap.main]\n'a+s' = 'ctrl'\n[macros]\nenabled = true")
-            .unwrap();
+        let config =
+            legacy_config("[remap.main]\n'a+s' = 'ctrl'\n[macros]\nenabled = true").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
         assert_eq!(
@@ -550,7 +554,8 @@ mod tests {
             "[keycast]\nenabled = true\nhotkey = 'f8'\n\
              [keys]\nup = 'u'\n\
              [remap.main]\n'd+f' = 'free_mouse'\nf8 = 'escape'\nu = 'left'",
-        ).unwrap();
+        )
+        .unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         assert_eq!(keys(&engine.key(K::KEY_F8, 1).keyboard), [(K::KEY_ESC, 1)]);
         assert_eq!(keys(&engine.key(K::KEY_F8, 0).keyboard), [(K::KEY_ESC, 0)]);
@@ -575,7 +580,7 @@ mod tests {
 
     #[test]
     fn cursor_locator_binding_survives_the_input_pipeline() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
+        let mut engine = InputEngine::new(default_config()).unwrap();
         engine.key(K::KEY_F3, 1);
         let output = engine.key(K::KEY_Q, 1);
         assert!(output.locate);
@@ -586,10 +591,8 @@ mod tests {
     #[test]
     fn hint_shortcuts_are_disabled_in_mouse_mode_and_preserve_keycast_toggle() {
         for mode in ["hold", "toggle"] {
-            let config = Config::parse(&format!(
-                "mode = '{mode}'\n[keycast]\nenabled = true",
-            ))
-            .unwrap();
+            let config =
+                legacy_config(&format!("mode = '{mode}'\n[keycast]\nenabled = true",)).unwrap();
             let mut engine = InputEngine::new(config).unwrap();
             engine.key(K::KEY_F3, 1);
             engine.key(K::KEY_ESC, 1);
@@ -623,7 +626,10 @@ mod tests {
                 [(K::KEY_LEFTMETA, 1), (K::KEY_LEFTMETA, 0)]
             );
             assert!(output.mouse.is_empty());
-            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
+            assert_eq!(
+                engine.take_hint_request(),
+                Some(HintRequest::Click(ClickKind::Left))
+            );
             assert!(!engine.active());
             assert!(engine.keycast_keys().is_empty());
             assert_eq!(engine.speed_mode(), crate::engine::SpeedMode::Normal);
@@ -649,7 +655,10 @@ mod tests {
             assert!(!engine.active());
             engine.key(K::KEY_LEFTMETA, 1);
             engine.key(K::KEY_I, 1);
-            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Right)));
+            assert_eq!(
+                engine.take_hint_request(),
+                Some(HintRequest::Click(ClickKind::Right))
+            );
             assert!(!engine.active());
             engine.key(K::KEY_F3, 0);
             engine.key(K::KEY_L, 0);
@@ -667,7 +676,7 @@ mod tests {
             (K::KEY_SPACE, ClickKind::Left),
             (K::KEY_I, ClickKind::Right),
         ] {
-            let mut engine = InputEngine::new(Config::default()).unwrap();
+            let mut engine = InputEngine::new(default_config()).unwrap();
             assert!(engine.key(K::KEY_LEFTMETA, 1).keyboard.is_empty());
             let output = engine.key(key, 1);
             assert_eq!(
@@ -687,11 +696,8 @@ mod tests {
 
     #[test]
     fn grid_shortcut_activates_in_either_press_order() {
-        for keys_pressed in [
-            [K::KEY_LEFTMETA, K::KEY_G],
-            [K::KEY_G, K::KEY_LEFTMETA],
-        ] {
-            let config = Config::parse("[hints]\nrecursive_grid_enabled = true").unwrap();
+        for keys_pressed in [[K::KEY_LEFTMETA, K::KEY_G], [K::KEY_G, K::KEY_LEFTMETA]] {
+            let config = legacy_config("[hints]\nrecursive_grid_enabled = true").unwrap();
             let mut engine = InputEngine::new(config).unwrap();
             for key in keys_pressed {
                 let output = engine.key(key, 1);
@@ -704,7 +710,7 @@ mod tests {
 
     #[test]
     fn recursive_grid_shortcut_is_passthrough_by_default() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
+        let mut engine = InputEngine::new(default_config()).unwrap();
         assert!(engine.key(K::KEY_LEFTMETA, 1).keyboard.is_empty());
         assert_eq!(
             keys(&engine.key(K::KEY_G, 1).keyboard),
@@ -715,16 +721,13 @@ mod tests {
 
     #[test]
     fn macro_hotkey_is_passthrough_by_default() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
+        let mut engine = InputEngine::new(default_config()).unwrap();
         assert!(engine.key(K::KEY_LEFTMETA, 1).keyboard.is_empty());
         assert_eq!(
             keys(&engine.key(K::KEY_E, 1).keyboard),
             [(K::KEY_LEFTMETA, 1), (K::KEY_E, 1)]
         );
-        assert_eq!(
-            keys(&engine.key(K::KEY_E, 0).keyboard),
-            [(K::KEY_E, 0)]
-        );
+        assert_eq!(keys(&engine.key(K::KEY_E, 0).keyboard), [(K::KEY_E, 0)]);
         assert_eq!(
             keys(&engine.key(K::KEY_LEFTMETA, 0).keyboard),
             [(K::KEY_LEFTMETA, 0)]
@@ -734,7 +737,7 @@ mod tests {
 
     #[test]
     fn remapped_macro_hotkey_is_passthrough_by_default() {
-        let config = Config::parse("[remap.main]\n'a+s' = 'super'").unwrap();
+        let config = legacy_config("[remap.main]\n'a+s' = 'super'").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         assert!(engine.key(K::KEY_A, 1).keyboard.is_empty());
         assert_eq!(
@@ -751,7 +754,7 @@ mod tests {
 
     #[test]
     fn hint_shortcuts_do_not_intercept_mouse_clicks_in_free_mouse_mode() {
-        let config = Config::parse("[remap.main]\n'd+f' = 'free_mouse'\n'e+r' = 'super'").unwrap();
+        let config = legacy_config("[remap.main]\n'd+f' = 'free_mouse'\n'e+r' = 'super'").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         engine.key(K::KEY_D, 1);
         engine.key(K::KEY_F, 1);
@@ -794,7 +797,10 @@ mod tests {
             let output = engine.key(K::KEY_SPACE, 1);
             assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
             assert!(output.mouse.is_empty());
-            assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
+            assert_eq!(
+                engine.take_hint_request(),
+                Some(HintRequest::Click(ClickKind::Left))
+            );
             for key in [first, second, K::KEY_SPACE] {
                 assert!(engine.key(key, 0).keyboard.is_empty());
             }
@@ -805,7 +811,7 @@ mod tests {
 
     #[test]
     fn remapped_super_is_tracked_as_logically_held() {
-        let config = Config::parse("[remap.main]\n'u+i' = 'super'").unwrap();
+        let config = legacy_config("[remap.main]\n'u+i' = 'super'").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
         assert!(engine.key(K::KEY_U, 1).keyboard.is_empty());
         assert_eq!(
@@ -826,17 +832,23 @@ mod tests {
         assert_eq!(engine.take_hint_request(), None);
         let output = engine.advance(Duration::from_millis(30));
         assert_eq!(keys(&output.keyboard), [(K::KEY_LEFTMETA, 0)]);
-        assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Right)));
+        assert_eq!(
+            engine.take_hint_request(),
+            Some(HintRequest::Click(ClickKind::Right))
+        );
         assert!(engine.release_all().keyboard.is_empty());
     }
 
     #[test]
     fn hint_shortcuts_accept_reverse_order_and_custom_remapped_modifiers() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
+        let mut engine = InputEngine::new(default_config()).unwrap();
         engine.key(K::KEY_SPACE, 1);
         let output = engine.key(K::KEY_LEFTMETA, 1);
         assert_eq!(keys(&output.keyboard), [(K::KEY_SPACE, 0)]);
-        assert_eq!(engine.take_hint_request(), Some(HintRequest::Click(ClickKind::Left)));
+        assert_eq!(
+            engine.take_hint_request(),
+            Some(HintRequest::Click(ClickKind::Left))
+        );
 
         let config =
             Config::parse("[hints.keys]\nleft = 'leftctrl+space'\n[remap.main]\n'a+s' = 'ctrl'")
@@ -1127,7 +1139,7 @@ mod tests {
 
     #[test]
     fn empty_remapping_preserves_existing_mouse_and_keyboard_behavior() {
-        let mut engine = InputEngine::new(Config::default()).unwrap();
+        let mut engine = InputEngine::new(default_config()).unwrap();
         assert_eq!(keys(&engine.key(K::KEY_A, 1).keyboard), [(K::KEY_A, 1)]);
         assert_eq!(keys(&engine.key(K::KEY_A, 2).keyboard), [(K::KEY_A, 2)]);
         assert_eq!(keys(&engine.key(K::KEY_A, 0).keyboard), [(K::KEY_A, 0)]);
