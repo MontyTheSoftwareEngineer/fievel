@@ -962,6 +962,25 @@ bool fievel_send_key(uint16_t keycode, int value) {
     }
     CGEventRef event = CGEventCreateKeyboardEvent(source, keycode, down);
     if (event != NULL) {
+        CGEventFlags modifier_mask =
+            kCGEventFlagMaskShift |
+            kCGEventFlagMaskControl |
+            kCGEventFlagMaskAlternate |
+            kCGEventFlagMaskCommand;
+        CGEventFlags flags = CGEventGetFlags(event) & ~modifier_mask;
+        if (posted_keys[56] || posted_keys[60]) {
+            flags |= kCGEventFlagMaskShift;
+        }
+        if (posted_keys[59] || posted_keys[62]) {
+            flags |= kCGEventFlagMaskControl;
+        }
+        if (posted_keys[58] || posted_keys[61]) {
+            flags |= kCGEventFlagMaskAlternate;
+        }
+        if (posted_keys[55] || posted_keys[54]) {
+            flags |= kCGEventFlagMaskCommand;
+        }
+        CGEventSetFlags(event, flags);
         CGEventSetIntegerValueField(event, kCGEventSourceUserData, event_marker);
         CGEventSetIntegerValueField(event, kCGKeyboardEventAutorepeat, value == 2 ? 1 : 0);
         CGEventPost(kCGHIDEventTap, event);
