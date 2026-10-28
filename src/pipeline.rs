@@ -427,11 +427,11 @@ mod tests {
     }
 
     fn legacy_config(text: &str) -> Result<Config, Box<dyn std::error::Error>> {
-        Config::parse(&format!("super_is_alt = false\n{text}"))
+        Config::parse(&format!("win_super_is_alt = false\n{text}"))
     }
 
     fn default_config() -> Config {
-        Config::parse("super_is_alt = false").unwrap()
+        Config::parse("win_super_is_alt = false").unwrap()
     }
 
     fn keys(events: &[InputEvent]) -> Vec<(K, i32)> {
@@ -502,8 +502,9 @@ mod tests {
     }
 
     #[test]
-    fn super_is_alt_uses_alt_for_macro_hotkey() {
-        let config = Config::parse("super_is_alt = true\n[macros]\nenabled = true").unwrap();
+    #[cfg(target_os = "windows")]
+    fn win_super_is_alt_uses_alt_for_macro_hotkey() {
+        let config = Config::parse("win_super_is_alt = true\n[macros]\nenabled = true").unwrap();
         let mut engine = InputEngine::new(config).unwrap();
 
         assert!(engine.key(K::KEY_LEFTALT, 1).keyboard.is_empty());

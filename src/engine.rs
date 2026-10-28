@@ -1931,7 +1931,7 @@ mod tests {
         ] {
             for release_first in [first, second] {
                 let config =
-                    Config::parse("super_is_alt = false\n[keys]\nfree_mouse = 'leftalt + space'")
+                    Config::parse("win_super_is_alt = false\n[keys]\nfree_mouse = 'leftalt + space'")
                         .unwrap();
                 let mut e = Engine::new(config);
                 assert_eq!(e.key(first, 1).keyboard.len(), 1);
@@ -1976,7 +1976,7 @@ mod tests {
     #[test]
     fn toggle_chord_reserves_members_until_release_and_can_be_repressed() {
         let config = Config::parse(
-            "super_is_alt = false\nmode = 'toggle'\n[keys]\nfree_mouse = 'leftalt+space'",
+            "win_super_is_alt = false\nmode = 'toggle'\n[keys]\nfree_mouse = 'leftalt+space'",
         )
         .unwrap();
         let mut e = Engine::new(config);

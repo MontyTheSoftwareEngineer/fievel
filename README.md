@@ -403,7 +403,7 @@ The built-in defaults below do not enable remappings. The bundled
 mappings described below.
 
 ```toml
-# super_is_alt = false # Windows defaults this to true; set false to keep Super bindings
+win_super_is_alt = true # Windows-only; defaults to true, set false to keep Super bindings
 mode = "hold" # "hold" (default) or "toggle"
 notify = true # Persistent, faint Free Mouse Mode indicator
 home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
