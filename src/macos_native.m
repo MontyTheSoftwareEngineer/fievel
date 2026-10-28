@@ -64,6 +64,13 @@ static NSWindow *overlay_window;
 static NSView *overlay_view;
 static NSStatusItem *menu_bar_status_item;
 static NSImage *menu_bar_icon;
+static NSMenuItem *fievel_odometer_item;
+static NSMenuItem *physical_odometer_item;
+static NSMenuItem *config_status_item;
+static NSMenuItem *config_path_item;
+static bool menu_exit_requested;
+static bool menu_reload_requested;
+static NSString *fievel_config_path;
 static NSArray<NSDictionary *> *hint_items;
 static bool hints_hidden;
 static bool indicator_visible;
@@ -88,6 +95,49 @@ static bool posted_keys[256];
 static bool posted_buttons[2];
 static bool exit_cleanup_registered;
 static void fievel_release_posted_inputs(void);
+
+@interface FievelMenuTarget : NSObject
+- (void)requestExit:(id)sender;
+- (void)reloadConfig:(id)sender;
+- (void)openConfigLocation:(id)sender;
+@end
+
+@implementation FievelMenuTarget
+- (void)requestExit:(id)sender {
+    (void)sender;
+    menu_exit_requested = true;
+}
+
+- (void)reloadConfig:(id)sender {
+    (void)sender;
+    menu_reload_requested = true;
+}
+
+- (void)openConfigLocation:(id)sender {
+    (void)sender;
+    NSString *directory = [fievel_config_path stringByDeletingLastPathComponent];
+    NSFileManager *file_manager = NSFileManager.defaultManager;
+    BOOL is_directory = NO;
+    while (directory.length > 1 &&
+        ![file_manager fileExistsAtPath:directory isDirectory:&is_directory]) {
+        NSString *parent = [directory stringByDeletingLastPathComponent];
+        if ([parent isEqualToString:directory]) {
+            break;
+        }
+        directory = parent;
+    }
+    NSURL *url = [NSURL fileURLWithPath:directory isDirectory:YES];
+    if (![NSWorkspace.sharedWorkspace openURL:url]) {
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Could not open config location";
+        alert.informativeText = directory;
+        [alert addButtonWithTitle:@"OK"];
+        [alert runModal];
+    }
+}
+@end
+
+static FievelMenuTarget *menu_target;
 
 @interface FievelOverlayView : NSView
 @end
@@ -198,6 +248,55 @@ static bool fievel_ui_set_menu_bar_image(NSImage *image) {
     status_button.image = image;
     status_button.imageScaling = NSImageScaleProportionallyDown;
     status_button.toolTip = @"Fievel is running";
+    if (menu_bar_status_item.menu == nil) {
+        NSMenu *menu = [[NSMenu alloc] initWithTitle:@"Fievel"];
+        fievel_odometer_item = [[NSMenuItem alloc]
+            initWithTitle:@"Fievel: 0.000000 miles (estimated)"
+            action:nil
+            keyEquivalent:@""];
+        fievel_odometer_item.enabled = NO;
+        [menu addItem:fievel_odometer_item];
+        physical_odometer_item = [[NSMenuItem alloc]
+            initWithTitle:@"Physical mouse/trackpad: 0.000000 miles (estimated)"
+            action:nil
+            keyEquivalent:@""];
+        physical_odometer_item.enabled = NO;
+        [menu addItem:physical_odometer_item];
+        [menu addItem:[NSMenuItem separatorItem]];
+        menu_target = [[FievelMenuTarget alloc] init];
+        config_status_item = [[NSMenuItem alloc]
+            initWithTitle:@"Config: status unavailable"
+            action:nil
+            keyEquivalent:@""];
+        config_status_item.enabled = NO;
+        [menu addItem:config_status_item];
+        config_path_item = [[NSMenuItem alloc]
+            initWithTitle:@""
+            action:nil
+            keyEquivalent:@""];
+        config_path_item.enabled = NO;
+        [menu addItem:config_path_item];
+        NSMenuItem *open_config_item = [[NSMenuItem alloc]
+            initWithTitle:@"Open Config Location"
+            action:@selector(openConfigLocation:)
+            keyEquivalent:@""];
+        open_config_item.target = menu_target;
+        [menu addItem:open_config_item];
+        NSMenuItem *reload_config_item = [[NSMenuItem alloc]
+            initWithTitle:@"Reload Config"
+            action:@selector(reloadConfig:)
+            keyEquivalent:@""];
+        reload_config_item.target = menu_target;
+        [menu addItem:reload_config_item];
+        [menu addItem:[NSMenuItem separatorItem]];
+        NSMenuItem *quit_item = [[NSMenuItem alloc]
+            initWithTitle:@"Quit Fievel"
+            action:@selector(requestExit:)
+            keyEquivalent:@""];
+        quit_item.target = menu_target;
+        [menu addItem:quit_item];
+        menu_bar_status_item.menu = menu;
+    }
     return true;
 }
 
@@ -259,6 +358,61 @@ bool fievel_ui_init(const uint8_t *icon_data, size_t icon_size) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
         return fievel_ui_set_menu_bar_image(menu_bar_icon);
+    }
+}
+
+void fievel_ui_set_odometer_stats(double fievel_miles, double physical_miles) {
+    @autoreleasepool {
+        fievel_odometer_item.title = [NSString stringWithFormat:
+            @"Fievel: %.6f miles (estimated)", fievel_miles];
+        physical_odometer_item.title = [NSString stringWithFormat:
+            @"Physical mouse/trackpad: %.6f miles (estimated)", physical_miles];
+    }
+}
+
+void fievel_ui_set_config_status(const char *path, int status) {
+    @autoreleasepool {
+        fievel_config_path = path == NULL ? nil : [NSString stringWithUTF8String:path];
+        config_status_item.title = status == 1
+            ? @"Config: loaded"
+            : status == 2
+                ? @"Reload failed; previous config retained"
+                : status == 3
+                    ? @"Config: reloaded"
+                    : status == 4
+                        ? @"Config: defaults reloaded"
+                        : @"Config: defaults (file not found)";
+        config_path_item.title = [fievel_config_path stringByAbbreviatingWithTildeInPath] ?: @"";
+    }
+}
+
+bool fievel_ui_reload_requested(void) {
+    bool requested = menu_reload_requested;
+    menu_reload_requested = false;
+    return requested;
+}
+
+bool fievel_ui_exit_requested(void) {
+    return menu_exit_requested;
+}
+
+bool fievel_ui_is_app_bundle(void) {
+    @autoreleasepool {
+        return [NSBundle.mainBundle.bundleURL.pathExtension isEqualToString:@"app"];
+    }
+}
+
+void fievel_ui_show_error(const char *message) {
+    @autoreleasepool {
+        [NSApplication sharedApplication];
+        [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+        NSAlert *alert = [[NSAlert alloc] init];
+        alert.messageText = @"Fievel could not start";
+        NSString *details = message == NULL ? nil : [NSString stringWithUTF8String:message];
+        alert.informativeText = details ?: @"An unexpected startup error occurred.";
+        [alert addButtonWithTitle:@"OK"];
+        [NSApp activateIgnoringOtherApps:YES];
+        [alert runModal];
     }
 }
 
@@ -630,9 +784,15 @@ static void *fievel_event_thread_main(void *unused) {
     return NULL;
 }
 
-bool fievel_input_start(void) {
+int fievel_input_start(void) {
     if (!fievel_request_input_permissions()) {
-        return false;
+        if (!CGPreflightListenEventAccess()) {
+            return 1;
+        }
+        if (!CGPreflightPostEventAccess()) {
+            return 2;
+        }
+        return 7;
     }
     if (!exit_cleanup_registered) {
         atexit(fievel_release_posted_inputs);
@@ -658,20 +818,20 @@ bool fievel_input_start(void) {
         NULL
     );
     if (event_tap == NULL) {
-        return false;
+        return 3;
     }
     event_source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, event_tap, 0);
     if (event_source == NULL) {
         CFRelease(event_tap);
         event_tap = NULL;
-        return false;
+        return 4;
     }
     if (pthread_create(&event_thread, NULL, fievel_event_thread_main, NULL) != 0) {
         CFRelease(event_source);
         CFRelease(event_tap);
         event_source = NULL;
         event_tap = NULL;
-        return false;
+        return 5;
     }
     pthread_mutex_lock(&event_lock);
     while (!event_thread_ready) {
@@ -680,10 +840,10 @@ bool fievel_input_start(void) {
     bool started = !event_thread_failed;
     pthread_mutex_unlock(&event_lock);
     if (!started) {
-        return false;
+        return 6;
     }
     CGEventTapEnable(event_tap, true);
-    return true;
+    return 0;
 }
 
 bool fievel_input_next(FievelInputEvent *out, uint32_t wait_millis) {

@@ -12,9 +12,9 @@ use evdev::{EventType, KeyCode as K, RelativeAxisCode as R};
 use std::{
     collections::BTreeSet,
     error::Error,
-    ffi::c_void,
+    ffi::{c_void, CString},
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -84,7 +84,7 @@ impl Drop for NativeInputEventGuard {
 }
 
 unsafe extern "C" {
-    fn fievel_input_start() -> bool;
+    fn fievel_input_start() -> i32;
     fn fievel_input_next(event: *mut NativeInputEvent, wait_millis: u32) -> bool;
     fn fievel_input_release(event: *mut NativeInputEvent);
     fn fievel_input_repost(event: *mut NativeInputEvent);
@@ -93,6 +93,12 @@ unsafe extern "C" {
     fn fievel_mouse_button(right: bool, down: bool) -> bool;
     fn fievel_scroll(vertical: i32, horizontal: i32) -> bool;
     fn fievel_ui_pump();
+    fn fievel_ui_set_odometer_stats(fievel_miles: f64, physical_miles: f64);
+    fn fievel_ui_set_config_status(path: *const std::ffi::c_char, status: i32);
+    fn fievel_ui_reload_requested() -> bool;
+    fn fievel_ui_exit_requested() -> bool;
+    fn fievel_ui_is_app_bundle() -> bool;
+    fn fievel_ui_show_error(message: *const std::ffi::c_char);
     fn fievel_ui_locate_cursor();
 }
 
@@ -122,6 +128,12 @@ fn load_config(args: &Args) -> Result<(PathBuf, Config), Box<dyn Error>> {
     config.validate()?;
     validate_key_mappings(&config)?;
     Ok((path, config))
+}
+
+fn set_config_menu_status(path: &Path, status: i32) -> Result<(), Box<dyn Error>> {
+    let path = CString::new(path.to_string_lossy().as_bytes())?;
+    unsafe { fievel_ui_set_config_status(path.as_ptr(), status) };
+    Ok(())
 }
 
 fn validate_key_mappings(config: &Config) -> Result<(), Box<dyn Error>> {
@@ -163,7 +175,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
         odometer::reset()?;
         return Ok(());
     }
-    let (config_path, config) = load_config(&args)?;
+    let (mut config_path, mut config) = load_config(&args)?;
     if args.check_config {
         println!("Config: {}\n{config:#?}", config_path.display());
         return Ok(());
@@ -179,13 +191,23 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let icon = menu_bar_icon::MENU_BAR_ICON.unwrap_or(&[]);
     let mut indicator = Overlays::new(config.notify, config.keycast.enabled, icon)?;
+    set_config_menu_status(&config_path, i32::from(config_path.is_file()))?;
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
-    if !unsafe { fievel_input_start() } {
-        return Err(
-            "cannot capture or synthesize global input. Grant Fievel/Terminal Input Monitoring \
-             and Accessibility permission in System Settings > Privacy & Security, then quit and restart it"
-                .into(),
-        );
+    let mut last_menu_stats = Instant::now();
+    let (fievel_miles, physical_miles) = odometer::miles_totals(args.odometer_units_per_inch)?;
+    unsafe { fievel_ui_set_odometer_stats(fievel_miles, physical_miles) };
+    let input_start_error = unsafe { fievel_input_start() };
+    if input_start_error != 0 {
+        let message = match input_start_error {
+            1 => "macOS does not grant Fievel Input Monitoring. Enable the current Fievel.app in System Settings > Privacy & Security > Input Monitoring, then restart it.",
+            2 => "macOS does not grant Fievel Accessibility access. Enable the current Fievel.app in System Settings > Privacy & Security > Accessibility, then restart it.",
+            3 => "macOS reports both permissions as granted but refused to create the global input event tap.",
+            4 => "Fievel could not create the input event run loop source.",
+            5 => "Fievel could not start its input event thread.",
+            6 => "Fievel's input event thread failed to initialize its run loop.",
+            _ => "Fievel could not initialize global input for an unknown reason.",
+        };
+        return Err(message.into());
     }
     eprintln!(
         "{} {:?} for Free Mouse Mode; Ctrl+C exits. \
@@ -203,6 +225,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     let mut hint_input = HintInput::new(&config).map_err(io::Error::other)?;
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
+    let mut suppressed_keys = BTreeSet::new();
     let mut last = Instant::now();
     let result = (|| -> Result<(), Box<dyn Error>> {
         while !stop.load(Ordering::Relaxed) {
@@ -246,6 +269,12 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         } else {
                             event.0.value
                         };
+                        if suppressed_keys.contains(&key) {
+                            if value == 0 {
+                                suppressed_keys.remove(&key);
+                            }
+                            continue;
+                        }
                         let changed = match value {
                             1 => {
                                 let fresh = held.insert(key);
@@ -287,6 +316,53 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 }
             }
             unsafe { fievel_ui_pump() };
+            if last_menu_stats.elapsed() >= Duration::from_secs(1) {
+                let (fievel_miles, physical_miles) =
+                    odometer::miles_totals(args.odometer_units_per_inch)?;
+                unsafe { fievel_ui_set_odometer_stats(fievel_miles, physical_miles) };
+                last_menu_stats = Instant::now();
+            }
+            if unsafe { fievel_ui_reload_requested() } {
+                let reload_result: Result<_, Box<dyn Error>> = (|| {
+                    let (new_path, new_config) = load_config(&args)?;
+                    let new_hint_input =
+                        HintInput::new(&new_config).map_err(io::Error::other)?;
+                    let new_engine = InputEngine::new_with_macro_store(
+                        new_config.clone(),
+                        new_path.with_file_name("macros.toml"),
+                    )
+                    .map_err(io::Error::other)?;
+                    Ok((new_path, new_config, new_hint_input, new_engine))
+                })();
+                match reload_result {
+                    Ok((new_path, new_config, new_hint_input, new_engine)) => {
+                        if let Some(active) = hints.as_mut() {
+                            active.cancel();
+                        }
+                        hints = None;
+                        indicator.clear();
+                        emit(engine.release_all(), &mut odometer)?;
+                        suppressed_keys.extend(held.iter().copied());
+                        held.clear();
+                        hint_input = new_hint_input;
+                        engine = new_engine;
+                        config = new_config;
+                        config_path = new_path;
+                        indicator.set_config(config.notify, config.keycast.enabled);
+                        set_config_menu_status(
+                            &config_path,
+                            if config_path.is_file() { 3 } else { 4 },
+                        )?;
+                    }
+                    Err(error) => {
+                        eprintln!("Fievel config reload failed: {error}");
+                        set_config_menu_status(&config_path, 2)?;
+                    }
+                }
+            }
+            if unsafe { fievel_ui_exit_requested() } {
+                stop.store(true, Ordering::Relaxed);
+            }
             thread::sleep(TICK.saturating_sub(last.elapsed()));
         }
         Ok(())
@@ -706,6 +782,11 @@ fn mac_keycode(key: K) -> Option<u16> {
 pub fn run() {
     if let Err(error) = run_inner(Args::parse()) {
         eprintln!("fievel: {error}");
+        if unsafe { fievel_ui_is_app_bundle() } {
+            if let Ok(message) = std::ffi::CString::new(error.to_string()) {
+                unsafe { fievel_ui_show_error(message.as_ptr()) };
+            }
+        }
         std::process::exit(1);
     }
 }
