@@ -111,8 +111,9 @@ codesign --force --deep --sign - \
     --requirements "=designated => identifier \"$bundle_identifier\"" \
     "$app_bundle"
 
+ditto "$app_bundle" "$staging/Fievel.app"
 tar -czf "$archive_tmp" -C "$staging" \
-    fievel README.md LICENSE fievel.config
+    fievel Fievel.app README.md LICENSE fievel.config
 mv -f -- "$archive_tmp" "$archive"
 
 rm -rf -- "$app_path"

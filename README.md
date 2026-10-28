@@ -73,6 +73,7 @@ To create a macOS app bundle and release archive after building:
 The app is written to `target/release/Fievel.app`; open it from Finder to run
 Fievel without a terminal. The script also keeps creating the standalone
 archive at `target/release/fievel-<version>-macos-<arch>.tar.gz`.
+The archive contains both the standalone `fievel` executable and `Fievel.app`.
 The app bundle is ad-hoc signed with a stable identifier so macOS privacy
 permissions can be associated with Fievel across rebuilds; it is not Developer
 ID signed or notarized.
