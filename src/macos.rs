@@ -229,169 +229,192 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     let mut held = BTreeSet::new();
     let mut suppressed_keys = BTreeSet::new();
     let mut last = Instant::now();
-    let result = (|| -> Result<(), Box<dyn Error>> {
-        while !stop.load(Ordering::Relaxed) {
-            let mut reload_requested = false;
-            let now = Instant::now();
-            let elapsed = now.saturating_duration_since(last);
-            last = now;
-            if hints.is_none() {
-                emit(engine.advance(elapsed), &mut odometer)?;
-                indicator.update(
-                    engine.active(),
-                    engine.keycast_keys(),
-                    engine.speed_mode(),
-                    engine.hold_locked(),
-                    engine.macro_status().as_deref(),
-                );
-                activate_pending_hints(&mut engine, &mut hints, &mut hint_input, &held, &config);
-            } else {
-                let actions = hint_input.advance(elapsed);
-                handle_hint_input(actions, &mut hints, &config, &mut engine);
-            }
+    let worker = thread::Builder::new()
+        .name("fievel-input-engine".into())
+        .spawn(move || {
+            let result = (|| -> Result<(), Box<dyn Error>> {
+                while !stop.load(Ordering::Relaxed) {
+                    let mut reload_requested = false;
+                    let now = Instant::now();
+                    let elapsed = now.saturating_duration_since(last);
+                    last = now;
+                    if hints.is_none() {
+                        emit(engine.advance(elapsed), &mut odometer)?;
+                        indicator.update(
+                            engine.active(),
+                            engine.keycast_keys(),
+                            engine.speed_mode(),
+                            engine.hold_locked(),
+                            engine.macro_status().as_deref(),
+                        );
+                        activate_pending_hints(
+                            &mut engine,
+                            &mut hints,
+                            &mut hint_input,
+                            &held,
+                            &config,
+                        );
+                    } else {
+                        let actions = hint_input.advance(elapsed);
+                        handle_hint_input(actions, &mut hints, &config, &mut engine);
+                    }
 
-            let mut event = NativeInputEvent {
-                kind: 0,
-                keycode: 0,
-                value: 0,
-                repeat: false,
-                dx: 0.0,
-                dy: 0.0,
-                original: std::ptr::null_mut(),
-            };
-            if unsafe { fievel_input_next(&mut event, TICK.as_millis() as u32) } {
-                let mut event = NativeInputEventGuard(event);
-                match event.0.kind {
-                    1 => {
-                        let Some(key) = linux_keycode(event.0.keycode) else {
-                            unsafe { fievel_input_repost(&mut event.0) };
-                            continue;
-                        };
-                        let value = if event.0.value == 1 && event.0.repeat {
-                            2
-                        } else {
-                            event.0.value
-                        };
-                        if suppressed_keys.contains(&key) {
-                            if value == 0 {
-                                suppressed_keys.remove(&key);
-                                held.remove(&key);
-                            }
-                            continue;
-                        }
-                        let changed = match value {
+                    let mut event = NativeInputEvent {
+                        kind: 0,
+                        keycode: 0,
+                        value: 0,
+                        repeat: false,
+                        dx: 0.0,
+                        dy: 0.0,
+                        original: std::ptr::null_mut(),
+                    };
+                    if unsafe { fievel_input_next(&mut event, TICK.as_millis() as u32) } {
+                        let mut event = NativeInputEventGuard(event);
+                        match event.0.kind {
                             1 => {
-                                let fresh = held.insert(key);
-                                fresh
+                                let Some(key) = linux_keycode(event.0.keycode) else {
+                                    unsafe { fievel_input_repost(&mut event.0) };
+                                    continue;
+                                };
+                                let value = if event.0.value == 1 && event.0.repeat {
+                                    2
+                                } else {
+                                    event.0.value
+                                };
+                                if suppressed_keys.contains(&key) {
+                                    if value == 0 {
+                                        suppressed_keys.remove(&key);
+                                        held.remove(&key);
+                                    }
+                                    continue;
+                                }
+                                let changed = match value {
+                                    1 => {
+                                        let fresh = held.insert(key);
+                                        fresh
+                                    }
+                                    0 => held.remove(&key),
+                                    2 => held.contains(&key),
+                                    _ => false,
+                                };
+                                if changed {
+                                    if reload::matches_press(
+                                        &config.keys.reload_config,
+                                        key,
+                                        value,
+                                        |key| held.contains(&key) || engine.key_is_held(key),
+                                    ) {
+                                        suppressed_keys.insert(key);
+                                        reload_requested = true;
+                                    } else if hints.is_some() {
+                                        let actions = hint_input.key(key, value);
+                                        handle_hint_input(
+                                            actions,
+                                            &mut hints,
+                                            &config,
+                                            &mut engine,
+                                        );
+                                    } else {
+                                        emit(engine.key(key, value), &mut odometer)?;
+                                        indicator.update(
+                                            engine.active(),
+                                            engine.keycast_keys(),
+                                            engine.speed_mode(),
+                                            engine.hold_locked(),
+                                            engine.macro_status().as_deref(),
+                                        );
+                                        activate_pending_hints(
+                                            &mut engine,
+                                            &mut hints,
+                                            &mut hint_input,
+                                            &held,
+                                            &config,
+                                        );
+                                    }
+                                }
                             }
-                            0 => held.remove(&key),
-                            2 => held.contains(&key),
-                            _ => false,
-                        };
-                        if changed {
-                            if reload::matches_press(
-                                &config.keys.reload_config,
-                                key,
-                                value,
-                                |key| held.contains(&key) || engine.key_is_held(key),
-                            ) {
-                                suppressed_keys.insert(key);
-                                reload_requested = true;
-                            } else if hints.is_some() {
-                                let actions = hint_input.key(key, value);
-                                handle_hint_input(actions, &mut hints, &config, &mut engine);
-                            } else {
-                                emit(engine.key(key, value), &mut odometer)?;
-                                indicator.update(
-                                    engine.active(),
-                                    engine.keycast_keys(),
-                                    engine.speed_mode(),
-                                    engine.hold_locked(),
-                                    engine.macro_status().as_deref(),
-                                );
-                                activate_pending_hints(
-                                    &mut engine,
-                                    &mut hints,
-                                    &mut hint_input,
-                                    &held,
-                                    &config,
-                                );
+                            2 => {
+                                odometer
+                                    .physical_counter
+                                    .record_pointer_motion(event.0.dx, event.0.dy);
+                            }
+                            _ => {}
+                        }
+                    }
+                    if last_menu_stats.elapsed() >= Duration::from_secs(1) {
+                        let (fievel_miles, physical_miles) =
+                            odometer::miles_totals(args.odometer_units_per_inch)?;
+                        unsafe { fievel_ui_set_odometer_stats(fievel_miles, physical_miles) };
+                        last_menu_stats = Instant::now();
+                    }
+                    let menu_reload_requested = unsafe { fievel_ui_reload_requested() };
+                    if reload_requested || menu_reload_requested {
+                        let reload_result: Result<_, Box<dyn Error>> = (|| {
+                            let (new_path, new_config) = load_config(&args)?;
+                            let new_hint_input =
+                                HintInput::new(&new_config).map_err(io::Error::other)?;
+                            let new_engine = InputEngine::new_with_macro_store(
+                                new_config.clone(),
+                                new_path.with_file_name("macros.toml"),
+                            )
+                            .map_err(io::Error::other)?;
+                            Ok((new_path, new_config, new_hint_input, new_engine))
+                        })();
+                        match reload_result {
+                            Ok((new_path, new_config, new_hint_input, new_engine)) => {
+                                if let Some(active) = hints.as_mut() {
+                                    active.cancel();
+                                }
+                                hints = None;
+                                indicator.clear();
+                                emit(engine.release_all(), &mut odometer)?;
+                                suppressed_keys.extend(held.iter().copied());
+                                held.clear();
+                                hint_input = new_hint_input;
+                                engine = new_engine;
+                                config = new_config;
+                                config_path = new_path;
+                                indicator.set_config(config.notify, config.keycast.enabled);
+                                set_config_menu_status(
+                                    &config_path,
+                                    if config_path.is_file() { 3 } else { 4 },
+                                )?;
+                                crate::notifications::config_reload(true);
+                            }
+                            Err(error) => {
+                                eprintln!("Fievel config reload failed: {error}");
+                                set_config_menu_status(&config_path, 2)?;
+                                crate::notifications::config_reload(false);
                             }
                         }
                     }
-                    2 => {
-                        odometer
-                            .physical_counter
-                            .record_pointer_motion(event.0.dx, event.0.dy);
+                    if unsafe { fievel_ui_exit_requested() } {
+                        stop.store(true, Ordering::Relaxed);
                     }
-                    _ => {}
+                    thread::sleep(TICK.saturating_sub(last.elapsed()));
                 }
+                Ok(())
+            })();
+            if let Some(active) = hints.as_mut() {
+                active.cancel();
             }
-            unsafe { fievel_ui_pump() };
-            if last_menu_stats.elapsed() >= Duration::from_secs(1) {
-                let (fievel_miles, physical_miles) =
-                    odometer::miles_totals(args.odometer_units_per_inch)?;
-                unsafe { fievel_ui_set_odometer_stats(fievel_miles, physical_miles) };
-                last_menu_stats = Instant::now();
-            }
-            let menu_reload_requested = unsafe { fievel_ui_reload_requested() };
-            if reload_requested || menu_reload_requested {
-                let reload_result: Result<_, Box<dyn Error>> = (|| {
-                    let (new_path, new_config) = load_config(&args)?;
-                    let new_hint_input =
-                        HintInput::new(&new_config).map_err(io::Error::other)?;
-                    let new_engine = InputEngine::new_with_macro_store(
-                        new_config.clone(),
-                        new_path.with_file_name("macros.toml"),
-                    )
-                    .map_err(io::Error::other)?;
-                    Ok((new_path, new_config, new_hint_input, new_engine))
-                })();
-                match reload_result {
-                    Ok((new_path, new_config, new_hint_input, new_engine)) => {
-                        if let Some(active) = hints.as_mut() {
-                            active.cancel();
-                        }
-                        hints = None;
-                        indicator.clear();
-                        emit(engine.release_all(), &mut odometer)?;
-                        suppressed_keys.extend(held.iter().copied());
-                        held.clear();
-                        hint_input = new_hint_input;
-                        engine = new_engine;
-                        config = new_config;
-                        config_path = new_path;
-                        indicator.set_config(config.notify, config.keycast.enabled);
-                        set_config_menu_status(
-                            &config_path,
-                            if config_path.is_file() { 3 } else { 4 },
-                        )?;
-                        crate::notifications::config_reload(true);
-                    }
-                    Err(error) => {
-                        eprintln!("Fievel config reload failed: {error}");
-                        set_config_menu_status(&config_path, 2)?;
-                        crate::notifications::config_reload(false);
-                    }
-                }
-            }
-            if unsafe { fievel_ui_exit_requested() } {
-                stop.store(true, Ordering::Relaxed);
-            }
-            thread::sleep(TICK.saturating_sub(last.elapsed()));
-        }
-        Ok(())
-    })();
-    if let Some(active) = hints.as_mut() {
-        active.cancel();
+            indicator.clear();
+            let release = emit(engine.release_all(), &mut odometer);
+            let saved = odometer.finish();
+            result.map_err(|error| error.to_string())?;
+            release.map_err(|error| error.to_string())?;
+            saved.map_err(|error| error.to_string())?;
+            Ok::<(), String>(())
+        })?;
+    while !worker.is_finished() {
+        unsafe { fievel_ui_pump() };
+        thread::sleep(TICK);
     }
-    indicator.clear();
-    let release = emit(engine.release_all(), &mut odometer);
-    let saved = odometer.finish();
-    result?;
-    release?;
-    saved?;
-    Ok(())
+    match worker.join() {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(io::Error::other(error).into()),
+        Err(_) => Err(io::Error::other("macOS input engine thread panicked").into()),
+    }
 }
 
 fn activate_pending_hints(

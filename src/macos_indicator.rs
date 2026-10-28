@@ -9,6 +9,7 @@ unsafe extern "C" {
 pub struct Overlays {
     enabled: bool,
     keycast_enabled: bool,
+    last_state: Option<(bool, bool, String)>,
 }
 
 impl Overlays {
@@ -21,6 +22,7 @@ impl Overlays {
         Ok(Self {
             enabled,
             keycast_enabled,
+            last_state: None,
         })
     }
 
@@ -64,6 +66,16 @@ impl Overlays {
             label.push_str("  ");
             label.push_str(status);
         }
+        if self
+            .last_state
+            .as_ref()
+            .is_some_and(|(last_visible, last_locked, last_label)| {
+                *last_visible == visible && *last_locked == locked && last_label == &label
+            })
+        {
+            return;
+        }
+        self.last_state = Some((visible, locked, label.clone()));
         let label = CString::new(label).expect("indicator label contains no NUL bytes");
         unsafe { fievel_ui_set_indicator(visible, locked, label.as_ptr()) };
     }
@@ -74,6 +86,7 @@ impl Overlays {
     }
 
     pub fn clear(&mut self) {
+        self.last_state = Some((false, false, String::new()));
         let label = CString::new("").expect("empty label contains no NUL bytes");
         unsafe { fievel_ui_set_indicator(false, false, label.as_ptr()) };
     }

@@ -6,6 +6,7 @@
 #import <dispatch/dispatch.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stdlib.h>
@@ -68,8 +69,8 @@ static NSMenuItem *fievel_odometer_item;
 static NSMenuItem *physical_odometer_item;
 static NSMenuItem *config_status_item;
 static NSMenuItem *config_path_item;
-static bool menu_exit_requested;
-static bool menu_reload_requested;
+static atomic_bool menu_exit_requested;
+static atomic_bool menu_reload_requested;
 static NSString *fievel_config_path;
 static NSArray<NSDictionary *> *hint_items;
 static bool hints_hidden;
@@ -105,12 +106,12 @@ static void fievel_release_posted_inputs(void);
 @implementation FievelMenuTarget
 - (void)requestExit:(id)sender {
     (void)sender;
-    menu_exit_requested = true;
+    atomic_store_explicit(&menu_exit_requested, true, memory_order_relaxed);
 }
 
 - (void)reloadConfig:(id)sender {
     (void)sender;
-    menu_reload_requested = true;
+    atomic_store_explicit(&menu_reload_requested, true, memory_order_relaxed);
 }
 
 - (void)openConfigLocation:(id)sender {
@@ -362,38 +363,42 @@ bool fievel_ui_init(const uint8_t *icon_data, size_t icon_size) {
 }
 
 void fievel_ui_set_odometer_stats(double fievel_miles, double physical_miles) {
-    @autoreleasepool {
-        fievel_odometer_item.title = [NSString stringWithFormat:
-            @"Fievel: %.6f miles (estimated)", fievel_miles];
-        physical_odometer_item.title = [NSString stringWithFormat:
-            @"Physical mouse/trackpad: %.6f miles (estimated)", physical_miles];
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            fievel_odometer_item.title = [NSString stringWithFormat:
+                @"Fievel: %.6f miles (estimated)", fievel_miles];
+            physical_odometer_item.title = [NSString stringWithFormat:
+                @"Physical mouse/trackpad: %.6f miles (estimated)", physical_miles];
+        }
+    });
 }
 
 void fievel_ui_set_config_status(const char *path, int status) {
-    @autoreleasepool {
-        fievel_config_path = path == NULL ? nil : [NSString stringWithUTF8String:path];
-        config_status_item.title = status == 1
-            ? @"Config: loaded"
-            : status == 2
-                ? @"Reload failed; previous config retained"
-                : status == 3
-                    ? @"Config: reloaded"
-                    : status == 4
-                        ? @"Config: defaults reloaded"
-                        : @"Config: defaults (file not found)";
-        config_path_item.title = [fievel_config_path stringByAbbreviatingWithTildeInPath] ?: @"";
-    }
+    NSString *config_path = path == NULL ? nil : [NSString stringWithUTF8String:path];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            fievel_config_path = config_path;
+            config_status_item.title = status == 1
+                ? @"Config: loaded"
+                : status == 2
+                    ? @"Reload failed; previous config retained"
+                    : status == 3
+                        ? @"Config: reloaded"
+                        : status == 4
+                            ? @"Config: defaults reloaded"
+                            : @"Config: defaults (file not found)";
+            config_path_item.title =
+                [fievel_config_path stringByAbbreviatingWithTildeInPath] ?: @"";
+        }
+    });
 }
 
 bool fievel_ui_reload_requested(void) {
-    bool requested = menu_reload_requested;
-    menu_reload_requested = false;
-    return requested;
+    return atomic_exchange_explicit(&menu_reload_requested, false, memory_order_relaxed);
 }
 
 bool fievel_ui_exit_requested(void) {
-    return menu_exit_requested;
+    return atomic_load_explicit(&menu_exit_requested, memory_order_relaxed);
 }
 
 bool fievel_ui_is_app_bundle(void) {
@@ -417,13 +422,16 @@ void fievel_ui_show_error(const char *message) {
 }
 
 void fievel_ui_set_indicator(bool visible, bool locked, const char *label) {
-    @autoreleasepool {
-        fievel_ui_ensure();
-        indicator_visible = visible;
-        indicator_locked = locked;
-        indicator_label = label == NULL ? nil : [NSString stringWithUTF8String:label];
-        [overlay_view setNeedsDisplay:YES];
-    }
+    NSString *indicator_label_copy = label == NULL ? nil : [NSString stringWithUTF8String:label];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            fievel_ui_ensure();
+            indicator_visible = visible;
+            indicator_locked = locked;
+            indicator_label = indicator_label_copy;
+            [overlay_view setNeedsDisplay:YES];
+        }
+    });
 }
 
 static NSColor *fievel_color(uint32_t rgba) {
@@ -444,44 +452,75 @@ void fievel_ui_set_hints(
     uint32_t text,
     uint32_t highlight
 ) {
-    @autoreleasepool {
-        fievel_ui_ensure();
-        NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:count];
-        for (size_t i = 0; i < count; i++) {
-            const FievelHint *hint = &hints[i];
-            NSString *label = hint->label == NULL ? @"" : [NSString stringWithUTF8String:hint->label];
-            NSRect rect = NSMakeRect(
-                hint->x - NSMinX(overlay_window.frame),
-                hint->y - NSMinY(overlay_window.frame),
-                hint->width,
-                hint->height
-            );
-            [items addObject:@{
-                @"rect": [NSValue valueWithRect:rect],
-                @"label": label ?: @"",
-                @"selected": @(hint->selected),
-                @"prefixLength": @(hint->prefix_length),
-                @"debugDot": @(hint->debug_dot),
-                @"border": fievel_color(hint->custom_colors ? hint->border_color : border),
-                @"fill": fievel_color(hint->custom_colors ? hint->fill_color : fill),
-                @"readability": fievel_color(readability),
-                @"text": fievel_color(text),
-                @"highlight": fievel_color(highlight),
-            }];
-        }
-        hint_items = [items copy];
-        hints_hidden = hidden;
-        [overlay_view setNeedsDisplay:YES];
+    FievelHint *hint_copy = count == 0 ? NULL : calloc(count, sizeof(FievelHint));
+    if (count > 0 && hint_copy == NULL) {
+        fputs("fievel: could not queue macOS hint overlay update\n", stderr);
+        return;
     }
+    for (size_t i = 0; i < count; i++) {
+        hint_copy[i] = hints[i];
+        if (hints[i].label != NULL) {
+            size_t label_size = strlen(hints[i].label) + 1;
+            char *label_copy = malloc(label_size);
+            if (label_copy == NULL) {
+                for (size_t j = 0; j < i; j++) {
+                    free((void *)hint_copy[j].label);
+                }
+                free(hint_copy);
+                fputs("fievel: could not queue macOS hint overlay update\n", stderr);
+                return;
+            }
+            memcpy(label_copy, hints[i].label, label_size);
+            hint_copy[i].label = label_copy;
+        }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            fievel_ui_ensure();
+            NSMutableArray<NSDictionary *> *items = [NSMutableArray arrayWithCapacity:count];
+            for (size_t i = 0; i < count; i++) {
+                const FievelHint *hint = &hint_copy[i];
+                NSString *label =
+                    hint->label == NULL ? @"" : [NSString stringWithUTF8String:hint->label];
+                NSRect rect = NSMakeRect(
+                    hint->x - NSMinX(overlay_window.frame),
+                    hint->y - NSMinY(overlay_window.frame),
+                    hint->width,
+                    hint->height
+                );
+                [items addObject:@{
+                    @"rect": [NSValue valueWithRect:rect],
+                    @"label": label ?: @"",
+                    @"selected": @(hint->selected),
+                    @"prefixLength": @(hint->prefix_length),
+                    @"debugDot": @(hint->debug_dot),
+                    @"border": fievel_color(hint->custom_colors ? hint->border_color : border),
+                    @"fill": fievel_color(hint->custom_colors ? hint->fill_color : fill),
+                    @"readability": fievel_color(readability),
+                    @"text": fievel_color(text),
+                    @"highlight": fievel_color(highlight),
+                }];
+            }
+            hint_items = [items copy];
+            hints_hidden = hidden;
+            [overlay_view setNeedsDisplay:YES];
+            for (size_t i = 0; i < count; i++) {
+                free((void *)hint_copy[i].label);
+            }
+            free(hint_copy);
+        }
+    });
 }
 
 void fievel_ui_clear_hints(void) {
-    @autoreleasepool {
-        fievel_ui_ensure();
-        hint_items = @[];
-        hints_hidden = false;
-        [overlay_view setNeedsDisplay:YES];
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            fievel_ui_ensure();
+            hint_items = @[];
+            hints_hidden = false;
+            [overlay_view setNeedsDisplay:YES];
+        }
+    });
 }
 
 void fievel_ui_pump(void) {
@@ -504,13 +543,15 @@ void fievel_ui_pump(void) {
 }
 
 void fievel_ui_locate_cursor(void) {
-    @autoreleasepool {
-        fievel_ui_ensure();
-        cursor_pulse_position = NSEvent.mouseLocation;
-        cursor_pulse_until = CFAbsoluteTimeGetCurrent() + 0.75;
-        [overlay_window orderFrontRegardless];
-        [overlay_view setNeedsDisplay:YES];
-    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        @autoreleasepool {
+            fievel_ui_ensure();
+            cursor_pulse_position = NSEvent.mouseLocation;
+            cursor_pulse_until = CFAbsoluteTimeGetCurrent() + 0.75;
+            [overlay_window orderFrontRegardless];
+            [overlay_view setNeedsDisplay:YES];
+        }
+    });
 }
 
 bool fievel_request_input_permissions(void) {
