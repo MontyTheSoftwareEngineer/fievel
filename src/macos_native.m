@@ -1017,7 +1017,15 @@ bool fievel_move_pointer(double dx, double dy) {
         }
         free(ids);
     }
-    CGEventRef event = CGEventCreateMouseEvent(source, kCGEventMouseMoved, point, kCGMouseButtonLeft);
+    CGEventType type = kCGEventMouseMoved;
+    CGMouseButton button = kCGMouseButtonLeft;
+    if (posted_buttons[0]) {
+        type = kCGEventLeftMouseDragged;
+    } else if (posted_buttons[1]) {
+        type = kCGEventRightMouseDragged;
+        button = kCGMouseButtonRight;
+    }
+    CGEventRef event = CGEventCreateMouseEvent(source, type, point, button);
     if (event != NULL) {
         CGEventSetIntegerValueField(event, kCGEventSourceUserData, event_marker);
         CGEventPost(kCGHIDEventTap, event);
