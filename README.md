@@ -409,7 +409,7 @@ home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
 
 [macros]
 enabled = false # Set true to enable macro recording and playback
-hotkey = "leftmeta + e" # Open macro registers; configurable
+hotkey = "super + e" # Open macro registers; configurable
 
 [speeds]
 normal = 300
@@ -425,8 +425,8 @@ movement = 0.2
 scroll = 0.3
 
 [keys]
-free_mouse = "f3" # Also accepts chords such as "leftalt + space"
-reload_config = "leftmeta + leftshift + r" # Reload configuration on Linux, macOS, and Windows
+free_mouse = "f3" # Also accepts chords such as "alt + space"
+reload_config = "super + shift + r" # Reload configuration on Linux, macOS, and Windows
 toggle_hold = "z" # Locks hold mode until pressed again or Free Mouse Mode is pressed
 left = "h"
 down = "j"
@@ -462,9 +462,9 @@ min_height = 4
 max_height = 96
 
 [hints.keys]
-left = "leftmeta + space"
-right = "leftmeta + i"
-grid = "leftmeta + g"
+left = "super + space"
+right = "super + i"
+grid = "super + g"
 grid_upper_left = "u"
 grid_upper_right = "i"
 grid_lower_left = "j"
@@ -472,7 +472,7 @@ grid_lower_right = "k"
 grid_left_click = "space"
 grid_right_click = "r"
 cancel = "enter"
-toggle_background = "leftctrl"
+toggle_background = "ctrl"
 debug = "f8"
 ```
 
@@ -491,12 +491,16 @@ fine taps without coasting. Hint labels must use 2-26 unique lowercase ASCII
 letters, and hint size limits must stay positive with max >= min.
 
 Key names are case-insensitive Linux-style key names: `h`, `space`, `f4`, `leftshift`,
-`KEY_LEFTCTRL`, etc. `,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter`
-are accepted. Controls must use distinct single keys. Shift passes through to the focused app
+`KEY_LEFTCTRL`, etc. Modifier aliases `ctrl`/`control`, `meta`/`super`/`cmd`/`command`/
+`win`/`windows`, `alt`, and `shift` mean their left-hand key. They work on all platforms:
+the Meta key is Command on macOS and the Windows key on Windows. Use `left...` or
+`right...` names to choose a side.
+`,`/`comma`, `.`/`dot`, `escape`/`esc`, and `return`/`enter` are also accepted.
+Controls must use distinct single keys. Shift passes through to the focused app
 in Free Mouse Mode unless a speed key is held. With the fast key (S by default),
 either Shift key enables double speed for movement and scrolling. `free_mouse` and
 `[hints.keys]` activators accept either a single distinct key or a `+`-separated
-chord such as `"leftalt + space"` or `"leftctrl+leftalt+f3"`. All chord keys must
+chord such as `"alt + space"` or `"ctrl+alt+f3"`. All chord keys must
 be held together, in either press order; extra held keys do not prevent
 activation. For a buffered home-row activation chord such as D+F, use a
 `free_mouse` action in `[remap.main]` as shown below.
@@ -547,9 +551,9 @@ l = "right"
 
 Binding names are single Linux keys or `+`-separated chords, in either press
 order. Actions are key names (`escape`, `f3`, `left`, etc.), held modifiers
-(`ctrl`, `super`), `layer(name)`, `free_mouse`, or
-`timeout(short_action, milliseconds, held_action)`. `layer(control)` and
-`layer(meta)` are aliases for holding left Ctrl and left Super.
+(`ctrl`/`control`, `meta`/`super`, `alt`, `shift`), `layer(name)`, `free_mouse`, or
+`timeout(short_action, milliseconds, held_action)`. `layer(...)` also accepts modifier
+aliases and emits the corresponding left-side key.
 
 Chord members are buffered for up to `chord_timeout` milliseconds (default 25).
 A completed chord consumes its members, so letters do not leak into the

@@ -748,6 +748,10 @@ pub(crate) fn parse_key(value: &str) -> Result<K, String> {
         "." => "DOT",
         "ESCAPE" => "ESC",
         "RETURN" => "ENTER",
+        "CTRL" | "CONTROL" => "LEFTCTRL",
+        "META" | "SUPER" | "CMD" | "COMMAND" | "WIN" | "WINDOWS" => "LEFTMETA",
+        "ALT" => "LEFTALT",
+        "SHIFT" => "LEFTSHIFT",
         other => other,
     };
     let name = if name.starts_with("KEY_") {
@@ -2133,6 +2137,27 @@ mod tests {
         assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTMETA, K::KEY_SPACE]);
         let config = Config::parse("[keys]\nfree_mouse = 'leftctrl+leftalt+f4'").unwrap();
         assert_eq!(config.keys.free_mouse.len(), 3);
+    }
+
+    #[test]
+    fn modifier_aliases_work_in_key_bindings_and_chords() {
+        let config = Config::parse(
+            "[keys]\nfree_mouse = 'super + shift'\nreload_config = 'meta + control + r'\nlocate = 'alt'\ntoggle_hold = 'cmd'\n[keycast]\nhotkey = 'windows'\n[hints.keys]\nleft = 'ctrl + space'\nright = 'shift + i'",
+        )
+        .unwrap();
+        assert_eq!(
+            config.keys.free_mouse,
+            vec![K::KEY_LEFTMETA, K::KEY_LEFTSHIFT]
+        );
+        assert_eq!(
+            config.keys.reload_config,
+            vec![K::KEY_LEFTMETA, K::KEY_LEFTCTRL, K::KEY_R]
+        );
+        assert_eq!(config.keys.locate, K::KEY_LEFTALT);
+        assert_eq!(config.keys.toggle_hold, K::KEY_LEFTMETA);
+        assert_eq!(config.keycast.hotkey, K::KEY_LEFTMETA);
+        assert_eq!(config.hints.keys.left, vec![K::KEY_LEFTCTRL, K::KEY_SPACE]);
+        assert_eq!(config.hints.keys.right, vec![K::KEY_LEFTSHIFT, K::KEY_I]);
     }
 
     #[test]

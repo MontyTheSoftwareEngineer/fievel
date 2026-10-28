@@ -43,13 +43,23 @@ struct Parsed {
 }
 
 fn action_key(text: &str) -> Result<K, String> {
-    match text.trim().to_ascii_lowercase().as_str() {
-        "ctrl" | "control" => Ok(K::KEY_LEFTCTRL),
-        "super" | "meta" => Ok(K::KEY_LEFTMETA),
-        "alt" => Ok(K::KEY_LEFTALT),
-        "shift" => Ok(K::KEY_LEFTSHIFT),
-        _ => parse_key(text),
-    }
+    parse_key(text)
+}
+
+fn is_modifier_alias(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "ctrl"
+            | "control"
+            | "meta"
+            | "super"
+            | "cmd"
+            | "command"
+            | "win"
+            | "windows"
+            | "alt"
+            | "shift"
+    )
 }
 
 fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
@@ -62,7 +72,7 @@ fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
         .and_then(|s| s.strip_suffix(')'))
     {
         let name = body.trim();
-        if matches!(name, "control" | "ctrl" | "meta" | "super") {
+        if is_modifier_alias(name) {
             return action_key(name).map(Action::Key);
         }
         if name.is_empty()
@@ -164,7 +174,7 @@ impl RemapConfig {
                         || !name
                             .chars()
                             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                        || matches!(name.as_str(), "control" | "ctrl" | "meta" | "super")
+                        || is_modifier_alias(name)
                     {
                         return Err(format!("invalid or reserved layer name {name:?}"));
                     }
@@ -712,6 +722,19 @@ mod tests {
         assert_eq!(r.key(K::KEY_A, 0), [Event::Key(K::KEY_A, 0)]);
         assert!(r.key(K::KEY_A, 0).is_empty());
         assert!(r.key(K::KEY_A, 2).is_empty());
+    }
+
+    #[test]
+    fn modifier_aliases_work_in_remap_triggers_and_actions() {
+        let parsed = config("[main]\n'command + shift' = 'windows'")
+            .parsed()
+            .unwrap();
+        assert_eq!(parsed.main[0].keys, vec![K::KEY_LEFTSHIFT, K::KEY_LEFTMETA]);
+        assert_eq!(parsed.main[0].action, Action::Key(K::KEY_LEFTMETA));
+        assert_eq!(
+            parse_action("layer(cmd)", false).unwrap(),
+            Action::Key(K::KEY_LEFTMETA)
+        );
     }
 
     #[test]
