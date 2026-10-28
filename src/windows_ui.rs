@@ -6,14 +6,21 @@ use crate::{
 use std::{
     io,
     mem::{size_of, zeroed},
+    path::{Path, PathBuf},
+    process::Command,
     ptr::{null, null_mut},
+    sync::{
+        mpsc::{self, Receiver, Sender, SyncSender},
+        Arc, Mutex,
+    },
+    thread::{self, JoinHandle},
     time::{Duration, Instant},
 };
 use windows_sys::Win32::{
-    Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
+    Foundation::{GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM},
     Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-        SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+        CreateBitmap, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC,
+        ReleaseDC, SelectObject, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
         BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ,
     },
     System::LibraryLoader::GetModuleHandleW,
@@ -24,21 +31,440 @@ use windows_sys::Win32::{
             MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
             MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT,
         },
+        Shell::{
+            Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NOTIFYICONDATAW,
+        },
         WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetCursorPos,
-            GetSystemMetrics, PeekMessageW, PostQuitMessage, RegisterClassW, SetWindowPos,
-            ShowWindow, TranslateMessage, UpdateLayeredWindow, CS_HREDRAW, CS_VREDRAW,
-            HWND_TOPMOST, MSG, PM_REMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
+            AppendMenuW, CreateIconIndirect, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+            DestroyIcon, DestroyMenu, DestroyWindow, DispatchMessageW, GetCursorPos, GetMessageW,
+            GetSystemMetrics, GetWindowLongPtrW, PeekMessageW, PostMessageW, PostQuitMessage,
+            PostThreadMessageW, RegisterClassW, SetForegroundWindow, SetWindowLongPtrW,
+            SetWindowPos, ShowWindow, TrackPopupMenu, TranslateMessage, UpdateLayeredWindow,
+            CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, ICONINFO, MF_GRAYED, MF_SEPARATOR,
+            MF_STRING, MSG, PM_REMOVE, SM_CXSCREEN, SM_CXVIRTUALSCREEN, SM_CYSCREEN,
             SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE,
-            SWP_NOOWNERZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, WM_DESTROY,
-            WM_ERASEBKGND, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-            WS_EX_TRANSPARENT, WS_POPUP,
+            SWP_NOOWNERZORDER, SWP_SHOWWINDOW, SW_HIDE, SW_SHOWNOACTIVATE, TPM_RETURNCMD,
+            TPM_RIGHTBUTTON, ULW_ALPHA, WM_APP, WM_CONTEXTMENU, WM_DESTROY, WM_ERASEBKGND,
+            WM_LBUTTONUP, WM_NULL, WM_QUIT, WM_RBUTTONUP, WNDCLASSW, WS_EX_LAYERED,
+            WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TRANSPARENT, WS_POPUP,
         },
     },
 };
 
 const CURSOR_PULSE_DURATION: Duration = Duration::from_millis(750);
 pub const INPUT_MARKER: usize = 0x6669_6576_656c_6d63u64 as usize;
+const TRAY_CALLBACK: u32 = WM_APP + 1;
+const TRAY_ICON_ID: u32 = 1;
+const MENU_OPEN_CONFIG: u32 = 1;
+const MENU_RELOAD_CONFIG: u32 = 2;
+const MENU_QUIT: u32 = 3;
+
+pub enum TaskbarAction {
+    OpenConfigLocation,
+    ReloadConfig,
+    Quit,
+}
+
+struct TaskbarState {
+    fievel_miles: f64,
+    physical_miles: f64,
+    config_path: PathBuf,
+    config_status: i32,
+}
+
+pub struct TaskbarMenu {
+    state: Arc<Mutex<TaskbarState>>,
+    action_receiver: Receiver<TaskbarAction>,
+    thread_id: u32,
+    worker: Option<JoinHandle<io::Result<()>>>,
+}
+
+impl TaskbarMenu {
+    pub fn new(config_path: &Path, config_status: i32) -> io::Result<Self> {
+        let state = Arc::new(Mutex::new(TaskbarState {
+            fievel_miles: 0.0,
+            physical_miles: 0.0,
+            config_path: config_path.to_path_buf(),
+            config_status,
+        }));
+        let (action_sender, action_receiver) = mpsc::channel();
+        let (ready_sender, ready_receiver) = mpsc::sync_channel(1);
+        let worker_state = Arc::clone(&state);
+        let worker = thread::Builder::new()
+            .name("fievel-taskbar-menu".into())
+            .spawn(move || run_taskbar_thread(worker_state, action_sender, ready_sender))?;
+        let thread_id = match ready_receiver.recv() {
+            Ok(Ok(thread_id)) => thread_id,
+            Ok(Err(error)) => {
+                let _ = worker.join();
+                return Err(error);
+            }
+            Err(error) => {
+                let _ = worker.join();
+                return Err(io::Error::other(format!(
+                    "Windows taskbar thread exited during startup: {error}"
+                )));
+            }
+        };
+        Ok(Self {
+            state,
+            action_receiver,
+            thread_id,
+            worker: Some(worker),
+        })
+    }
+
+    pub fn set_odometer_stats(&mut self, fievel_miles: f64, physical_miles: f64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.fievel_miles = fievel_miles;
+        state.physical_miles = physical_miles;
+    }
+
+    pub fn set_config_status(&mut self, path: &Path, status: i32) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.config_path = path.to_path_buf();
+        state.config_status = status;
+    }
+
+    pub fn pump(&mut self) -> io::Result<Option<TaskbarAction>> {
+        match self.action_receiver.try_recv() {
+            Ok(action) => Ok(Some(action)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Err(io::Error::other(
+                "Windows taskbar thread stopped unexpectedly",
+            )),
+        }
+    }
+
+    pub fn open_config_location(&self) -> io::Result<()> {
+        let config_path = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .config_path
+            .clone();
+        let mut directory = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        while !directory.is_dir() {
+            if !directory.pop() {
+                directory = PathBuf::from(".");
+                break;
+            }
+        }
+        Command::new("explorer.exe").arg(directory).spawn()?;
+        Ok(())
+    }
+}
+
+impl Drop for TaskbarMenu {
+    fn drop(&mut self) {
+        if unsafe { PostThreadMessageW(self.thread_id, WM_QUIT, 0, 0) } == 0 {
+            eprintln!(
+                "fievel: could not stop Windows taskbar thread: {}",
+                io::Error::last_os_error()
+            );
+        }
+        if let Some(worker) = self.worker.take() {
+            match worker.join() {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => eprintln!("fievel: taskbar menu cleanup failed: {error}"),
+                Err(_) => eprintln!("fievel: Windows taskbar thread panicked"),
+            }
+        }
+    }
+}
+
+struct TrayContext {
+    state: Arc<Mutex<TaskbarState>>,
+    action_sender: Sender<TaskbarAction>,
+}
+
+struct TrayIcon {
+    hwnd: HWND,
+    icon_data: NOTIFYICONDATAW,
+    icon: windows_sys::Win32::UI::WindowsAndMessaging::HICON,
+    _context: Box<TrayContext>,
+}
+
+impl TrayIcon {
+    fn new(
+        state: Arc<Mutex<TaskbarState>>,
+        action_sender: Sender<TaskbarAction>,
+    ) -> io::Result<Self> {
+        let instance = unsafe { GetModuleHandleW(null()) };
+        if instance.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+        let class_name = wide("FievelTaskbarMenuWindow");
+        let class = WNDCLASSW {
+            lpfnWndProc: Some(tray_window_proc),
+            hInstance: instance,
+            lpszClassName: class_name.as_ptr(),
+            ..unsafe { zeroed() }
+        };
+        let registered = unsafe { RegisterClassW(&class) };
+        if registered == 0 {
+            let error_code = unsafe { GetLastError() };
+            if error_code != windows_sys::Win32::Foundation::ERROR_CLASS_ALREADY_EXISTS {
+                return Err(io::Error::from_raw_os_error(error_code as i32));
+            }
+        }
+
+        let title = wide("FievelTaskbarMenuWindow");
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                class_name.as_ptr(),
+                title.as_ptr(),
+                WS_POPUP,
+                0,
+                0,
+                0,
+                0,
+                null_mut(),
+                null_mut(),
+                instance,
+                null(),
+            )
+        };
+        if hwnd.is_null() {
+            return Err(io::Error::last_os_error());
+        }
+
+        let context = Box::new(TrayContext {
+            state,
+            action_sender,
+        });
+        let context_pointer = (&*context as *const TrayContext) as isize;
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, context_pointer);
+        }
+        if unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } != context_pointer {
+            unsafe { DestroyWindow(hwnd) };
+            return Err(io::Error::other(
+                "could not attach taskbar menu state to its window",
+            ));
+        }
+
+        let icon = match create_mouse_icon() {
+            Ok(icon) => icon,
+            Err(error) => {
+                unsafe { DestroyWindow(hwnd) };
+                return Err(error);
+            }
+        };
+        let mut icon_data: NOTIFYICONDATAW = unsafe { zeroed() };
+        icon_data.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
+        icon_data.hWnd = hwnd;
+        icon_data.uID = TRAY_ICON_ID;
+        icon_data.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        icon_data.uCallbackMessage = TRAY_CALLBACK;
+        icon_data.hIcon = icon;
+        for (slot, unit) in icon_data.szTip.iter_mut().zip(wide("Fievel is running")) {
+            *slot = unit;
+        }
+        if unsafe { Shell_NotifyIconW(NIM_ADD, &icon_data) } == 0 {
+            let error = io::Error::last_os_error();
+            unsafe {
+                DestroyIcon(icon);
+                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+                DestroyWindow(hwnd);
+            }
+            return Err(error);
+        }
+        Ok(Self {
+            hwnd,
+            icon_data,
+            icon,
+            _context: context,
+        })
+    }
+
+    fn run_message_loop(&mut self) -> io::Result<()> {
+        let mut message: MSG = unsafe { zeroed() };
+        loop {
+            match unsafe { GetMessageW(&mut message, null_mut(), 0, 0) } {
+                -1 => return Err(io::Error::last_os_error()),
+                0 => return Ok(()),
+                _ => unsafe {
+                    TranslateMessage(&message);
+                    DispatchMessageW(&message);
+                },
+            }
+        }
+    }
+}
+
+impl Drop for TrayIcon {
+    fn drop(&mut self) {
+        unsafe {
+            Shell_NotifyIconW(NIM_DELETE, &self.icon_data);
+            SetWindowLongPtrW(self.hwnd, GWLP_USERDATA, 0);
+            DestroyWindow(self.hwnd);
+            DestroyIcon(self.icon);
+        }
+    }
+}
+
+struct PopupMenu(windows_sys::Win32::UI::WindowsAndMessaging::HMENU);
+
+impl Drop for PopupMenu {
+    fn drop(&mut self) {
+        unsafe { DestroyMenu(self.0) };
+    }
+}
+
+fn append_menu(
+    menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU,
+    flags: u32,
+    id: u32,
+    label: &str,
+) -> io::Result<()> {
+    let label = wide(label);
+    if unsafe { AppendMenuW(menu, flags, id as usize, label.as_ptr()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn append_separator(menu: windows_sys::Win32::UI::WindowsAndMessaging::HMENU) -> io::Result<()> {
+    if unsafe { AppendMenuW(menu, MF_SEPARATOR, 0, null()) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+fn config_status_label(status: i32) -> &'static str {
+    match status {
+        1 => "Config: loaded",
+        2 => "Reload failed; previous config retained",
+        3 => "Config: reloaded",
+        4 => "Config: defaults reloaded",
+        _ => "Config: defaults (file not found)",
+    }
+}
+
+fn run_taskbar_thread(
+    state: Arc<Mutex<TaskbarState>>,
+    action_sender: Sender<TaskbarAction>,
+    ready_sender: SyncSender<io::Result<u32>>,
+) -> io::Result<()> {
+    let mut message: MSG = unsafe { zeroed() };
+    unsafe { PeekMessageW(&mut message, null_mut(), 0, 0, PM_REMOVE) };
+    let thread_id = unsafe { windows_sys::Win32::System::Threading::GetCurrentThreadId() };
+    let mut tray = match TrayIcon::new(state, action_sender) {
+        Ok(tray) => tray,
+        Err(error) => {
+            let _ = ready_sender.send(Err(io::Error::other(error.to_string())));
+            return Err(error);
+        }
+    };
+    if ready_sender.send(Ok(thread_id)).is_err() {
+        return Ok(());
+    }
+    tray.run_message_loop()
+}
+
+fn create_mouse_icon() -> io::Result<windows_sys::Win32::UI::WindowsAndMessaging::HICON> {
+    const SIZE: usize = 32;
+    const ROW_BYTES: usize = SIZE / 8;
+    let mut bitmap_info: BITMAPINFO = unsafe { zeroed() };
+    bitmap_info.bmiHeader = BITMAPINFOHEADER {
+        biSize: size_of::<BITMAPINFOHEADER>() as u32,
+        biWidth: SIZE as i32,
+        biHeight: -(SIZE as i32),
+        biPlanes: 1,
+        biBitCount: 32,
+        biCompression: BI_RGB,
+        ..unsafe { zeroed() }
+    };
+    let mut pixel_data = null_mut();
+    let color_bitmap = unsafe {
+        CreateDIBSection(
+            null_mut(),
+            &bitmap_info,
+            DIB_RGB_COLORS,
+            &mut pixel_data,
+            null_mut(),
+            0,
+        )
+    };
+    if color_bitmap.is_null() || pixel_data.is_null() {
+        let error = io::Error::last_os_error();
+        if !color_bitmap.is_null() {
+            unsafe { DeleteObject(color_bitmap) };
+        }
+        return Err(error);
+    }
+    let pixels =
+        unsafe { std::slice::from_raw_parts_mut(pixel_data.cast::<u8>(), SIZE * SIZE * 4) };
+    let mut and_mask = [0xffu8; SIZE * ROW_BYTES];
+    for y in 3..29 {
+        let half_width = mouse_half_width(y);
+        for x in (SIZE / 2 - half_width)..=(SIZE / 2 + half_width) {
+            let outline = x == SIZE / 2 - half_width
+                || x == SIZE / 2 + half_width
+                || y == 3
+                || y == 28
+                || ((5..=11).contains(&y) && x == SIZE / 2);
+            let color = if outline { 0 } else { 0xf4 };
+            let offset = (y * SIZE + x) * 4;
+            pixels[offset..offset + 3].fill(color);
+            pixels[offset + 3] = 0xff;
+
+            let mask_row = SIZE - 1 - y;
+            let mask_index = mask_row * ROW_BYTES + x / 8;
+            let bit = 1 << (7 - x % 8);
+            and_mask[mask_index] &= !bit;
+        }
+    }
+
+    let mask_bitmap =
+        unsafe { CreateBitmap(SIZE as i32, SIZE as i32, 1, 1, and_mask.as_ptr().cast()) };
+    if mask_bitmap.is_null() {
+        let error = io::Error::last_os_error();
+        unsafe { DeleteObject(color_bitmap) };
+        return Err(error);
+    }
+    let icon_info = ICONINFO {
+        fIcon: 1,
+        hbmMask: mask_bitmap,
+        hbmColor: color_bitmap,
+        ..unsafe { zeroed() }
+    };
+    let icon = unsafe { CreateIconIndirect(&icon_info) };
+    let error = if icon.is_null() {
+        Some(io::Error::last_os_error())
+    } else {
+        None
+    };
+    unsafe {
+        DeleteObject(mask_bitmap);
+        DeleteObject(color_bitmap);
+    }
+    if let Some(error) = error {
+        return Err(error);
+    }
+    Ok(icon)
+}
+
+fn mouse_half_width(y: usize) -> usize {
+    match y {
+        3..=4 => 2,
+        5..=7 => 4,
+        8..=24 => 7,
+        25..=27 => 6,
+        _ => 4,
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OverlayHint {
@@ -641,6 +1067,106 @@ unsafe extern "system" fn window_proc(
         }
         _ => DefWindowProcW(hwnd, message, wparam, lparam),
     }
+}
+
+unsafe extern "system" fn tray_window_proc(
+    hwnd: HWND,
+    message: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    if message == TRAY_CALLBACK
+        && matches!(lparam as u32, WM_CONTEXTMENU | WM_LBUTTONUP | WM_RBUTTONUP)
+    {
+        let context = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const TrayContext;
+        if !context.is_null() {
+            match show_taskbar_menu(hwnd, &*context) {
+                Ok(Some(action)) => {
+                    if let Err(error) = (*context).action_sender.send(action) {
+                        eprintln!("fievel: could not deliver taskbar menu action: {error}");
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => eprintln!("fievel: could not display taskbar menu: {error}"),
+            }
+        }
+        return 0;
+    }
+    DefWindowProcW(hwnd, message, wparam, lparam)
+}
+
+fn show_taskbar_menu(hwnd: HWND, context: &TrayContext) -> io::Result<Option<TaskbarAction>> {
+    let menu = unsafe { CreatePopupMenu() };
+    if menu.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    let menu = PopupMenu(menu);
+    {
+        let state = context
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        append_menu(
+            menu.0,
+            MF_STRING | MF_GRAYED,
+            0,
+            &format!("Fievel: {:.6} miles (estimated)", state.fievel_miles),
+        )?;
+        append_menu(
+            menu.0,
+            MF_STRING | MF_GRAYED,
+            0,
+            &format!(
+                "Physical mouse/trackpad: {:.6} miles (estimated)",
+                state.physical_miles
+            ),
+        )?;
+        append_separator(menu.0)?;
+        append_menu(
+            menu.0,
+            MF_STRING | MF_GRAYED,
+            0,
+            config_status_label(state.config_status),
+        )?;
+        append_menu(
+            menu.0,
+            MF_STRING | MF_GRAYED,
+            0,
+            &state.config_path.to_string_lossy(),
+        )?;
+    }
+    append_menu(menu.0, MF_STRING, MENU_OPEN_CONFIG, "Open Config Location")?;
+    append_menu(menu.0, MF_STRING, MENU_RELOAD_CONFIG, "Reload Config")?;
+    append_separator(menu.0)?;
+    append_menu(menu.0, MF_STRING, MENU_QUIT, "Quit Fievel")?;
+
+    let mut point = POINT { x: 0, y: 0 };
+    if unsafe { GetCursorPos(&mut point) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    unsafe {
+        SetForegroundWindow(hwnd);
+    }
+    let selected = unsafe {
+        TrackPopupMenu(
+            menu.0,
+            TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            point.x,
+            point.y,
+            0,
+            hwnd,
+            null(),
+        )
+    };
+    unsafe {
+        PostMessageW(hwnd, WM_NULL, 0, 0);
+    }
+    Ok(match selected {
+        value if value == MENU_OPEN_CONFIG as i32 => Some(TaskbarAction::OpenConfigLocation),
+        value if value == MENU_RELOAD_CONFIG as i32 => Some(TaskbarAction::ReloadConfig),
+        value if value == MENU_QUIT as i32 => Some(TaskbarAction::Quit),
+        _ => None,
+    })
 }
 
 fn wide(text: &str) -> Vec<u16> {

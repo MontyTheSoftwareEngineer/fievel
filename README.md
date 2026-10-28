@@ -133,6 +133,10 @@ not used by Fievel is replayed to the active application. `--device` and
 `--list` are Linux-only because Windows hooks listen to the desktop rather than
 individual keyboards.
 
+Fievel adds an icon to the taskbar notification area while running. Click it to
+view the odometer totals and config status, open the config folder, reload the
+config, or quit Fievel.
+
 The default configuration is
 `%APPDATA%\Fievel\fievel.config`; the odometer is stored in
 `%LOCALAPPDATA%\Fievel\odometer.toml`. Both paths can be overridden for config

@@ -82,6 +82,14 @@ fn miles(input_units: f64, units_per_inch: f64) -> f64 {
     input_units / units_per_inch / 63_360.0
 }
 
+pub fn miles_totals(units_per_inch: f64) -> io::Result<(f64, f64)> {
+    let totals = load(&state_path()?)?;
+    Ok((
+        miles(totals.fievel_input_units, units_per_inch),
+        miles(totals.physical_input_units, units_per_inch),
+    ))
+}
+
 pub fn report(units_per_inch: f64) -> io::Result<()> {
     let path = state_path()?;
     let totals = load(&path)?;

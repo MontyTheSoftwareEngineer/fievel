@@ -7,7 +7,7 @@ use crate::{
     odometer,
     pipeline::{HintRequest, InputEngine},
     reload,
-    windows_ui::{Overlay, INPUT_MARKER},
+    windows_ui::{Overlay, TaskbarAction, TaskbarMenu, INPUT_MARKER},
 };
 use clap::Parser;
 use std::{
@@ -558,6 +558,10 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     }
     let mut overlay = Overlay::new()?;
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
+    let mut taskbar_menu = TaskbarMenu::new(&config_path, i32::from(config_path.is_file()))?;
+    let mut last_menu_stats = Instant::now();
+    let (fievel_miles, physical_miles) = odometer::miles_totals(args.odometer_units_per_inch)?;
+    taskbar_menu.set_odometer_stats(fievel_miles, physical_miles);
     let hooks = Hooks::start()?;
     eprintln!(
         "{} {:?} for Free Mouse Mode; Ctrl+C exits.",
@@ -644,6 +648,21 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                     return Err("Windows input hook stopped unexpectedly".into())
                 }
             }
+            overlay.pump()?;
+            match taskbar_menu.pump()? {
+                Some(TaskbarAction::OpenConfigLocation) => {
+                    taskbar_menu.open_config_location()?;
+                }
+                Some(TaskbarAction::ReloadConfig) => reload_requested = true,
+                Some(TaskbarAction::Quit) => stop.store(true, Ordering::Relaxed),
+                None => {}
+            }
+            if last_menu_stats.elapsed() >= Duration::from_secs(1) {
+                let (fievel_miles, physical_miles) =
+                    odometer::miles_totals(args.odometer_units_per_inch)?;
+                taskbar_menu.set_odometer_stats(fievel_miles, physical_miles);
+                last_menu_stats = Instant::now();
+            }
             if reload_requested {
                 let reload_result: Result<_, Box<dyn Error>> = (|| {
                     let (new_path, new_config) = load_config(&args)?;
@@ -669,15 +688,19 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         config = new_config;
                         config_path = new_path;
                         update_indicator(&mut overlay, &config, &engine)?;
+                        taskbar_menu.set_config_status(
+                            &config_path,
+                            if config_path.is_file() { 3 } else { 4 },
+                        );
                         crate::notifications::config_reload(true);
                     }
                     Err(error) => {
                         eprintln!("fievel: config reload failed: {error}");
+                        taskbar_menu.set_config_status(&config_path, 2);
                         crate::notifications::config_reload(false);
                     }
                 }
             }
-            overlay.pump()?;
         }
         Ok(())
     })();
