@@ -10,6 +10,8 @@ pub struct RemapConfig {
     pub chord_timeout: u64,
     pub main: BTreeMap<String, String>,
     pub layers: BTreeMap<String, BTreeMap<String, String>>,
+    #[serde(skip)]
+    pub win_super_is_alt: bool,
 }
 
 impl Default for RemapConfig {
@@ -18,6 +20,7 @@ impl Default for RemapConfig {
             chord_timeout: 25,
             main: BTreeMap::new(),
             layers: BTreeMap::new(),
+            win_super_is_alt: false,
         }
     }
 }
@@ -42,8 +45,17 @@ struct Parsed {
     layers: BTreeMap<String, Vec<Mapping>>,
 }
 
-fn action_key(text: &str) -> Result<K, String> {
-    parse_key(text)
+fn action_key(text: &str, win_super_is_alt: bool) -> Result<K, String> {
+    let key = parse_key(text)?;
+    Ok(if win_super_is_alt {
+        match key {
+            K::KEY_LEFTMETA => K::KEY_LEFTALT,
+            K::KEY_RIGHTMETA => K::KEY_RIGHTALT,
+            key => key,
+        }
+    } else {
+        key
+    })
 }
 
 fn is_modifier_alias(text: &str) -> bool {
@@ -63,7 +75,7 @@ fn is_modifier_alias(text: &str) -> bool {
     )
 }
 
-fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
+fn parse_action(text: &str, nested: bool, win_super_is_alt: bool) -> Result<Action, String> {
     let text = text.trim();
     if text.eq_ignore_ascii_case("free_mouse") {
         return Ok(Action::Mouse);
@@ -74,7 +86,7 @@ fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
     {
         let name = body.trim();
         if is_modifier_alias(name) {
-            return action_key(name).map(Action::Key);
+            return action_key(name, win_super_is_alt).map(Action::Key);
         }
         if name.is_empty()
             || !name
@@ -117,12 +129,12 @@ fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
         }
         let milliseconds = parse_milliseconds(parts[1])?;
         return Ok(Action::Timeout(
-            Box::new(parse_action(parts[0], true)?),
+            Box::new(parse_action(parts[0], true, win_super_is_alt)?),
             Duration::from_millis(milliseconds),
-            Box::new(parse_action(parts[2], true)?),
+            Box::new(parse_action(parts[2], true, win_super_is_alt)?),
         ));
     }
-    action_key(text).map(Action::Key)
+    action_key(text, win_super_is_alt).map(Action::Key)
 }
 
 fn parse_milliseconds(text: &str) -> Result<u64, String> {
@@ -138,12 +150,15 @@ fn parse_milliseconds(text: &str) -> Result<u64, String> {
     Ok(value)
 }
 
-fn parse_table(table: &BTreeMap<String, String>) -> Result<Vec<Mapping>, String> {
+fn parse_table(
+    table: &BTreeMap<String, String>,
+    win_super_is_alt: bool,
+) -> Result<Vec<Mapping>, String> {
     let mut mappings: Vec<Mapping> = Vec::new();
     for (trigger, text) in table {
         let mut keys = trigger
             .split('+')
-            .map(action_key)
+            .map(|key| action_key(key, win_super_is_alt))
             .collect::<Result<Vec<_>, _>>()?;
         keys.sort_unstable();
         if keys.windows(2).any(|pair| pair[0] == pair[1]) {
@@ -154,7 +169,7 @@ fn parse_table(table: &BTreeMap<String, String>) -> Result<Vec<Mapping>, String>
         }
         mappings.push(Mapping {
             keys,
-            action: parse_action(text, false)?,
+            action: parse_action(text, false, win_super_is_alt)?,
         });
     }
     Ok(mappings)
@@ -166,7 +181,7 @@ impl RemapConfig {
             return Err("remap.chord_timeout must be greater than zero".to_owned());
         }
         let parsed = Parsed {
-            main: parse_table(&self.main)?,
+            main: parse_table(&self.main, self.win_super_is_alt)?,
             layers: self
                 .layers
                 .iter()
@@ -179,7 +194,7 @@ impl RemapConfig {
                     {
                         return Err(format!("invalid or reserved layer name {name:?}"));
                     }
-                    Ok((name.clone(), parse_table(table)?))
+                    Ok((name.clone(), parse_table(table, self.win_super_is_alt)?))
                 })
                 .collect::<Result<_, _>>()?,
         };

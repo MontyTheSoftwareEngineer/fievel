@@ -1930,7 +1930,9 @@ mod tests {
             (K::KEY_SPACE, K::KEY_LEFTALT),
         ] {
             for release_first in [first, second] {
-                let config = Config::parse("[keys]\nfree_mouse = 'leftalt + space'").unwrap();
+                let config =
+                    Config::parse("win_super_is_alt = false\n[keys]\nfree_mouse = 'leftalt + space'")
+                        .unwrap();
                 let mut e = Engine::new(config);
                 assert_eq!(e.key(first, 1).keyboard.len(), 1);
                 assert!(!e.active());
@@ -1973,8 +1975,10 @@ mod tests {
 
     #[test]
     fn toggle_chord_reserves_members_until_release_and_can_be_repressed() {
-        let config =
-            Config::parse("mode = 'toggle'\n[keys]\nfree_mouse = 'leftalt+space'").unwrap();
+        let config = Config::parse(
+            "win_super_is_alt = false\nmode = 'toggle'\n[keys]\nfree_mouse = 'leftalt+space'",
+        )
+        .unwrap();
         let mut e = Engine::new(config);
         e.key(K::KEY_LEFTALT, 1);
         assert!(e.key(K::KEY_SPACE, 1).mouse.is_empty());
