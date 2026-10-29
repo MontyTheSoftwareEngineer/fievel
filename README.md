@@ -19,9 +19,11 @@ native overlay.
 
 ## Quickstart
 
-No Rust toolchain or build is needed: download the Linux x64 binary archive
-(`fievel-linux-x64.tar.gz`) from
+No Rust toolchain or build is needed: download the latest builds from:
 [Releases](https://github.com/MontyTheSoftwareEngineer/fievel/releases/latest).
+
+### Linux:
+For Linux you probably need to:
 Set up [device permissions](#device-permissions) once.
 From the download directory:
 
@@ -30,7 +32,23 @@ tar -xzf fievel-linux-x64.tar.gz
 chmod +x fievel
 ./fievel
 ```
+On Linux, fievel.config should be placed in ~/.config/fievel/fievel.config
 
+### MacOS:
+Start the fievel binary from Terminal, or double click the Fievel.app app bundle to launch. 
+On Mac, the first two launches will cause MacOS to prompt you for permissions, which you will need to allow
+in order to use Fievel. Without Input Monitoring and Accessibility persmissions, Fievel will not launch (you
+will get error messages until you allow these).
+The last permission required is Screen Recording in order for Hint Mode to operate, but Fievel will start
+without it. Press keybind for Hint Mode (default is cmd + space) for it to trigger the prompt to allow 
+screen recording permissions. Hint Mode requires this permission as it needs to catpure a screenshot of the 
+screen for hint processing.
+
+On Mac, fievel.config should live in ~/.config/fievel/fievel.config
+
+### Windows:
+
+For Windows, just launch the Fievel.exe. Config file is in APPDATA Roaming.
 Hold **F3** and use **H/J/K/L** to move the mouse. Release F3 to type normally.
 Press **Ctrl+C** to stop. No config file is required to use the defaults.
 If a keyboard disconnects, fievel releases its keys and keeps running. In the
