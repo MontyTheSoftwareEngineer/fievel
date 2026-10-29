@@ -163,6 +163,8 @@ pub struct Keys {
     pub free_mouse: Vec<K>,
     #[serde(deserialize_with = "deserialize_chord")]
     pub reload_config: Vec<K>,
+    #[serde(deserialize_with = "deserialize_chord")]
+    pub config_screen: Vec<K>,
     #[serde(deserialize_with = "deserialize_key")]
     pub toggle_hold: K,
     #[serde(deserialize_with = "deserialize_key")]
@@ -198,6 +200,7 @@ impl Default for Keys {
         Self {
             free_mouse: vec![K::KEY_F3],
             reload_config: vec![K::KEY_LEFTMETA, K::KEY_LEFTSHIFT, K::KEY_R],
+            config_screen: vec![K::KEY_LEFTMETA, K::KEY_LEFTSHIFT, K::KEY_SLASH],
             toggle_hold: K::KEY_Z,
             left: K::KEY_H,
             down: K::KEY_J,
@@ -421,6 +424,51 @@ fn deserialize_optional_color<'de, D: Deserializer<'de>>(
 
 type TomlTable = toml::map::Map<String, toml::Value>;
 
+fn toml_table(entries: impl IntoIterator<Item = (&'static str, toml::Value)>) -> toml::Value {
+    toml::Value::Table(
+        entries
+            .into_iter()
+            .map(|(key, value)| (key.to_owned(), value))
+            .collect(),
+    )
+}
+
+fn toml_key(key: K) -> toml::Value {
+    toml::Value::String(format!("{key:?}"))
+}
+
+fn toml_chord(chord: &[K]) -> toml::Value {
+    toml::Value::String(
+        chord
+            .iter()
+            .map(|key| format!("{key:?}"))
+            .collect::<Vec<_>>()
+            .join(" + "),
+    )
+}
+
+fn toml_color(color: Color) -> toml::Value {
+    toml::Value::String(format!(
+        "#{:02x}{:02x}{:02x}{:02x}",
+        color.r, color.g, color.b, color.a
+    ))
+}
+
+fn merge_toml_values(base: &mut toml::Value, overlay: toml::Value) {
+    match (base, overlay) {
+        (toml::Value::Table(base), toml::Value::Table(overlay)) => {
+            for (key, value) in overlay {
+                if let Some(existing) = base.get_mut(&key) {
+                    merge_toml_values(existing, value);
+                } else {
+                    base.insert(key, value);
+                }
+            }
+        }
+        (base, overlay) => *base = overlay,
+    }
+}
+
 fn parse_toml_value<T: DeserializeOwned>(value: &toml::Value) -> Result<T, String> {
     value
         .clone()
@@ -586,6 +634,7 @@ fn reset_config_value(config: &mut Config, path: &str) -> bool {
         "easing.scroll" => config.easing.scroll = defaults.easing.scroll,
         "keys.free_mouse" => config.keys.free_mouse = defaults.keys.free_mouse,
         "keys.reload_config" => config.keys.reload_config = defaults.keys.reload_config,
+        "keys.config_screen" => config.keys.config_screen = defaults.keys.config_screen,
         "keys.toggle_hold" => config.keys.toggle_hold = defaults.keys.toggle_hold,
         "keys.left" => config.keys.left = defaults.keys.left,
         "keys.down" => config.keys.down = defaults.keys.down,
@@ -788,6 +837,7 @@ impl Config {
         map_key(&mut self.keycast.hotkey);
         map_chord(&mut self.keys.free_mouse);
         map_chord(&mut self.keys.reload_config);
+        map_chord(&mut self.keys.config_screen);
         for key in [
             &mut self.keys.toggle_hold,
             &mut self.keys.left,
@@ -1002,6 +1052,7 @@ impl Config {
                 &[
                     "free_mouse",
                     "reload_config",
+                    "config_screen",
                     "toggle_hold",
                     "left",
                     "down",
@@ -1031,6 +1082,13 @@ impl Config {
                 "reload_config",
                 "keys.reload_config",
                 &mut config.keys.reload_config,
+                &mut changed,
+            );
+            apply_chord(
+                table,
+                "config_screen",
+                "keys.config_screen",
+                &mut config.keys.config_screen,
                 &mut changed,
             );
             apply_key(
@@ -1494,6 +1552,209 @@ impl Config {
         Ok(config)
     }
 
+    pub(crate) fn parse_strict(text: &str) -> Result<Self, Box<dyn Error>> {
+        let values: toml::Value = toml::from_str(text)?;
+        let win_super_is_alt = if cfg!(target_os = "windows") {
+            match values
+                .as_table()
+                .and_then(|table| table.get("win_super_is_alt"))
+            {
+                Some(value) => parse_toml_value::<bool>(value).map_err(io::Error::other)?,
+                None => true,
+            }
+        } else {
+            false
+        };
+        let mut defaults: toml::Value =
+            toml::from_str(&Self::with_win_super_is_alt(win_super_is_alt).to_toml()?)?;
+        merge_toml_values(&mut defaults, values);
+        let mut config: Self = defaults.try_into()?;
+        config.win_super_is_alt = win_super_is_alt;
+        config.remap.win_super_is_alt = win_super_is_alt;
+        if win_super_is_alt {
+            config.map_super_to_alt();
+        }
+        config.validate().map_err(io::Error::other)?;
+        Ok(config)
+    }
+
+    pub fn to_toml(&self) -> Result<String, toml::ser::Error> {
+        use toml::Value;
+
+        let mut root = TomlTable::new();
+        root.insert(
+            "win_super_is_alt".to_owned(),
+            Value::Boolean(self.win_super_is_alt),
+        );
+        root.insert(
+            "mode".to_owned(),
+            Value::String(
+                match self.mode {
+                    Mode::Hold => "hold",
+                    Mode::Toggle => "toggle",
+                }
+                .to_owned(),
+            ),
+        );
+        root.insert("notify".to_owned(), Value::Boolean(self.notify));
+        root.insert(
+            "home_end_enabled".to_owned(),
+            Value::Boolean(self.home_end_enabled),
+        );
+        root.insert(
+            "speeds".to_owned(),
+            toml_table([
+                ("normal", Value::Float(self.speeds.normal)),
+                ("slow", Value::Float(self.speeds.slow)),
+                ("fast", Value::Float(self.speeds.fast)),
+                ("scroll", Value::Float(self.speeds.scroll)),
+                ("scroll_slow", Value::Float(self.speeds.scroll_slow)),
+                ("scroll_fast", Value::Float(self.speeds.scroll_fast)),
+            ]),
+        );
+        let mut easing = TomlTable::new();
+        easing.insert("movement".to_owned(), Value::Float(self.easing.movement));
+        if let Some(movement_stop) = self.easing.movement_stop {
+            easing.insert("movement_stop".to_owned(), Value::Float(movement_stop));
+        }
+        easing.insert("scroll".to_owned(), Value::Float(self.easing.scroll));
+        root.insert("easing".to_owned(), Value::Table(easing));
+        root.insert(
+            "keys".to_owned(),
+            toml_table([
+                ("free_mouse", toml_chord(&self.keys.free_mouse)),
+                ("reload_config", toml_chord(&self.keys.reload_config)),
+                ("config_screen", toml_chord(&self.keys.config_screen)),
+                ("toggle_hold", toml_key(self.keys.toggle_hold)),
+                ("left", toml_key(self.keys.left)),
+                ("down", toml_key(self.keys.down)),
+                ("up", toml_key(self.keys.up)),
+                ("right", toml_key(self.keys.right)),
+                ("left_click", toml_key(self.keys.left_click)),
+                ("right_click", toml_key(self.keys.right_click)),
+                ("scroll_left", toml_key(self.keys.scroll_left)),
+                ("scroll_down", toml_key(self.keys.scroll_down)),
+                ("scroll_up", toml_key(self.keys.scroll_up)),
+                ("scroll_right", toml_key(self.keys.scroll_right)),
+                ("slow", toml_key(self.keys.slow)),
+                ("fast", toml_key(self.keys.fast)),
+                ("locate", toml_key(self.keys.locate)),
+            ]),
+        );
+        root.insert(
+            "keycast".to_owned(),
+            toml_table([
+                ("enabled", Value::Boolean(self.keycast.enabled)),
+                ("hotkey", toml_key(self.keycast.hotkey)),
+                ("max_keys", Value::Integer(self.keycast.max_keys as i64)),
+                ("timeout", Value::Float(self.keycast.timeout)),
+            ]),
+        );
+
+        let hint_keys = toml_table([
+            ("left", toml_chord(&self.hints.keys.left)),
+            ("right", toml_chord(&self.hints.keys.right)),
+            ("grid", toml_chord(&self.hints.keys.grid)),
+            ("grid_upper_left", toml_key(self.hints.keys.grid_upper_left)),
+            (
+                "grid_upper_right",
+                toml_key(self.hints.keys.grid_upper_right),
+            ),
+            ("grid_lower_left", toml_key(self.hints.keys.grid_lower_left)),
+            (
+                "grid_lower_right",
+                toml_key(self.hints.keys.grid_lower_right),
+            ),
+            ("grid_left_click", toml_key(self.hints.keys.grid_left_click)),
+            (
+                "grid_right_click",
+                toml_key(self.hints.keys.grid_right_click),
+            ),
+            ("cancel", toml_key(self.hints.keys.cancel)),
+            (
+                "toggle_background",
+                toml_key(self.hints.keys.toggle_background),
+            ),
+            ("debug", toml_key(self.hints.keys.debug)),
+        ]);
+        let mut grid_colors = TomlTable::new();
+        for (name, color) in [
+            ("upper_left", self.hints.grid_colors.upper_left),
+            ("upper_right", self.hints.grid_colors.upper_right),
+            ("lower_left", self.hints.grid_colors.lower_left),
+            ("lower_right", self.hints.grid_colors.lower_right),
+        ] {
+            if let Some(color) = color {
+                grid_colors.insert(name.to_owned(), toml_color(color));
+            }
+        }
+        root.insert(
+            "hints".to_owned(),
+            toml_table([
+                (
+                    "recursive_grid_enabled",
+                    Value::Boolean(self.hints.recursive_grid_enabled),
+                ),
+                ("keys", hint_keys),
+                (
+                    "label_symbols",
+                    Value::String(self.hints.label_symbols.clone()),
+                ),
+                ("border_color", toml_color(self.hints.border_color)),
+                ("fill_color", toml_color(self.hints.fill_color)),
+                ("grid_colors", Value::Table(grid_colors)),
+                (
+                    "readability_color",
+                    toml_color(self.hints.readability_color),
+                ),
+                ("label_color", toml_color(self.hints.label_color)),
+                (
+                    "label_highlight_color",
+                    toml_color(self.hints.label_highlight_color),
+                ),
+                ("min_width", Value::Integer(self.hints.min_width.into())),
+                ("max_width", Value::Integer(self.hints.max_width.into())),
+                ("min_height", Value::Integer(self.hints.min_height.into())),
+                ("max_height", Value::Integer(self.hints.max_height.into())),
+            ]),
+        );
+
+        let main = self
+            .remap
+            .main
+            .iter()
+            .map(|(trigger, action)| (trigger.clone(), Value::String(action.clone())))
+            .collect();
+        let layers = self
+            .remap
+            .layers
+            .iter()
+            .map(|(name, mappings)| {
+                (
+                    name.clone(),
+                    Value::Table(
+                        mappings
+                            .iter()
+                            .map(|(trigger, action)| {
+                                (trigger.clone(), Value::String(action.clone()))
+                            })
+                            .collect(),
+                    ),
+                )
+            })
+            .collect();
+        root.insert(
+            "remap".to_owned(),
+            toml_table([
+                ("chord_timeout", Value::try_from(self.remap.chord_timeout)?),
+                ("main", Value::Table(main)),
+                ("layers", Value::Table(layers)),
+            ]),
+        );
+
+        toml::to_string_pretty(&Value::Table(root))
+    }
+
     pub fn load(path: &Path, required: bool) -> Result<Self, Box<dyn Error>> {
         if let Some(parent) = path
             .parent()
@@ -1532,14 +1793,15 @@ impl Config {
             );
         }
         if self.keycast.enabled
-            && self
+            && (self
                 .keys
                 .named()
                 .iter()
                 .any(|(_, key)| *key == self.keycast.hotkey)
+                || self.keys.config_screen.as_slice() == [self.keycast.hotkey])
         {
             return Err(
-                "keycast.hotkey must differ from Free Mouse Mode activation and control keys"
+                "keycast.hotkey must differ from Free Mouse Mode activation, control keys, and keys.config_screen"
                     .to_owned(),
             );
         }
@@ -1567,6 +1829,15 @@ impl Config {
         }
         validate_chord("keys.free_mouse", &self.keys.free_mouse)?;
         validate_chord("keys.reload_config", &self.keys.reload_config)?;
+        validate_chord("keys.config_screen", &self.keys.config_screen)?;
+        if !self
+            .keys
+            .config_screen
+            .iter()
+            .any(|key| !crate::reload::is_modifier(*key))
+        {
+            return Err("keys.config_screen must include a non-modifier key".to_owned());
+        }
         if !self
             .keys
             .reload_config
@@ -1575,6 +1846,12 @@ impl Config {
         {
             return Err("keys.reload_config must include a non-modifier key".to_owned());
         }
+        validate_unique_chords(
+            "keys.reload_config",
+            &self.keys.reload_config,
+            "keys.config_screen",
+            &self.keys.config_screen,
+        )?;
         for (name, chord) in [
             ("keys.free_mouse", &self.keys.free_mouse),
             ("hints.keys.left", &self.hints.keys.left),
@@ -1582,6 +1859,7 @@ impl Config {
             ("hints.keys.grid", &self.hints.keys.grid),
         ] {
             validate_unique_chords("keys.reload_config", &self.keys.reload_config, name, chord)?;
+            validate_unique_chords("keys.config_screen", &self.keys.config_screen, name, chord)?;
         }
         validate_chord("hints.keys.left", &self.hints.keys.left)?;
         validate_chord("hints.keys.right", &self.hints.keys.right)?;
@@ -2003,6 +2281,99 @@ mod tests {
                 .reload_config,
             default
         );
+    }
+
+    #[test]
+    fn config_screen_chord_defaults_and_can_be_rebound() {
+        let default = vec![configured_super(), K::KEY_LEFTSHIFT, K::KEY_SLASH];
+        assert_eq!(Config::default().keys.config_screen, default);
+        assert_eq!(Config::parse("").unwrap().keys.config_screen, default);
+        assert_eq!(
+            Config::parse("[keys]\nconfig_screen = 'rightmeta + shift + f9'")
+                .unwrap()
+                .keys
+                .config_screen,
+            [configured_right_super(), K::KEY_LEFTSHIFT, K::KEY_F9]
+        );
+        assert_eq!(
+            Config::parse("[keys]\nconfig_screen = 'leftmeta + leftshift'")
+                .unwrap()
+                .keys
+                .config_screen,
+            default
+        );
+    }
+
+    #[test]
+    fn effective_config_serializes_all_settings_and_round_trips() {
+        let config = Config::parse(include_str!("../fievel.config")).unwrap();
+        let serialized = config.to_toml().unwrap();
+        let reparsed = Config::parse(&serialized).unwrap();
+
+        assert_eq!(reparsed.win_super_is_alt, config.win_super_is_alt);
+        assert_eq!(reparsed.mode, config.mode);
+        assert_eq!(reparsed.notify, config.notify);
+        assert_eq!(reparsed.home_end_enabled, config.home_end_enabled);
+        assert_eq!(
+            (
+                reparsed.speeds.normal,
+                reparsed.speeds.slow,
+                reparsed.speeds.fast,
+                reparsed.speeds.scroll,
+                reparsed.speeds.scroll_slow,
+                reparsed.speeds.scroll_fast,
+            ),
+            (
+                config.speeds.normal,
+                config.speeds.slow,
+                config.speeds.fast,
+                config.speeds.scroll,
+                config.speeds.scroll_slow,
+                config.speeds.scroll_fast,
+            )
+        );
+        assert_eq!(
+            (
+                reparsed.easing.movement,
+                reparsed.easing.movement_stop,
+                reparsed.easing.scroll,
+            ),
+            (
+                config.easing.movement,
+                config.easing.movement_stop,
+                config.easing.scroll,
+            )
+        );
+        assert_eq!(reparsed.keys.named(), config.keys.named());
+        assert_eq!(reparsed.keys.config_screen, config.keys.config_screen);
+        assert_eq!(reparsed.keys.reload_config, config.keys.reload_config);
+        assert_eq!(reparsed.keys.free_mouse, config.keys.free_mouse);
+        assert_eq!(reparsed.keycast.enabled, config.keycast.enabled);
+        assert_eq!(reparsed.keycast.hotkey, config.keycast.hotkey);
+        assert_eq!(reparsed.keycast.max_keys, config.keycast.max_keys);
+        assert_eq!(reparsed.keycast.timeout, config.keycast.timeout);
+        assert_eq!(reparsed.hints, config.hints);
+        assert_eq!(reparsed.remap.chord_timeout, config.remap.chord_timeout);
+        assert_eq!(reparsed.remap.main, config.remap.main);
+        assert_eq!(reparsed.remap.layers, config.remap.layers);
+        assert!(serialized.contains("[hints.keys]"));
+        assert!(serialized.contains("config_screen ="));
+    }
+
+    #[test]
+    fn strict_config_parser_fills_platform_defaults_and_rejects_invalid_values() {
+        let config = Config::parse_strict("notify = false").unwrap();
+        assert!(!config.notify);
+        assert_eq!(
+            config.keys.config_screen,
+            vec![configured_super(), K::KEY_LEFTSHIFT, K::KEY_SLASH]
+        );
+        assert!(Config::parse_strict("[speeds]\nnormal = -1").is_err());
+        assert!(Config::parse_strict("unknown = true").is_err());
+        assert!(Config::parse_strict(
+            "[keycast]\nenabled = true\nhotkey = 'f9'\n[keys]\nconfig_screen = 'f9'"
+        )
+        .is_err());
     }
 
     #[test]

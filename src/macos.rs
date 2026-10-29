@@ -1,5 +1,6 @@
 use crate::{
     config::{self, Config},
+    config_screen::ConfigScreen,
     engine::Output,
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
@@ -157,6 +158,7 @@ fn validate_key_mappings(config: &Config) -> Result<(), Box<dyn Error>> {
         keys.push(config.keycast.hotkey);
     }
     keys.extend(config.keys.reload_config.iter().copied());
+    keys.extend(config.keys.config_screen.iter().copied());
     for key in keys {
         if mac_keycode(key).is_none() {
             return Err(format!(
@@ -182,6 +184,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
         println!("Config: {}\n{config:#?}", config_path.display());
         return Ok(());
     }
+    let config_screen = ConfigScreen::start(&config_path)?;
     let stop = Arc::new(AtomicBool::new(false));
     for signal in [
         signal_hook::consts::SIGINT,
@@ -295,6 +298,14 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                                 };
                                 if changed {
                                     if reload::matches_press(
+                                        &config.keys.config_screen,
+                                        key,
+                                        value,
+                                        |key| held.contains(&key) || engine.key_is_held(key),
+                                    ) {
+                                        suppressed_keys.insert(key);
+                                        config_screen.open()?;
+                                    } else if reload::matches_press(
                                         &config.keys.reload_config,
                                         key,
                                         value,
@@ -338,6 +349,9 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         last_menu_stats = Instant::now();
                     }
                     let menu_reload_requested = unsafe { fievel_ui_reload_requested() };
+                    if config_screen.take_reload_request()? {
+                        reload_requested = true;
+                    }
                     if reload_requested || menu_reload_requested {
                         let reload_result: Result<_, Box<dyn Error>> = (|| {
                             let (new_path, new_config) = load_config(&args)?;
@@ -414,7 +428,9 @@ fn activate_pending_hints(
     if let Some(request) = engine.take_hint_request() {
         let activated = match request {
             HintRequest::Click(click) => ActiveHints::activate(&config.hints, click),
-            HintRequest::Grid => ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left),
+            HintRequest::Grid => {
+                ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left)
+            }
         };
         match activated {
             Ok(hints) => {

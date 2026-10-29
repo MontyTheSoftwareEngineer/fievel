@@ -62,6 +62,10 @@ running. The reload shortcut can be changed with `keys.reload_config`, and a
 desktop notification confirms whether the reload succeeded. This example also
 enables [home-row mods and navigation layers](#home-row-mods-and-navigation-layers),
 including **D+F** for Free Mouse Mode alongside **F3**.
+Press **Super+Shift+?** to open the non-blocking settings screen in your browser.
+It shows the complete configuration, including defaults; saving validates,
+writes, and applies the settings immediately. Change its shortcut with
+`keys.config_screen`.
 
 See [Configuration](#configuration) for all settings.
 
@@ -450,6 +454,7 @@ scroll = 0.3
 [keys]
 free_mouse = "f3" # Also accepts chords such as "leftalt + space"
 reload_config = "leftmeta + leftshift + r" # Reload configuration on Linux, macOS, and Windows
+config_screen = "leftmeta + leftshift + slash" # Open the browser-based settings screen
 toggle_hold = "z" # Locks hold mode until pressed again or Free Mouse Mode is pressed
 left = "h"
 down = "j"

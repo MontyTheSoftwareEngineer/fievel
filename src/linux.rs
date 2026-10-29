@@ -1,6 +1,6 @@
-use clap::Parser;
 use crate::{
     config::{self, Config},
+    config_screen::ConfigScreen,
     engine::Output,
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
@@ -8,6 +8,7 @@ use crate::{
     pipeline::{HintRequest, InputEngine as Engine},
     reload,
 };
+use clap::Parser;
 use evdev::{
     uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
     RelativeAxisCode,
@@ -433,6 +434,13 @@ fn validate_input_keys(
             ));
         }
     }
+    for key in &config.keys.config_screen {
+        if !supported.contains(*key) {
+            return Err(format!(
+                "Selected keyboards do not support keys.config_screen = {key:?}; choose another input or binding"
+            ));
+        }
+    }
     for (action, chord) in [
         ("hints.keys.left", &config.hints.keys.left),
         ("hints.keys.right", &config.hints.keys.right),
@@ -566,6 +574,7 @@ fn event_loop(
     args: &Args,
     config_path: &mut PathBuf,
     config: &mut Config,
+    config_screen: &ConfigScreen,
     supported: &AttributeSet<KeyCode>,
     stop: &AtomicBool,
     indicator: &mut Indicator,
@@ -610,6 +619,18 @@ fn event_loop(
                             if value == 0 && !held.contains(key) {
                                 suppressed_keys.remove(&key);
                             }
+                            continue;
+                        }
+                        if changed
+                            && reload::matches_press(
+                                &config.keys.config_screen,
+                                key,
+                                value,
+                                |key| held.contains(key) || engine.key_is_held(key),
+                            )
+                        {
+                            suppressed_keys.insert(key);
+                            config_screen.open()?;
                             continue;
                         }
                         if changed
@@ -717,6 +738,21 @@ fn event_loop(
                 device.clone(),
             )?;
         }
+        if config_screen.take_reload_request()? {
+            reload_config(
+                args,
+                config_path,
+                config,
+                supported,
+                outputs,
+                engine,
+                &mut hint_input,
+                &mut hint_mode,
+                held,
+                &mut suppressed_keys,
+                indicator,
+            )?;
+        }
         thread::sleep(TICK.saturating_sub(now.elapsed()));
     }
     Ok(())
@@ -793,7 +829,9 @@ fn activate_pending_hints(
     if let Some(request) = engine.take_hint_request() {
         let activated = match request {
             HintRequest::Click(click) => ActiveHints::activate(&config.hints, click),
-            HintRequest::Grid => ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left),
+            HintRequest::Grid => {
+                ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left)
+            }
         };
         match activated {
             Ok(hints) => {
@@ -966,6 +1004,7 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
         config.keys.free_mouse,
     );
     let mut engine = Engine::new(config.clone())?;
+    let config_screen = ConfigScreen::start(&config_path)?;
     // Seeding held keys preserves modifiers if the process starts mid-keypress.
     let result = (|| -> io::Result<()> {
         for (index, (_, input)) in grabbed.iter().enumerate() {
@@ -989,6 +1028,7 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
             &args,
             &mut config_path,
             &mut config,
+            &config_screen,
             &available,
             &stop,
             &mut indicator,
@@ -1046,6 +1086,7 @@ mod tests {
             .chain(config.hints.keys.left.iter().copied())
             .chain(config.hints.keys.right.iter().copied())
             .chain(config.keys.reload_config.iter().copied())
+            .chain(config.keys.config_screen.iter().copied())
             .chain([
                 config.hints.keys.cancel,
                 config.hints.keys.debug,
@@ -1239,6 +1280,7 @@ mod tests {
             .chain(config.hints.keys.left.iter().copied())
             .chain(config.hints.keys.right.iter().copied())
             .chain(config.keys.reload_config.iter().copied())
+            .chain(config.keys.config_screen.iter().copied())
             .chain([
                 config.hints.keys.cancel,
                 config.hints.keys.debug,
@@ -1259,10 +1301,8 @@ mod tests {
 
     #[test]
     fn reload_hotkey_requires_physical_input_keys() {
-        let config = Config::parse(
-            "[keys]\nreload_config = 'f8'\n[remap.main]\ncapslock = 'f8'",
-        )
-        .unwrap();
+        let config =
+            Config::parse("[keys]\nreload_config = 'f8'\n[remap.main]\ncapslock = 'f8'").unwrap();
         let mut supported: AttributeSet<KeyCode> = config
             .keys
             .named()

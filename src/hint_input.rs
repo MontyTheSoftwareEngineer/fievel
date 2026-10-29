@@ -178,7 +178,8 @@ mod tests {
 
     #[test]
     fn debug_keys_and_remappings_do_not_replay_pending_clicks() {
-        let config = Config::parse("[hints.keys]\ndebug = 'f9'\n[remap.main]\n'x+y' = 'f9'").unwrap();
+        let config =
+            Config::parse("[hints.keys]\ndebug = 'f9'\n[remap.main]\n'x+y' = 'f9'").unwrap();
         let mut input = HintInput::new(&config).unwrap();
         input.begin([]);
         assert!(input.key(K::KEY_I, 1).is_empty());
@@ -186,7 +187,10 @@ mod tests {
         assert!(input.key(K::KEY_F9, 2).is_empty());
         assert!(input.advance(Duration::from_millis(50)).is_empty());
         input.key(K::KEY_F9, 0);
-        assert_eq!(press(&mut input, &[K::KEY_X, K::KEY_Y]), [Key(K::KEY_F9, 1)]);
+        assert_eq!(
+            press(&mut input, &[K::KEY_X, K::KEY_Y]),
+            [Key(K::KEY_F9, 1)]
+        );
         assert_eq!(input.key(K::KEY_Y, 0), [Key(K::KEY_F9, 0)]);
         input.begin([]);
         assert_eq!(input.key(K::KEY_F8, 1), [Key(K::KEY_F8, 1)]);

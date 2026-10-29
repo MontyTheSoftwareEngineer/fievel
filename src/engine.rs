@@ -2,9 +2,7 @@ use crate::input::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use crate::{
-    config::{Config, Mode},
-};
+use crate::config::{Config, Mode};
 use KeyCode as K;
 use RelativeAxisCode as R;
 
@@ -282,15 +280,9 @@ impl Engine {
                     }
                 } else {
                     match value {
-                        1 if self.forwarded.insert(key) => {
-                            out.keyboard.push(key_event(key, 1))
-                        }
-                        0 if self.forwarded.remove(&key) => {
-                            out.keyboard.push(key_event(key, 0))
-                        }
-                        2 if self.forwarded.contains(&key) => {
-                            out.keyboard.push(key_event(key, 2))
-                        }
+                        1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
+                        0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
+                        2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
                         _ => {}
                     }
                 }
@@ -808,12 +800,14 @@ mod tests {
             e.key(K::KEY_L, 1);
             assert_eq!(e.keycast_keys(), [K::KEY_K, K::KEY_L]);
             let movement = e.advance(Duration::from_millis(20));
-            assert!(movement.mouse.iter().any(|event| {
-                event.code() == R::REL_X.0 && event.value() > 0
-            }));
-            assert!(movement.mouse.iter().any(|event| {
-                event.code() == R::REL_Y.0 && event.value() < 0
-            }));
+            assert!(movement
+                .mouse
+                .iter()
+                .any(|event| { event.code() == R::REL_X.0 && event.value() > 0 }));
+            assert!(movement
+                .mouse
+                .iter()
+                .any(|event| { event.code() == R::REL_Y.0 && event.value() < 0 }));
             e.key(K::KEY_ESC, 1);
             assert!(e.active());
             assert!(e.keycast_keys().is_empty());
@@ -1594,8 +1588,14 @@ mod tests {
     #[test]
     fn hold_toggle_locks_activation_and_unlocks_with_activation_or_toggle_key() {
         let mut e = engine();
-        assert_eq!(events(&e.key(K::KEY_Z, 1).keyboard), events(&[key_event(K::KEY_Z, 1)]));
-        assert_eq!(events(&e.key(K::KEY_Z, 0).keyboard), events(&[key_event(K::KEY_Z, 0)]));
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 1).keyboard),
+            events(&[key_event(K::KEY_Z, 1)])
+        );
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 0).keyboard),
+            events(&[key_event(K::KEY_Z, 0)])
+        );
 
         e.key(K::KEY_F3, 1);
         assert!(e.active());
@@ -1638,8 +1638,14 @@ mod tests {
         let mut e = toggle_engine();
         e.key(K::KEY_F3, 1);
         e.key(K::KEY_F3, 0);
-        assert_eq!(events(&e.key(K::KEY_Z, 1).keyboard), events(&[key_event(K::KEY_Z, 1)]));
-        assert_eq!(events(&e.key(K::KEY_Z, 0).keyboard), events(&[key_event(K::KEY_Z, 0)]));
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 1).keyboard),
+            events(&[key_event(K::KEY_Z, 1)])
+        );
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 0).keyboard),
+            events(&[key_event(K::KEY_Z, 0)])
+        );
     }
 
     #[test]
@@ -1928,9 +1934,10 @@ mod tests {
             (K::KEY_SPACE, K::KEY_LEFTALT),
         ] {
             for release_first in [first, second] {
-                let config =
-                    Config::parse("win_super_is_alt = false\n[keys]\nfree_mouse = 'leftalt + space'")
-                        .unwrap();
+                let config = Config::parse(
+                    "win_super_is_alt = false\n[keys]\nfree_mouse = 'leftalt + space'",
+                )
+                .unwrap();
                 let mut e = Engine::new(config);
                 assert_eq!(e.key(first, 1).keyboard.len(), 1);
                 assert!(!e.active());

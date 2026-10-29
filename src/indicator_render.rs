@@ -1,6 +1,6 @@
-use crate::input::KeyCode;
 use crate::engine::SpeedMode;
 use crate::grid::key_label;
+use crate::input::KeyCode;
 
 const COLUMNS: usize = 40;
 const CELL_WIDTH: u32 = 12;
@@ -228,7 +228,9 @@ mod tests {
             (SpeedMode::Slow, 0xf0f0f000),
         ] {
             let pixels = layout.pixels(width, height, speed);
-            assert!(pixels.chunks_exact(4).any(|pixel| pixel == expected.to_ne_bytes()));
+            assert!(pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected.to_ne_bytes()));
             for pixel in pixels.chunks_exact(4) {
                 let color = u32::from_ne_bytes(pixel.try_into().unwrap());
                 assert!(color == expected || color == BACKGROUND);
@@ -258,6 +260,9 @@ mod tests {
             assert!(((color >> 16) & 255) <= alpha);
         }
         assert_eq!(layout.pixels(1, 1, SpeedMode::Normal).len(), 4);
-        assert_eq!(layout.pixels(100, 50, SpeedMode::Normal).len(), 100 * 50 * 4);
+        assert_eq!(
+            layout.pixels(100, 50, SpeedMode::Normal).len(),
+            100 * 50 * 4
+        );
     }
 }

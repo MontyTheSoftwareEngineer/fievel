@@ -1,5 +1,6 @@
 use crate::{
     config::{self, Config},
+    config_screen::ConfigScreen,
     engine::Output,
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
@@ -525,6 +526,7 @@ fn validate_key_mappings(config: &Config) -> Result<(), Box<dyn Error>> {
         keys.push(config.keycast.hotkey);
     }
     keys.extend(config.keys.reload_config.iter().copied());
+    keys.extend(config.keys.config_screen.iter().copied());
     for key in keys {
         if scan_code_for_key(key).is_none() && virtual_key_for_key(key).is_none() {
             return Err(
@@ -559,6 +561,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     let mut overlay = Overlay::new()?;
     let mut odometer = odometer::Odometer::start(Arc::clone(&stop))?;
     let mut taskbar_menu = TaskbarMenu::new(&config_path, i32::from(config_path.is_file()))?;
+    let config_screen = ConfigScreen::start(&config_path)?;
     let mut last_menu_stats = Instant::now();
     let (fievel_miles, physical_miles) = odometer::miles_totals(args.odometer_units_per_inch)?;
     taskbar_menu.set_odometer_stats(fievel_miles, physical_miles);
@@ -616,6 +619,13 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                             suppressed_keys.remove(&key);
                         }
                     } else if changed
+                        && reload::matches_press(&config.keys.config_screen, key, value, |key| {
+                            held.contains(&key) || engine.key_is_held(key)
+                        })
+                    {
+                        suppressed_keys.insert(key);
+                        config_screen.open()?;
+                    } else if changed
                         && reload::matches_press(&config.keys.reload_config, key, value, |key| {
                             held.contains(&key) || engine.key_is_held(key)
                         })
@@ -659,6 +669,9 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                     odometer::miles_totals(args.odometer_units_per_inch)?;
                 taskbar_menu.set_odometer_stats(fievel_miles, physical_miles);
                 last_menu_stats = Instant::now();
+            }
+            if config_screen.take_reload_request()? {
+                reload_requested = true;
             }
             if reload_requested {
                 let reload_result: Result<_, Box<dyn Error>> = (|| {
@@ -763,7 +776,9 @@ fn activate_pending_hints(
     if let Some(request) = engine.take_hint_request() {
         let activated = match request {
             HintRequest::Click(click) => ActiveHints::activate(&config.hints, click, overlay),
-            HintRequest::Grid => ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left, overlay),
+            HintRequest::Grid => {
+                ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left, overlay)
+            }
         };
         match activated {
             Ok(hints) => {

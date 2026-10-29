@@ -1,4 +1,5 @@
 mod config;
+mod config_screen;
 mod detect;
 mod engine;
 #[cfg_attr(target_os = "macos", allow(dead_code))]
@@ -10,11 +11,9 @@ mod keycast;
 mod label;
 mod notifications;
 mod pipeline;
-mod remap;
 mod reload;
+mod remap;
 
-#[cfg(target_os = "linux")]
-mod locator;
 #[cfg(target_os = "linux")]
 #[path = "hints.rs"]
 mod hints;
@@ -23,6 +22,8 @@ mod hints;
 mod indicator;
 #[cfg(target_os = "linux")]
 mod indicator_render;
+#[cfg(target_os = "linux")]
+mod locator;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod platform;
@@ -49,10 +50,10 @@ mod hints;
 #[path = "odometer_windows.rs"]
 mod odometer;
 #[cfg(target_os = "windows")]
-mod windows_ui;
-#[cfg(target_os = "windows")]
 #[path = "windows.rs"]
 mod platform;
+#[cfg(target_os = "windows")]
+mod windows_ui;
 
 #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 compile_error!("fievel supports Linux, macOS, and Windows");

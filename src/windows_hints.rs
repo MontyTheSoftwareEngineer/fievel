@@ -14,14 +14,11 @@ use std::{
     ptr::null_mut,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, ReleaseDC,
-    GetMonitorInfoW, MonitorFromPoint, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
+    BitBlt, CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
+    MonitorFromPoint, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
     DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, SRCCOPY,
 };
-use windows_sys::Win32::{
-    Foundation::POINT,
-    UI::WindowsAndMessaging::GetCursorPos,
-};
+use windows_sys::Win32::{Foundation::POINT, UI::WindowsAndMessaging::GetCursorPos};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickKind {
@@ -157,10 +154,7 @@ impl ActiveHints {
             width: f64::from(info.rcMonitor.right - info.rcMonitor.left),
             height: f64::from(info.rcMonitor.bottom - info.rcMonitor.top),
         });
-        grid.set_cursor(
-            f64::from(point.x - origin.0),
-            f64::from(point.y - origin.1),
-        );
+        grid.set_cursor(f64::from(point.x - origin.0), f64::from(point.y - origin.1));
         let hints = Self {
             alphabet: alphabet.clone(),
             selection: LabelSelection::new(alphabet, 0),
