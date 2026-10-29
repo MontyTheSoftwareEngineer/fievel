@@ -571,10 +571,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
         },
         config.keys.free_mouse,
     );
-    let mut engine = InputEngine::new_with_macro_store(
-        config.clone(),
-        config_path.with_file_name("macros.toml"),
-    )?;
+    let mut engine = InputEngine::new(config.clone())?;
     let mut hint_input = HintInput::new(&config).map_err(io::Error::other)?;
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
@@ -599,7 +596,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 );
             } else {
                 let actions = hint_input.advance(elapsed);
-                handle_hint_input(actions, &mut hints, &config, &mut overlay, &mut engine)?;
+                handle_hint_input(actions, &mut hints, &config, &mut overlay)?;
             }
 
             match hooks.receiver.recv_timeout(TICK) {
@@ -628,7 +625,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                     } else if changed {
                         if hints.is_some() {
                             let actions = hint_input.key(key, value);
-                            handle_hint_input(actions, &mut hints, &config, &mut overlay, &mut engine)?;
+                            handle_hint_input(actions, &mut hints, &config, &mut overlay)?;
                         } else {
                             emit(engine.key(key, value), &mut odometer, &mut overlay)?;
                             update_indicator(&mut overlay, &config, &engine)?;
@@ -667,10 +664,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 let reload_result: Result<_, Box<dyn Error>> = (|| {
                     let (new_path, new_config) = load_config(&args)?;
                     let new_hint_input = HintInput::new(&new_config).map_err(io::Error::other)?;
-                    let new_engine = InputEngine::new_with_macro_store(
-                        new_config.clone(),
-                        new_path.with_file_name("macros.toml"),
-                    )?;
+                    let new_engine = InputEngine::new(new_config.clone())?;
                     Ok((new_path, new_config, new_hint_input, new_engine))
                 })();
                 match reload_result {
@@ -755,7 +749,6 @@ fn update_indicator(
         keys,
         engine.speed_mode(),
         config.notify && engine.hold_locked(),
-        engine.macro_status().as_deref(),
     )
 }
 
@@ -770,11 +763,7 @@ fn activate_pending_hints(
     if let Some(request) = engine.take_hint_request() {
         let activated = match request {
             HintRequest::Click(click) => ActiveHints::activate(&config.hints, click, overlay),
-            HintRequest::Grid => ActiveHints::activate_grid(
-                &config.hints,
-                crate::hints::ClickKind::Left,
-                overlay,
-            ),
+            HintRequest::Grid => ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left, overlay),
         };
         match activated {
             Ok(hints) => {
@@ -787,7 +776,6 @@ fn activate_pending_hints(
                         mode,
                         config,
                         overlay,
-                        engine,
                     )
                     .unwrap_or_else(|error| ActiveHints::warning(error.as_ref()));
                 }
@@ -802,7 +790,6 @@ fn handle_hint_input(
     mode: &mut Option<ActiveHints>,
     config: &Config,
     overlay: &mut Overlay,
-    engine: &mut InputEngine,
 ) -> Result<(), Box<dyn Error>> {
     for action in actions {
         let Some(hints) = mode.as_mut() else {
@@ -837,8 +824,7 @@ fn handle_hint_input(
                 match hints.handle_key(key, value, &config.hints, overlay)? {
                     HintResult::Continue => {}
                     HintResult::Cancelled => *mode = None,
-                    HintResult::Clicked(click) => {
-                        engine.record_hint_click(click);
+                    HintResult::Clicked => {
                         *mode = None;
                     }
                 }
@@ -890,13 +876,6 @@ fn emit(
         }
     }
     flush_motion(&mut dx, &mut dy)?;
-    for click in output.macro_clicks {
-        overlay.click_at(
-            click.x.round() as i32,
-            click.y.round() as i32,
-            click.right,
-        )?;
-    }
     odometer.counter.record(&output.mouse);
     Ok(())
 }

@@ -220,10 +220,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
         },
         config.keys.free_mouse,
     );
-    let mut engine = InputEngine::new_with_macro_store(
-        config.clone(),
-        config_path.with_file_name("macros.toml"),
-    )?;
+    let mut engine = InputEngine::new(config.clone())?;
     let mut hint_input = HintInput::new(&config).map_err(io::Error::other)?;
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
@@ -245,7 +242,6 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                             engine.keycast_keys(),
                             engine.speed_mode(),
                             engine.hold_locked(),
-                            engine.macro_status().as_deref(),
                         );
                         activate_pending_hints(
                             &mut engine,
@@ -256,7 +252,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         );
                     } else {
                         let actions = hint_input.advance(elapsed);
-                        handle_hint_input(actions, &mut hints, &config, &mut engine);
+                        handle_hint_input(actions, &mut hints, &config);
                     }
 
                     let mut event = NativeInputEvent {
@@ -308,12 +304,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                                         reload_requested = true;
                                     } else if hints.is_some() {
                                         let actions = hint_input.key(key, value);
-                                        handle_hint_input(
-                                            actions,
-                                            &mut hints,
-                                            &config,
-                                            &mut engine,
-                                        );
+                                        handle_hint_input(actions, &mut hints, &config);
                                     } else {
                                         emit(engine.key(key, value), &mut odometer)?;
                                         indicator.update(
@@ -321,7 +312,6 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                                             engine.keycast_keys(),
                                             engine.speed_mode(),
                                             engine.hold_locked(),
-                                            engine.macro_status().as_deref(),
                                         );
                                         activate_pending_hints(
                                             &mut engine,
@@ -353,11 +343,8 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                             let (new_path, new_config) = load_config(&args)?;
                             let new_hint_input =
                                 HintInput::new(&new_config).map_err(io::Error::other)?;
-                            let new_engine = InputEngine::new_with_macro_store(
-                                new_config.clone(),
-                                new_path.with_file_name("macros.toml"),
-                            )
-                            .map_err(io::Error::other)?;
+                            let new_engine =
+                                InputEngine::new(new_config.clone()).map_err(io::Error::other)?;
                             Ok((new_path, new_config, new_hint_input, new_engine))
                         })();
                         match reload_result {
@@ -427,10 +414,7 @@ fn activate_pending_hints(
     if let Some(request) = engine.take_hint_request() {
         let activated = match request {
             HintRequest::Click(click) => ActiveHints::activate(&config.hints, click),
-            HintRequest::Grid => ActiveHints::activate_grid(
-                &config.hints,
-                crate::hints::ClickKind::Left,
-            ),
+            HintRequest::Grid => ActiveHints::activate_grid(&config.hints, crate::hints::ClickKind::Left),
         };
         match activated {
             Ok(hints) => {
@@ -442,7 +426,6 @@ fn activate_pending_hints(
                         vec![HintInputEvent::Key(config.hints.keys.toggle_background, 1)],
                         mode,
                         config,
-                        engine,
                     );
                 }
             }
@@ -455,7 +438,6 @@ fn handle_hint_input(
     actions: Vec<HintInputEvent>,
     mode: &mut Option<ActiveHints>,
     config: &Config,
-    engine: &mut InputEngine,
 ) {
     for action in actions {
         let Some(hints) = mode.as_mut() else {
@@ -489,8 +471,7 @@ fn handle_hint_input(
             HintInputEvent::Key(key, value) => match hints.handle_key(key, value, &config.hints) {
                 Ok(HintResult::Continue) => {}
                 Ok(HintResult::Cancelled) => *mode = None,
-                Ok(HintResult::Clicked(click)) => {
-                    engine.record_hint_click(click);
+                Ok(HintResult::Clicked) => {
                     *mode = None;
                 }
                 Err(error) => {
@@ -553,10 +534,6 @@ fn emit(output: Output, odometer: &mut odometer::Odometer) -> io::Result<()> {
         }
     }
     flush_motion(&mut dx, &mut dy)?;
-    for click in output.macro_clicks {
-        crate::hints::macro_click_at(click.x, click.y, click.right)
-            .map_err(|error| io::Error::other(error.to_string()))?;
-    }
     odometer.counter.record(&output.mouse);
     Ok(())
 }

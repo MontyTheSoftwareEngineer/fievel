@@ -32,9 +32,8 @@ impl Overlays {
         keys: &[evdev::KeyCode],
         speed: SpeedMode,
         locked: bool,
-        macro_status: Option<&str>,
     ) {
-        let visible = (self.enabled && active) || macro_status.is_some();
+        let visible = self.enabled && active;
         let mut label = if locked {
             "HOLD".to_owned()
         } else {
@@ -61,10 +60,6 @@ impl Overlays {
                 SpeedMode::SuperFast => label.push_str("  SUPER FAST"),
                 SpeedMode::Slow => label.push_str("  SLOW"),
             }
-        }
-        if let Some(status) = macro_status {
-            label.push_str("  ");
-            label.push_str(status);
         }
         if self
             .last_state

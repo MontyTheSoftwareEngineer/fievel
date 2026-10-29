@@ -28,10 +28,6 @@ impl Layout {
         Self::from_labels(labels)
     }
 
-    pub(super) fn new_text(text: &str) -> Self {
-        Self::from_labels(vec![text.to_owned()])
-    }
-
     fn from_labels(labels: Vec<String>) -> Self {
         let lines = wrap(&labels, COLUMNS);
         let columns = lines.iter().map(String::len).max().unwrap_or(1);

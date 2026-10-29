@@ -20,7 +20,6 @@ pub struct Config {
     pub easing: Easing,
     pub keys: Keys,
     pub keycast: Keycast,
-    pub macros: Macros,
     pub hints: Hints,
     pub remap: crate::remap::RemapConfig,
 }
@@ -74,7 +73,6 @@ impl Config {
             easing: Easing::default(),
             keys: Keys::default(),
             keycast: Keycast::default(),
-            macros: Macros::default(),
             hints: Hints::default(),
             remap: crate::remap::RemapConfig::default(),
         };
@@ -83,23 +81,6 @@ impl Config {
             config.map_super_to_alt();
         }
         config
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-pub struct Macros {
-    pub enabled: bool,
-    #[serde(deserialize_with = "deserialize_chord")]
-    pub hotkey: Vec<K>,
-}
-
-impl Default for Macros {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            hotkey: vec![K::KEY_LEFTMETA, K::KEY_E],
-        }
     }
 }
 
@@ -804,7 +785,6 @@ impl Config {
             }
         }
 
-        map_chord(&mut self.macros.hotkey);
         map_key(&mut self.keycast.hotkey);
         map_chord(&mut self.keys.free_mouse);
         map_chord(&mut self.keys.reload_config);
@@ -883,7 +863,6 @@ impl Config {
                 "easing",
                 "keys",
                 "keycast",
-                "macros",
                 "hints",
                 "remap",
             ],
@@ -898,24 +877,6 @@ impl Config {
             &mut config.home_end_enabled,
             &mut changed,
         );
-
-        if let Some(table) = config_section(root, "macros", "macros") {
-            warn_unknown_fields(table, &["enabled", "hotkey"], "macros");
-            apply_value(
-                table,
-                "enabled",
-                "macros.enabled",
-                &mut config.macros.enabled,
-                &mut changed,
-            );
-            apply_chord(
-                table,
-                "hotkey",
-                "macros.hotkey",
-                &mut config.macros.hotkey,
-                &mut changed,
-            );
-        }
 
         if let Some(table) = config_section(root, "keycast", "keycast") {
             warn_unknown_fields(
@@ -1558,18 +1519,6 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), String> {
         self.remap.validate()?;
-        if self.macros.enabled {
-            validate_chord("macros.hotkey", &self.macros.hotkey)?;
-            if self.macros.hotkey.len() < 2 {
-                return Err("macros.hotkey must be a chord of at least two keys".to_owned());
-            }
-            if self.macros.hotkey == self.hints.keys.left
-                || self.macros.hotkey == self.hints.keys.right
-                || self.macros.hotkey == self.hints.keys.grid
-            {
-                return Err("macros.hotkey must differ from hint activation chords".to_owned());
-            }
-        }
         if !(1..=32).contains(&self.keycast.max_keys) {
             return Err("keycast.max_keys: must be between 1 and 32".to_owned());
         }
@@ -1633,14 +1582,6 @@ impl Config {
             ("hints.keys.grid", &self.hints.keys.grid),
         ] {
             validate_unique_chords("keys.reload_config", &self.keys.reload_config, name, chord)?;
-        }
-        if self.macros.enabled {
-            validate_unique_chords(
-                "keys.reload_config",
-                &self.keys.reload_config,
-                "macros.hotkey",
-                &self.macros.hotkey,
-            )?;
         }
         validate_chord("hints.keys.left", &self.hints.keys.left)?;
         validate_chord("hints.keys.right", &self.hints.keys.right)?;
@@ -2241,11 +2182,10 @@ mod tests {
     #[test]
     fn modifier_aliases_work_in_all_config_bindings() {
         let config = Config::parse(
-            "[macros]\nhotkey = 'super + e'\n[keys]\nreload_config = 'ctrl + shift + r'\n\
+            "[keys]\nreload_config = 'ctrl + shift + r'\n\
              [hints.keys]\nleft = 'command + space'\ntoggle_background = 'option'",
         )
         .unwrap();
-        assert_eq!(config.macros.hotkey, [configured_super(), K::KEY_E]);
         assert_eq!(
             config.keys.reload_config,
             [K::KEY_LEFTCTRL, K::KEY_LEFTSHIFT, K::KEY_R]
@@ -2370,7 +2310,6 @@ mod tests {
         );
         let config = Config::parse(
             "win_super_is_alt = true\n\
-             [macros]\nhotkey = 'super + e'\n\
              [keys]\nreload_config = 'rightmeta + shift + r'\n\
              [hints.keys]\nleft = 'meta + space'\n\
              [remap.main]\nsuper = 'rightmeta'",
@@ -2378,7 +2317,6 @@ mod tests {
         .unwrap();
         if cfg!(target_os = "windows") {
             assert!(config.win_super_is_alt);
-            assert_eq!(config.macros.hotkey, [K::KEY_LEFTALT, K::KEY_E]);
             assert_eq!(
                 config.keys.reload_config,
                 [K::KEY_RIGHTALT, K::KEY_LEFTSHIFT, K::KEY_R]
@@ -2388,7 +2326,6 @@ mod tests {
             assert_eq!(config.remap.output_keys().unwrap(), [K::KEY_RIGHTALT]);
         } else {
             assert!(!config.win_super_is_alt);
-            assert_eq!(config.macros.hotkey, [K::KEY_LEFTMETA, K::KEY_E]);
             assert_eq!(
                 config.keys.reload_config,
                 [K::KEY_RIGHTMETA, K::KEY_LEFTSHIFT, K::KEY_R]
@@ -2411,17 +2348,12 @@ mod tests {
     }
 
     #[test]
-    fn recursive_grid_and_macros_are_opt_in() {
+    fn recursive_grid_is_opt_in() {
         let defaults = Config::parse("").unwrap();
         assert!(!defaults.hints.recursive_grid_enabled);
-        assert!(!defaults.macros.enabled);
-        assert_eq!(defaults.macros.hotkey, [configured_super(), K::KEY_E]);
 
-        let enabled =
-            Config::parse("[hints]\nrecursive_grid_enabled = true\n[macros]\nenabled = true")
-                .unwrap();
+        let enabled = Config::parse("[hints]\nrecursive_grid_enabled = true").unwrap();
         assert!(enabled.hints.recursive_grid_enabled);
-        assert!(enabled.macros.enabled);
     }
 
     #[test]
