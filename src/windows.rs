@@ -92,17 +92,6 @@ struct Args {
     scroll_speed: Option<f64>,
 }
 
-fn super_key_as_alt(key: K, enabled: bool) -> K {
-    if !enabled {
-        return key;
-    }
-    match key {
-        K::KEY_LEFTMETA => K::KEY_LEFTALT,
-        K::KEY_RIGHTMETA => K::KEY_RIGHTALT,
-        key => key,
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 enum HookEvent {
     Key(K, i32),
@@ -607,7 +596,6 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                     odometer.physical_counter.record_pointer_motion(dx, dy);
                 }
                 Ok(HookEvent::Key(key, value)) => {
-                    let key = super_key_as_alt(key, config.win_super_is_alt);
                     let changed = match value {
                         1 => held.insert(key),
                         0 => held.remove(&key),
@@ -660,6 +648,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 Some(TaskbarAction::OpenConfigLocation) => {
                     taskbar_menu.open_config_location()?;
                 }
+                Some(TaskbarAction::OpenConfigScreen) => config_screen.open()?,
                 Some(TaskbarAction::ReloadConfig) => reload_requested = true,
                 Some(TaskbarAction::Quit) => stop.store(true, Ordering::Relaxed),
                 None => {}
@@ -1004,14 +993,6 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn windows_super_is_alt_normalizes_physical_modifier_sides() {
-        assert_eq!(super_key_as_alt(K::KEY_LEFTMETA, true), K::KEY_LEFTALT);
-        assert_eq!(super_key_as_alt(K::KEY_RIGHTMETA, true), K::KEY_RIGHTALT);
-        assert_eq!(super_key_as_alt(K::KEY_LEFTMETA, false), K::KEY_LEFTMETA);
-        assert_eq!(super_key_as_alt(K::KEY_A, true), K::KEY_A);
-    }
 
     #[test]
     fn configured_default_keys_have_windows_scan_codes() {

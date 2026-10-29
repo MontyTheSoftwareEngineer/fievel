@@ -71,6 +71,7 @@ static NSMenuItem *config_status_item;
 static NSMenuItem *config_path_item;
 static atomic_bool menu_exit_requested;
 static atomic_bool menu_reload_requested;
+static atomic_bool menu_config_screen_requested;
 static NSString *fievel_config_path;
 static NSArray<NSDictionary *> *hint_items;
 static bool hints_hidden;
@@ -100,6 +101,7 @@ static void fievel_release_posted_inputs(void);
 @interface FievelMenuTarget : NSObject
 - (void)requestExit:(id)sender;
 - (void)reloadConfig:(id)sender;
+- (void)openConfigScreen:(id)sender;
 - (void)openConfigLocation:(id)sender;
 @end
 
@@ -112,6 +114,11 @@ static void fievel_release_posted_inputs(void);
 - (void)reloadConfig:(id)sender {
     (void)sender;
     atomic_store_explicit(&menu_reload_requested, true, memory_order_relaxed);
+}
+
+- (void)openConfigScreen:(id)sender {
+    (void)sender;
+    atomic_store_explicit(&menu_config_screen_requested, true, memory_order_relaxed);
 }
 
 - (void)openConfigLocation:(id)sender {
@@ -277,6 +284,12 @@ static bool fievel_ui_set_menu_bar_image(NSImage *image) {
             keyEquivalent:@""];
         config_path_item.enabled = NO;
         [menu addItem:config_path_item];
+        NSMenuItem *config_screen_item = [[NSMenuItem alloc]
+            initWithTitle:@"Open Config Screen"
+            action:@selector(openConfigScreen:)
+            keyEquivalent:@""];
+        config_screen_item.target = menu_target;
+        [menu addItem:config_screen_item];
         NSMenuItem *open_config_item = [[NSMenuItem alloc]
             initWithTitle:@"Open Config Location"
             action:@selector(openConfigLocation:)
@@ -395,6 +408,11 @@ void fievel_ui_set_config_status(const char *path, int status) {
 
 bool fievel_ui_reload_requested(void) {
     return atomic_exchange_explicit(&menu_reload_requested, false, memory_order_relaxed);
+}
+
+bool fievel_ui_config_screen_requested(void) {
+    return atomic_exchange_explicit(
+        &menu_config_screen_requested, false, memory_order_relaxed);
 }
 
 bool fievel_ui_exit_requested(void) {

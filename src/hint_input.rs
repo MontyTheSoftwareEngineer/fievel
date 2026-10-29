@@ -173,7 +173,7 @@ mod tests {
     use HintInputEvent::{Key, Shortcut};
 
     fn plain() -> HintInput {
-        HintInput::new(&Config::parse("win_super_is_alt = false").unwrap()).unwrap()
+        HintInput::new(&Config::parse("").unwrap()).unwrap()
     }
 
     #[test]
@@ -200,11 +200,7 @@ mod tests {
     }
 
     fn home_row() -> HintInput {
-        let config = Config::parse(&format!(
-            "win_super_is_alt = false\n{}",
-            include_str!("../fievel.config")
-        ))
-        .unwrap();
+        let config = Config::parse(include_str!("../fievel.config")).unwrap();
         HintInput::new(&config).unwrap()
     }
 

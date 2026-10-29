@@ -98,6 +98,7 @@ unsafe extern "C" {
     fn fievel_ui_set_odometer_stats(fievel_miles: f64, physical_miles: f64);
     fn fievel_ui_set_config_status(path: *const std::ffi::c_char, status: i32);
     fn fievel_ui_reload_requested() -> bool;
+    fn fievel_ui_config_screen_requested() -> bool;
     fn fievel_ui_exit_requested() -> bool;
     fn fievel_ui_is_app_bundle() -> bool;
     fn fievel_ui_show_error(message: *const std::ffi::c_char);
@@ -349,6 +350,9 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         last_menu_stats = Instant::now();
                     }
                     let menu_reload_requested = unsafe { fievel_ui_reload_requested() };
+                    if unsafe { fievel_ui_config_screen_requested() } {
+                        config_screen.open()?;
+                    }
                     if config_screen.take_reload_request()? {
                         reload_requested = true;
                     }

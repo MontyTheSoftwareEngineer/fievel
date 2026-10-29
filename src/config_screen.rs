@@ -23,7 +23,6 @@ const MAX_CONFIG_SIZE: usize = 1024 * 1024;
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct EditorConfig {
-    win_super_is_alt: bool,
     mode: String,
     notify: bool,
     home_end_enabled: bool,
@@ -167,7 +166,6 @@ impl From<&Config> for EditorConfig {
         let keys = &config.keys;
         let hint_keys = &config.hints.keys;
         Self {
-            win_super_is_alt: config.win_super_is_alt,
             mode: match config.mode {
                 Mode::Hold => "hold",
                 Mode::Toggle => "toggle",
@@ -499,6 +497,7 @@ fn handle_connection(
     config_path: &Path,
     reload_sender: &Sender<()>,
 ) -> io::Result<()> {
+    stream.set_nonblocking(false)?;
     stream.set_write_timeout(Some(Duration::from_secs(3)))?;
     let request = match read_request(stream) {
         Ok(request) => request,
@@ -533,6 +532,17 @@ fn handle_connection(
             "text/html; charset=utf-8",
             CONFIG_PAGE.as_bytes(),
         ),
+        ("GET", "/api/export") => match export_config(config_path) {
+            Ok(config) => {
+                write_response(stream, 200, "text/plain; charset=utf-8", config.as_bytes())
+            }
+            Err(error) => write_response(
+                stream,
+                500,
+                "text/plain; charset=utf-8",
+                error.to_string().as_bytes(),
+            ),
+        },
         ("GET", "/api/config") => match load_editor_config(config_path) {
             Ok(config) => write_response(
                 stream,
@@ -548,8 +558,7 @@ fn handle_connection(
             ),
         },
         ("POST", "/api/config") => {
-            let expected_origin = format!("http://127.0.0.1:{port}");
-            if request.headers.get("origin").map(String::as_str) != Some(&expected_origin) {
+            if !same_origin_request(&request, port) {
                 return write_response(stream, 403, "text/plain; charset=utf-8", b"Forbidden");
             }
             match save_config(config_path, &request.body) {
@@ -572,13 +581,49 @@ fn handle_connection(
                 ),
             }
         }
+        ("POST", "/api/import") => {
+            if !same_origin_request(&request, port) {
+                return write_response(stream, 403, "text/plain; charset=utf-8", b"Forbidden");
+            }
+            match import_config(&request.body) {
+                Ok(config) => write_response(
+                    stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    config.as_bytes(),
+                ),
+                Err(error) => write_response(
+                    stream,
+                    400,
+                    "text/plain; charset=utf-8",
+                    error.to_string().as_bytes(),
+                ),
+            }
+        }
         _ => write_response(stream, 404, "text/plain; charset=utf-8", b"Not found"),
     }
+}
+
+fn same_origin_request(request: &HttpRequest, port: u16) -> bool {
+    let expected_origin = format!("http://127.0.0.1:{port}");
+    request.headers.get("origin").map(String::as_str) == Some(expected_origin.as_str())
 }
 
 fn load_editor_config(config_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
     let config = Config::load(config_path, false)?;
     config.validate().map_err(io::Error::other)?;
+    Ok(serde_json::to_string(&EditorConfig::from(&config))?)
+}
+
+fn export_config(config_path: &Path) -> Result<String, Box<dyn std::error::Error>> {
+    let config = Config::load(config_path, false)?;
+    config.validate().map_err(io::Error::other)?;
+    Ok(config.to_toml()?)
+}
+
+fn import_config(source: &[u8]) -> Result<String, Box<dyn std::error::Error>> {
+    let source = std::str::from_utf8(source)?;
+    let config = Config::parse_strict(source)?;
     Ok(serde_json::to_string(&EditorConfig::from(&config))?)
 }
 
@@ -680,6 +725,7 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
     .check-row input { flex: 0 0 auto; }
     .color-row input[type="range"] { flex: 1; }
     .color-row output { width: 36px; color: #aab3c2; text-align: right; }
+    .config-actions { display: flex; gap: 8px; margin: 16px 0; }
     .field-check { flex-direction: row; align-items: center; gap: 10px; }
     .field-check input { flex: 0 0 auto; }
     .map-list { display: grid; gap: 8px; }
@@ -701,6 +747,11 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
   <main>
     <h1>Fievel Settings</h1>
     <p>View and change individual settings and keybinds. Key chords use names joined with +. Saving validates and applies changes immediately.</p>
+    <div class="config-actions">
+      <button id="import-config" class="secondary" type="button">Import Config</button>
+      <input id="import-file" type="file" accept=".config,.toml,text/plain" hidden>
+      <button id="export-config" class="secondary" type="button">Export Config</button>
+    </div>
     <div id="settings"></div>
     <section>
       <h2>Remapping</h2>
@@ -725,14 +776,15 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
     const status = document.querySelector("#status");
     const saveButton = document.querySelector("#save");
     const endpoint = `/api/config?token=${encodeURIComponent(token)}`;
+    const importEndpoint = `/api/import?token=${encodeURIComponent(token)}`;
+    const exportEndpoint = `/api/export?token=${encodeURIComponent(token)}`;
     const fieldElements = new Map();
     let currentConfig = null;
     const sections = [
       { title: "General", fields: [
         { path: "mode", label: "Free Mouse mode", kind: "select", options: [["hold", "Hold"], ["toggle", "Toggle"]] },
         { path: "notify", label: "Show notifications", kind: "checkbox" },
-        { path: "home_end_enabled", label: "Enable Home/End navigation", kind: "checkbox" },
-        { path: "win_super_is_alt", label: "Treat Super as Alt on Windows", kind: "checkbox", help: "Platform compatibility setting." }
+        { path: "home_end_enabled", label: "Enable Home/End navigation", kind: "checkbox" }
       ]},
       { title: "Movement and scrolling", fields: [
         { path: "speeds.normal", label: "Movement speed", kind: "number", min: 0.0001, max: 100000, step: "any" },
@@ -1082,6 +1134,46 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
         saveButton.disabled = !currentConfig;
       }
     }
+    const importFile = document.querySelector("#import-file");
+    document.querySelector("#import-config").addEventListener("click", () => importFile.click());
+    importFile.addEventListener("change", async () => {
+      const file = importFile.files[0];
+      if (!file) return;
+      try {
+        status.textContent = `Importing ${file.name}…`;
+        const response = await fetch(importEndpoint, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain" },
+          body: await file.text()
+        });
+        if (!response.ok) throw new Error(await response.text());
+        currentConfig = await response.json();
+        renderSettings(currentConfig);
+        saveButton.disabled = false;
+        status.textContent = `Imported ${file.name}. Review and save to apply.`;
+      } catch (error) {
+        status.textContent = error.message;
+      } finally {
+        importFile.value = "";
+      }
+    });
+    document.querySelector("#export-config").addEventListener("click", async () => {
+      try {
+        const response = await fetch(exportEndpoint, { cache: "no-store" });
+        if (!response.ok) throw new Error(await response.text());
+        const url = URL.createObjectURL(await response.blob());
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "fievel.config";
+        document.body.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        status.textContent = "Exported current settings as fievel.config.";
+      } catch (error) {
+        status.textContent = error.message;
+      }
+    });
     document.querySelector("#reload").addEventListener("click", async () => {
       try { await loadConfig(); } catch (error) { status.textContent = error.message; }
     });
@@ -1157,12 +1249,17 @@ mod tests {
         let config_path = config_path.to_path_buf();
         let token = "test-token";
         let (reload_sender, _reload_receiver) = mpsc::channel();
+        let (accepted_sender, accepted_receiver) = std::sync::mpsc::sync_channel(0);
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            accepted_sender.send(()).unwrap();
             handle_connection(&mut stream, port, token, &config_path, &reload_sender).unwrap();
         });
 
         let mut stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        accepted_receiver.recv().unwrap();
+        thread::sleep(Duration::from_millis(10));
         write!(
             stream,
             "{method} {target} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
@@ -1258,6 +1355,8 @@ mod tests {
         assert!(page_response.starts_with("HTTP/1.1 200 OK"));
         assert!(page_response.contains("Main keybinds"));
         assert!(page_response.contains("hints.grid_colors.upper_left"));
+        assert!(page_response.contains("Import Config"));
+        assert!(page_response.contains("Export Config"));
         assert!(!page_response.contains("<textarea"));
 
         let get_response = send_request(&path, "GET", "/api/config?token=test-token", &[], "");
@@ -1269,6 +1368,43 @@ mod tests {
         assert_eq!(editor.hints.keys.debug, "F8");
         assert_eq!(editor.hints.grid_colors.upper_left, None);
         assert!(editor.remap.main.is_empty());
+
+        let export_response = send_request(&path, "GET", "/api/export?token=test-token", &[], "");
+        assert!(export_response.starts_with("HTTP/1.1 200 OK"));
+        let export_body = export_response.split_once("\r\n\r\n").unwrap().1;
+        let exported = Config::parse_strict(export_body).unwrap();
+        assert_eq!(
+            exported.keys.reload_config,
+            [K::KEY_LEFTMETA, K::KEY_LEFTSHIFT, K::KEY_R]
+        );
+
+        let import_response = send_request(
+            &path,
+            "POST",
+            "/api/import?token=test-token",
+            &[("Origin", "http://127.0.0.1:{port}")],
+            include_str!("../fievel.alt.config"),
+        );
+        assert!(import_response.starts_with("HTTP/1.1 200 OK"));
+        let imported_body = import_response.split_once("\r\n\r\n").unwrap().1;
+        let imported: EditorConfig = serde_json::from_str(imported_body).unwrap();
+        assert_eq!(imported.keys.reload_config, "LEFTALT + LEFTSHIFT + R");
+        assert_eq!(imported.hints.keys.left, "LEFTALT + SPACE");
+        assert_eq!(
+            imported.remap.main.get("a+s").map(String::as_str),
+            Some("super")
+        );
+        assert!(!path.exists());
+
+        let invalid_import_response = send_request(
+            &path,
+            "POST",
+            "/api/import?token=test-token",
+            &[("Origin", "http://127.0.0.1:{port}")],
+            "mode = [",
+        );
+        assert!(invalid_import_response.starts_with("HTTP/1.1 400 Bad Request"));
+        assert!(!path.exists());
 
         let mut changed = Config::default();
         changed.notify = false;
@@ -1294,6 +1430,15 @@ mod tests {
             "notify = false",
         );
         assert!(post_response.starts_with("HTTP/1.1 403 Forbidden"));
+
+        let import_post_response = send_request(
+            &path,
+            "POST",
+            "/api/import?token=test-token",
+            &[("Origin", "http://attacker.example")],
+            include_str!("../fievel.alt.config"),
+        );
+        assert!(import_post_response.starts_with("HTTP/1.1 403 Forbidden"));
 
         fs::remove_dir_all(&directory).unwrap();
     }

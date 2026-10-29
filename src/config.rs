@@ -12,7 +12,6 @@ use std::{
 #[derive(Clone, Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
-    pub win_super_is_alt: bool,
     pub mode: Mode,
     pub notify: bool,
     pub home_end_enabled: bool,
@@ -58,14 +57,7 @@ fn is_letter_key(key: K) -> bool {
 
 impl Default for Config {
     fn default() -> Self {
-        Self::with_win_super_is_alt(cfg!(target_os = "windows"))
-    }
-}
-
-impl Config {
-    fn with_win_super_is_alt(win_super_is_alt: bool) -> Self {
-        let mut config = Self {
-            win_super_is_alt,
+        Self {
             mode: Mode::default(),
             notify: true,
             home_end_enabled: true,
@@ -75,12 +67,7 @@ impl Config {
             keycast: Keycast::default(),
             hints: Hints::default(),
             remap: crate::remap::RemapConfig::default(),
-        };
-        config.remap.win_super_is_alt = win_super_is_alt;
-        if win_super_is_alt {
-            config.map_super_to_alt();
         }
-        config
     }
 }
 
@@ -614,7 +601,7 @@ fn remap_with_entry(
 }
 
 fn reset_config_value(config: &mut Config, path: &str) -> bool {
-    let defaults = Config::with_win_super_is_alt(config.win_super_is_alt);
+    let defaults = Config::default();
     match path {
         "mode" => config.mode = defaults.mode,
         "notify" => config.notify = defaults.notify,
@@ -820,56 +807,6 @@ pub fn validate_speed(speed: f64) -> Result<(), String> {
 }
 
 impl Config {
-    fn map_super_to_alt(&mut self) {
-        fn map_key(key: &mut K) {
-            *key = match *key {
-                K::KEY_LEFTMETA => K::KEY_LEFTALT,
-                K::KEY_RIGHTMETA => K::KEY_RIGHTALT,
-                key => key,
-            };
-        }
-        fn map_chord(chord: &mut [K]) {
-            for key in chord {
-                map_key(key);
-            }
-        }
-
-        map_key(&mut self.keycast.hotkey);
-        map_chord(&mut self.keys.free_mouse);
-        map_chord(&mut self.keys.reload_config);
-        map_chord(&mut self.keys.config_screen);
-        for key in [
-            &mut self.keys.toggle_hold,
-            &mut self.keys.left,
-            &mut self.keys.down,
-            &mut self.keys.up,
-            &mut self.keys.right,
-            &mut self.keys.left_click,
-            &mut self.keys.right_click,
-            &mut self.keys.scroll_left,
-            &mut self.keys.scroll_down,
-            &mut self.keys.scroll_up,
-            &mut self.keys.scroll_right,
-            &mut self.keys.slow,
-            &mut self.keys.fast,
-            &mut self.keys.locate,
-            &mut self.hints.keys.grid_upper_left,
-            &mut self.hints.keys.grid_upper_right,
-            &mut self.hints.keys.grid_lower_left,
-            &mut self.hints.keys.grid_lower_right,
-            &mut self.hints.keys.grid_left_click,
-            &mut self.hints.keys.grid_right_click,
-            &mut self.hints.keys.cancel,
-            &mut self.hints.keys.toggle_background,
-            &mut self.hints.keys.debug,
-        ] {
-            map_key(key);
-        }
-        map_chord(&mut self.hints.keys.left);
-        map_chord(&mut self.hints.keys.right);
-        map_chord(&mut self.hints.keys.grid);
-    }
-
     pub fn mouse_controls(&self) -> Vec<K> {
         let mut controls = self.keys.controls().to_vec();
         controls.push(self.keys.locate);
@@ -885,27 +822,12 @@ impl Config {
         let root = value
             .as_table()
             .expect("a TOML document deserializes to a table");
-        let win_super_is_alt = if cfg!(target_os = "windows") {
-            match root.get("win_super_is_alt") {
-                Some(value) => match parse_toml_value::<bool>(value) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        warn_invalid_config_value("win_super_is_alt", &error);
-                        true
-                    }
-                },
-                None => true,
-            }
-        } else {
-            false
-        };
-        let mut config = Self::with_win_super_is_alt(win_super_is_alt);
+        let mut config = Self::default();
         let mut changed = HashSet::new();
 
         warn_unknown_fields(
             root,
             &[
-                "win_super_is_alt",
                 "mode",
                 "notify",
                 "home_end_enabled",
@@ -1427,7 +1349,6 @@ impl Config {
         if let Some(table) = config_section(root, "remap", "remap") {
             warn_unknown_fields(table, &["chord_timeout", "main", "layers"], "remap");
             let mut remap = crate::remap::RemapConfig::default();
-            remap.win_super_is_alt = config.win_super_is_alt;
             apply_parsed(
                 table,
                 "chord_timeout",
@@ -1521,15 +1442,9 @@ impl Config {
             changed.insert("remap".to_owned());
         }
 
-        if config.win_super_is_alt {
-            config.map_super_to_alt();
-        }
-        config.remap.win_super_is_alt = config.win_super_is_alt;
-
         if let Err(error) = config.remap.validate() {
             eprintln!("Warning: invalid config value remap: {error}; skipping remapping settings");
             config.remap = crate::remap::RemapConfig::default();
-            config.remap.win_super_is_alt = config.win_super_is_alt;
             changed.remove("remap");
         }
 
@@ -1554,26 +1469,9 @@ impl Config {
 
     pub(crate) fn parse_strict(text: &str) -> Result<Self, Box<dyn Error>> {
         let values: toml::Value = toml::from_str(text)?;
-        let win_super_is_alt = if cfg!(target_os = "windows") {
-            match values
-                .as_table()
-                .and_then(|table| table.get("win_super_is_alt"))
-            {
-                Some(value) => parse_toml_value::<bool>(value).map_err(io::Error::other)?,
-                None => true,
-            }
-        } else {
-            false
-        };
-        let mut defaults: toml::Value =
-            toml::from_str(&Self::with_win_super_is_alt(win_super_is_alt).to_toml()?)?;
+        let mut defaults: toml::Value = toml::from_str(&Self::default().to_toml()?)?;
         merge_toml_values(&mut defaults, values);
-        let mut config: Self = defaults.try_into()?;
-        config.win_super_is_alt = win_super_is_alt;
-        config.remap.win_super_is_alt = win_super_is_alt;
-        if win_super_is_alt {
-            config.map_super_to_alt();
-        }
+        let config: Self = defaults.try_into()?;
         config.validate().map_err(io::Error::other)?;
         Ok(config)
     }
@@ -1582,10 +1480,6 @@ impl Config {
         use toml::Value;
 
         let mut root = TomlTable::new();
-        root.insert(
-            "win_super_is_alt".to_owned(),
-            Value::Boolean(self.win_super_is_alt),
-        );
         root.insert(
             "mode".to_owned(),
             Value::String(
@@ -2095,19 +1989,11 @@ mod tests {
     use super::*;
 
     fn configured_super() -> K {
-        if cfg!(target_os = "windows") {
-            K::KEY_LEFTALT
-        } else {
-            K::KEY_LEFTMETA
-        }
+        K::KEY_LEFTMETA
     }
 
     fn configured_right_super() -> K {
-        if cfg!(target_os = "windows") {
-            K::KEY_RIGHTALT
-        } else {
-            K::KEY_RIGHTMETA
-        }
+        K::KEY_RIGHTMETA
     }
 
     #[test]
@@ -2310,7 +2196,6 @@ mod tests {
         let serialized = config.to_toml().unwrap();
         let reparsed = Config::parse(&serialized).unwrap();
 
-        assert_eq!(reparsed.win_super_is_alt, config.win_super_is_alt);
         assert_eq!(reparsed.mode, config.mode);
         assert_eq!(reparsed.notify, config.notify);
         assert_eq!(reparsed.home_end_enabled, config.home_end_enabled);
@@ -2584,7 +2469,7 @@ mod tests {
     #[test]
     fn activation_chords_accept_spaces_case_and_overlapping_controls() {
         let config = Config::parse(
-            "win_super_is_alt = false\n[keys]\nfree_mouse = ' LeftAlt + KEY_SPACE '\n[hints.keys]\nleft = ' LeftMeta + space '\nright = 'leftmeta+KEY_I'",
+            "[keys]\nfree_mouse = ' LeftAlt + KEY_SPACE '\n[hints.keys]\nleft = ' LeftMeta + space '\nright = 'leftmeta+KEY_I'",
         )
         .unwrap();
         assert_eq!(config.keys.free_mouse, vec![K::KEY_LEFTALT, K::KEY_SPACE]);
@@ -2674,48 +2559,9 @@ mod tests {
     }
 
     #[test]
-    fn win_super_is_alt_defaults_on_windows_and_maps_custom_bindings() {
-        assert_eq!(
-            Config::default().win_super_is_alt,
-            cfg!(target_os = "windows")
-        );
-        let config = Config::parse(
-            "win_super_is_alt = true\n\
-             [keys]\nreload_config = 'rightmeta + shift + r'\n\
-             [hints.keys]\nleft = 'meta + space'\n\
-             [remap.main]\nsuper = 'rightmeta'",
-        )
-        .unwrap();
-        if cfg!(target_os = "windows") {
-            assert!(config.win_super_is_alt);
-            assert_eq!(
-                config.keys.reload_config,
-                [K::KEY_RIGHTALT, K::KEY_LEFTSHIFT, K::KEY_R]
-            );
-            assert_eq!(config.hints.keys.left, [K::KEY_LEFTALT, K::KEY_SPACE]);
-            assert_eq!(config.remap.input_keys().unwrap(), [K::KEY_LEFTALT]);
-            assert_eq!(config.remap.output_keys().unwrap(), [K::KEY_RIGHTALT]);
-        } else {
-            assert!(!config.win_super_is_alt);
-            assert_eq!(
-                config.keys.reload_config,
-                [K::KEY_RIGHTMETA, K::KEY_LEFTSHIFT, K::KEY_R]
-            );
-            assert_eq!(config.hints.keys.left, [K::KEY_LEFTMETA, K::KEY_SPACE]);
-            assert_eq!(config.remap.input_keys().unwrap(), [K::KEY_LEFTMETA]);
-            assert_eq!(config.remap.output_keys().unwrap(), [K::KEY_RIGHTMETA]);
-        }
-
-        let config = Config::parse(
-            "win_super_is_alt = false\n\
-             [keys]\nreload_config = 'rightmeta + f8'\n\
-             [remap.main]\nsuper = 'rightmeta'",
-        )
-        .unwrap();
-        assert!(!config.win_super_is_alt);
-        assert_eq!(config.keys.reload_config, [K::KEY_RIGHTMETA, K::KEY_F8]);
-        assert_eq!(config.remap.input_keys().unwrap(), [K::KEY_LEFTMETA]);
-        assert_eq!(config.remap.output_keys().unwrap(), [K::KEY_RIGHTMETA]);
+    fn removed_super_is_alt_setting_is_rejected_by_strict_config() {
+        assert!(Config::parse_strict("super_is_alt = true").is_err());
+        assert!(Config::parse_strict("win_super_is_alt = true").is_err());
     }
 
     #[test]

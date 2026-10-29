@@ -429,7 +429,6 @@ The built-in defaults below do not enable remappings. The bundled
 mappings described below.
 
 ```toml
-win_super_is_alt = true # Windows-only; defaults to true, set false to keep Super bindings
 mode = "hold" # "hold" (default) or "toggle"
 notify = true # Persistent, faint Free Mouse Mode indicator
 home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
@@ -503,6 +502,12 @@ cancel = "enter"
 toggle_background = "leftctrl"
 debug = "f8"
 ```
+
+For Alt-based application keybinds, import [`fievel.alt.config`](fievel.alt.config)
+in the settings screen and save, or launch with `--config fievel.alt.config`.
+Its keybinds use Alt while its example remappings still emit Super.
+The settings screen can also import another TOML config for review before saving
+and export the current saved settings as `fievel.config`.
 
 All settings are optional; omitted values keep their defaults. If the default
 file is missing, a message is printed and built-in defaults are used.

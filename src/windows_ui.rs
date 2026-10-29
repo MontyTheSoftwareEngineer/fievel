@@ -56,11 +56,13 @@ pub const INPUT_MARKER: usize = 0x6669_6576_656c_6d63u64 as usize;
 const TRAY_CALLBACK: u32 = WM_APP + 1;
 const TRAY_ICON_ID: u32 = 1;
 const MENU_OPEN_CONFIG: u32 = 1;
-const MENU_RELOAD_CONFIG: u32 = 2;
-const MENU_QUIT: u32 = 3;
+const MENU_OPEN_CONFIG_SCREEN: u32 = 2;
+const MENU_RELOAD_CONFIG: u32 = 3;
+const MENU_QUIT: u32 = 4;
 
 pub enum TaskbarAction {
     OpenConfigLocation,
+    OpenConfigScreen,
     ReloadConfig,
     Quit,
 }
@@ -1131,6 +1133,12 @@ fn show_taskbar_menu(hwnd: HWND, context: &TrayContext) -> io::Result<Option<Tas
         )?;
     }
     append_menu(menu.0, MF_STRING, MENU_OPEN_CONFIG, "Open Config Location")?;
+    append_menu(
+        menu.0,
+        MF_STRING,
+        MENU_OPEN_CONFIG_SCREEN,
+        "Open Config Screen",
+    )?;
     append_menu(menu.0, MF_STRING, MENU_RELOAD_CONFIG, "Reload Config")?;
     append_separator(menu.0)?;
     append_menu(menu.0, MF_STRING, MENU_QUIT, "Quit Fievel")?;
@@ -1158,6 +1166,7 @@ fn show_taskbar_menu(hwnd: HWND, context: &TrayContext) -> io::Result<Option<Tas
     }
     Ok(match selected {
         value if value == MENU_OPEN_CONFIG as i32 => Some(TaskbarAction::OpenConfigLocation),
+        value if value == MENU_OPEN_CONFIG_SCREEN as i32 => Some(TaskbarAction::OpenConfigScreen),
         value if value == MENU_RELOAD_CONFIG as i32 => Some(TaskbarAction::ReloadConfig),
         value if value == MENU_QUIT as i32 => Some(TaskbarAction::Quit),
         _ => None,

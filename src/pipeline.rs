@@ -225,11 +225,11 @@ mod tests {
     }
 
     fn legacy_config(text: &str) -> Result<Config, Box<dyn std::error::Error>> {
-        Config::parse(&format!("win_super_is_alt = false\n{text}"))
+        Config::parse(text)
     }
 
     fn default_config() -> Config {
-        Config::parse("win_super_is_alt = false").unwrap()
+        Config::parse("").unwrap()
     }
 
     fn keys(events: &[InputEvent]) -> Vec<(K, i32)> {
@@ -494,6 +494,29 @@ mod tests {
         assert!(engine.key_is_held(K::KEY_LEFTMETA));
         engine.key(K::KEY_I, 0);
         assert!(!engine.key_is_held(K::KEY_LEFTMETA));
+    }
+
+    #[test]
+    fn alt_keybind_config_keeps_super_remap_outputs() {
+        let config = Config::parse(include_str!("../fievel.alt.config")).unwrap();
+        let mut engine = InputEngine::new(config).unwrap();
+        engine.key(K::KEY_A, 1);
+        assert_eq!(
+            keys(&engine.key(K::KEY_S, 1).keyboard),
+            [(K::KEY_LEFTMETA, 1)]
+        );
+        assert_eq!(
+            keys(&engine.key(K::KEY_S, 0).keyboard),
+            [(K::KEY_LEFTMETA, 0)]
+        );
+        engine.key(K::KEY_A, 0);
+
+        engine.key(K::KEY_LEFTALT, 1);
+        engine.key(K::KEY_SPACE, 1);
+        assert_eq!(
+            engine.take_hint_request(),
+            Some(HintRequest::Click(ClickKind::Left))
+        );
     }
 
     #[test]
