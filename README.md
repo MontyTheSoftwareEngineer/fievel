@@ -1,8 +1,18 @@
-# fievel
+<div align="center">
+  <img src="logo.png" alt="Fievel logo" width="160">
+  <h1>Fievel</h1>
+  <p>
+    <a href="https://github.com/MontyTheSoftwareEngineer/fievel/stargazers"><img src="https://img.shields.io/github/stars/MontyTheSoftwareEngineer/fievel?style=for-the-badge&logo=github&label=Stars" alt="GitHub stars"></a>
+    <a href="https://github.com/MontyTheSoftwareEngineer/fievel/releases/latest"><img src="https://img.shields.io/github/v/release/MontyTheSoftwareEngineer/fievel?display_name=tag&style=for-the-badge&label=Latest%20release" alt="Latest release"></a>
+    <a href="https://github.com/MontyTheSoftwareEngineer/fievel/blob/master/LICENSE"><img src="https://img.shields.io/github/license/MontyTheSoftwareEngineer/fievel?style=for-the-badge" alt="MIT license"></a>
+    <a href="https://ko-fi.com/montythesoftwareengineer"><img src="https://img.shields.io/badge/Ko--fi-Support-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white" alt="Support Fievel on Ko-fi"></a>
+  </p>
+</div>
 
-Never touch the mouse again! A Linux, macOS, and Windows application written in Rust to replace
-mouse movements with keyboard. Includes everything needed to completely
-replace my mouse with keyboard. There is also an included key remapper that
+Never touch the mouse again. Replace mouse movements with your keyboard on Linux, macOS, and Windows.
+Fievel is a Linux, macOS, and Windows application written in Rust to replace
+mouse movements with keyboard. It includes everything needed to completely
+replace a mouse with a keyboard, plus a key remapper that
 allows mapping combo's so that you can do home-row style mods on ANY keyboard,
 not just fancy programmable keyboards.
 
