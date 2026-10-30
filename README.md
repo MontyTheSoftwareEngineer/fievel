@@ -53,11 +53,9 @@ commented defaults embedded in the binary.
 For Windows, just launch the Fievel.exe. On first launch, Fievel creates
 `%APPDATA%\Fievel\fievel.config` from the commented defaults embedded in the
 binary.
-Hold **F3** and use **H/J/K/L** to move the mouse. Release F3 to type normally.
-Press **Ctrl+C** to stop. No manual config setup is needed to use the defaults.
-If a keyboard disconnects, fievel releases its keys and keeps running. In the
-default automatic mode, newly connected keyboards are detected and attached;
-with `--device`, it waits for that same event-node path to return.
+
+To enter Free Mouse Mode use either F3 or d+f simultaneously and use **H/J/K/L** to move the mouse. 
+Release F3 or d and f to type normally.
 
 To customize, edit the generated `fievel.config` at the platform-specific
 location above, then stop and restart Fievel to reload it, or press
@@ -66,7 +64,8 @@ with `keys.reload_config`, and a desktop notification confirms whether the
 reload succeeded. The source [`fievel.config`](fievel.config) is also available
 as an example and enables [home-row mods and navigation layers](#home-row-mods-and-navigation-layers),
 including **D+F** for Free Mouse Mode alongside **F3**.
-Press **Super+Shift+?** to open the non-blocking settings screen in your browser.
+
+Press **Super+Shift+?** to open the config screen in your browser.
 It shows the complete configuration, including defaults; saving validates,
 writes, and applies the settings immediately. Change its shortcut with
 `keys.config_screen`.
@@ -99,14 +98,14 @@ To create a macOS app bundle and release archive after building:
 ```
 
 The app is written to `target/release/Fievel.app`; open it from Finder to run
-Fievel without a terminal. The script also keeps creating the standalone
-archive at `target/release/fievel-<version>-macos-<arch>.tar.gz`.
-The archive contains both the standalone `fievel` executable and `Fievel.app`.
+Fievel without a terminal.
 The app bundle is ad-hoc signed with a stable identifier so macOS privacy
 permissions can be associated with Fievel across rebuilds; it is not Developer
 ID signed or notarized.
+
 The menu bar menu shows the config file Fievel loaded and can open the config
-folder or reload configuration changes without restarting Fievel. If the file
+folder or reload configuration changes without restarting Fievel. You can also open
+the configuration screen from this menu to edit config in browser. If the file
 is missing, Fievel recreates it from the embedded defaults on startup.
 
 The app bundle uses the generic macOS icon unless `assets/fievel.icns` exists.
@@ -124,13 +123,6 @@ Some terminal apps enable **Secure Keyboard Entry**, which prevents global
 keyboard capture while that terminal is focused. If keys type into the terminal
 instead of activating Fievel, turn Secure Keyboard Entry off in the terminal's
 menu or focus another app while using Fievel.
-
-The macOS backend listens to the system keyboard rather than individual device
-nodes, so `--device` and `--list` are Linux-only. It uses the same configuration
-and key names; `super` is Command and `alt` is Option. Keys are matched by their
-physical ANSI keyboard position. The default F3 activation works when macOS
-delivers F3 as a standard function key; depending on keyboard settings, you may
-need to press **Fn+F3**.
 
 ### Windows
 
@@ -154,21 +146,17 @@ The archive is written to `target\release\fievel-<version>-windows-<arch>.zip`.
 
 Fievel runs as the current user; administrator access is not normally needed.
 While running, it installs global low-level keyboard and mouse hooks so it can
-remap keys and account for physical pointer movement. Keyboard input that is
-not used by Fievel is replayed to the active application. `--device` and
-`--list` are Linux-only because Windows hooks listen to the desktop rather than
-individual keyboards.
+remap keys and account for physical pointer movement. 
 
 Fievel adds an icon to the taskbar notification area while running. Click it to
-view the odometer totals and config status, open the config folder, reload the
-config, or quit Fievel.
+view the odometer totals and config status, open the config screen,
+open the config folder, reload the config, or quit Fievel.
 
 The default configuration is
 `%APPDATA%\Fievel\fievel.config`; the odometer is stored in
 `%LOCALAPPDATA%\Fievel\odometer.toml`. Both paths can be overridden for config
 with `--config PATH`. Windows uses the shared Linux-style key names for its
-supported common keys, matched by physical scan code; keys that Windows cannot
-synthesize are rejected during config validation.
+supported common keys.
 
 Windows security boundaries still apply: Fievel cannot capture input on the
 secure desktop (for example, the UAC prompt or sign-in screen), and Windows
@@ -177,12 +165,16 @@ application. Run Fievel elevated only if you specifically need to control an
 elevated app. Protected or secure content may also be unavailable to visual
 hint detection.
 
-## Optional: Run as a systemd user service
+## Optional: Run at startup
 
-You do not need to install a service to use Fievel; you can just run `./fievel`
-as shown in the [Quickstart](#quickstart). Install the service only if you want
-Fievel to run in the background, start with your graphical session, restart
-automatically if it exits, and send its logs to the systemd journal.
+These options start Fievel when you sign in. They are optional; you can also
+launch it manually as shown in the [Quickstart](#quickstart).
+
+### Linux
+
+Install the service if you want Fievel to run in the background, start with
+your graphical session, restart automatically if it exits, and send its logs
+to the systemd journal.
 
 From a cloned repository with Rust and Cargo installed, run:
 
@@ -191,9 +183,9 @@ From a cloned repository with Rust and Cargo installed, run:
 ```
 
 The installer builds Fievel, installs it to `~/.local/bin/fievel`, and enables
-the service for `graphical-session.target`. If your session manager starts
-that target, the service starts and stops with your graphical session. It
-still needs the [device permissions](#device-permissions) described below.
+the service for `graphical-session.target`. If your session manager starts that
+target, the service starts with your graphical session. It still needs the
+[device permissions](#device-permissions) described below.
 The service restarts Fievel whenever it exits; use
 `systemctl --user stop fievel.service` when you want it to stay stopped. The
 installer skips an existing unit. To update the unit after changing it in the
@@ -214,16 +206,26 @@ exec-once = systemctl --user start fievel.service
 exec-shutdown = systemctl --user stop fievel.service
 ```
 
-The import keeps the Wayland indicator available to the user service. Check
-status with `systemctl --user status fievel.service` and view logs with
-`journalctl --user -u fievel.service`. To uninstall, run
-`systemctl --user disable --now fievel.service`, then remove
-`~/.config/systemd/user/fievel.service` and `~/.local/bin/fievel`.
+### macOS
+
+Move `Fievel.app` to a permanent location, such as `/Applications`, and launch
+it once to grant the required macOS permissions. Then open **System Settings >
+General > Login Items** (called **Login Items & Extensions** on some macOS
+versions), click **+** under **Open at Login**, and select `Fievel.app`.
+Remove it from **Open at Login** to disable automatic startup.
+
+### Windows
+
+Keep the extracted `fievel.exe` in a permanent location. Create a shortcut to
+it, then press **Win+R**, enter `shell:startup`, and move the shortcut into the
+Startup folder that opens. Remove the shortcut from that folder to disable
+automatic startup.
 
 ## Controls
 
 By default, hold **F3** (weird I know, but it was meant for me NOT to press it)
-to enter **Free Mouse Mode** and release F3 to leave it.
+to enter **Free Mouse Mode** and release F3 to leave it. You can also use a key
+remap bind like d+f to enter free mouse mode.
 This can be configured by setting `free_mouse = "f3"` to desired key (or chord).
 By default `mode = "hold"` meaning the Free Mouse Mode button needs to be held.
 While holding it, press **Z** to lock Free Mouse Mode, then release the
@@ -246,15 +248,6 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | A | Hold for slow movement and scrolling; release for normal speed |
 | Q | Show a brief red pulse around the cursor |
 
-Macro recording and playback are disabled by default. Set
-`macros.enabled = true` in `[macros]` to enable them. Press **Super+E** to open
-macro registers; this shortcut can be changed with `macros.hotkey`.
-Press **R**, choose a letter register to record, then press the shortcut again
-or **Esc** to stop. Press **P** and choose a register to play it; **Esc** stops
-playback. Recordings include typed key events, Free Mouse Mode output, and hint
-clicks at their selected screen position. Registers are kept in `macros.toml`
-beside the active config file and persist across restarts. Since typed input is
-recorded to this file, avoid recording passwords or other sensitive text.
 
 The locator key is configurable with `keys.locate` and defaults to Q.
 It is consumed only while Free Mouse Mode is active.
@@ -510,7 +503,9 @@ toggle_background = "leftctrl"
 debug = "f8"
 ```
 
-For Alt-based application keybinds, import [`fievel.alt.config`](fievel.alt.config)
+On some systems like Windows or Mac, super (win or cmd) may be inconvenient,
+so there is an alt-based config included that uses alt instead of super for
+most keybinds import [`fievel.alt.config`](fievel.alt.config)
 in the settings screen and save, or launch with `--config fievel.alt.config`.
 Its keybinds use Alt while its example remappings still emit Super.
 The settings screen can also import another TOML config for review before saving
