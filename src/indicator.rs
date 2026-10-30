@@ -1,3 +1,4 @@
+use crate::engine::SpeedMode;
 use rustix::{
     event::{poll, PollFd, PollFlags, Timespec},
     fs::{memfd_create, MemfdFlags},
@@ -26,7 +27,6 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_shell_v1::{self, Layer},
     zwlr_layer_surface_v1::{self, Anchor, KeyboardInteractivity},
 };
-use crate::engine::SpeedMode;
 
 const WIDTH: i32 = 88;
 const HEIGHT: i32 = 30;
@@ -82,6 +82,10 @@ impl Overlays {
         }
     }
 
+    pub fn set_config(&mut self, notify: bool, keycast_enabled: bool) {
+        *self = Self::new(notify, keycast_enabled);
+    }
+
     pub fn update(
         &mut self,
         active: bool,
@@ -90,7 +94,8 @@ impl Overlays {
         hold_locked: bool,
     ) {
         self.indicator.set_active(active, hold_locked);
-        self.keycast.set_keys(if active { keys } else { &[] }, speed);
+        self.keycast
+            .set_keys(if active { keys } else { &[] }, speed);
     }
 
     pub fn clear(&mut self) {
@@ -156,11 +161,8 @@ impl Indicator {
         if let Some(worker) = &mut self.0 {
             let active_changed = worker.state.active.swap(active, Ordering::SeqCst) != active;
             let hold_locked = active && hold_locked;
-            let hold_changed = worker
-                .state
-                .hold_locked
-                .swap(hold_locked, Ordering::SeqCst)
-                != hold_locked;
+            let hold_changed =
+                worker.state.hold_locked.swap(hold_locked, Ordering::SeqCst) != hold_locked;
             if active_changed || hold_changed {
                 worker.wake();
             }
@@ -170,7 +172,11 @@ impl Indicator {
     fn set_keys(&mut self, keys: &[evdev::KeyCode], speed: SpeedMode) {
         if let Some(worker) = &mut self.0 {
             let keys = &keys[keys.len().saturating_sub(32)..];
-            let speed = if keys.is_empty() { SpeedMode::Normal } else { speed };
+            let speed = if keys.is_empty() {
+                SpeedMode::Normal
+            } else {
+                speed
+            };
             let mut current = worker.state.frame.lock().unwrap();
             if current.keys.as_slice() == keys && current.speed == speed {
                 return;
@@ -413,7 +419,11 @@ impl Display {
             // A release event retries the latest revision, not intermediate frames.
             if self.dirty && self.retired.len() < 2 {
                 let (width, height) = surface.size;
-                let pixels = self.layout.as_ref().unwrap().pixels(width, height, self.speed);
+                let pixels = self
+                    .layout
+                    .as_ref()
+                    .unwrap()
+                    .pixels(width, height, self.speed);
                 let mut file = File::from(memfd_create("fievel-keycast", MemfdFlags::CLOEXEC)?);
                 file.write_all(&pixels)?;
                 let pool = self.shm.as_ref().unwrap().create_pool(
@@ -745,10 +755,18 @@ fn pixels(hold: bool) -> Vec<u8> {
         ], // l
     ];
     let hold_label = [
-        [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001],
-        [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110],
-        [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111],
-        [0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110],
+        [
+            0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001,
+        ],
+        [
+            0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110,
+        ],
+        [
+            0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111,
+        ],
+        [
+            0b11110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11110,
+        ],
     ];
     let glyphs: &[[u8; 7]] = if hold { &hold_label } else { &fievel };
     let start = if hold { 21 } else { 9 };
@@ -832,7 +850,10 @@ mod tests {
             assert_eq!(shared.frame.lock().unwrap().keys, keys);
             assert_eq!(receiver.read(&mut [0; 64]).unwrap(), 1);
             overlays.update(true, &keys, speed, false);
-            assert_eq!(receiver.read(&mut [0; 64]).unwrap_err().kind(), io::ErrorKind::WouldBlock);
+            assert_eq!(
+                receiver.read(&mut [0; 64]).unwrap_err().kind(),
+                io::ErrorKind::WouldBlock
+            );
         }
         overlays.clear();
         let revision = shared.revision.load(Ordering::SeqCst);
@@ -944,7 +965,9 @@ mod tests {
         assert_eq!(normal_pixels.len(), (WIDTH * HEIGHT * 4) as usize);
         assert_eq!(hold_pixels.len(), normal_pixels.len());
         assert_ne!(normal_pixels, hold_pixels);
-        assert!(normal_pixels.chunks_exact(4).any(|pixel| pixel == [0x59; 4]));
+        assert!(normal_pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel == [0x59; 4]));
         assert!(hold_pixels.chunks_exact(4).any(|pixel| pixel == [0x59; 4]));
         for pixel in normal_pixels.chunks_exact(4) {
             assert!(pixel == [0x14; 4] || pixel == [0x59; 4]);
@@ -1037,7 +1060,12 @@ mod tests {
                 assert!(!worker.thread.as_ref().unwrap().is_finished());
             }
             for count in 1..=128 {
-                overlays.update(true, &vec![K::KEY_LEFTCTRL; count % 32 + 1], SpeedMode::Normal, false);
+                overlays.update(
+                    true,
+                    &vec![K::KEY_LEFTCTRL; count % 32 + 1],
+                    SpeedMode::Normal,
+                    false,
+                );
                 thread::sleep(Duration::from_millis(4));
             }
             overlays.update(true, &[K::KEY_K, K::KEY_L], SpeedMode::Normal, false);

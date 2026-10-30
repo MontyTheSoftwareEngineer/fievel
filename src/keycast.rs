@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use evdev::KeyCode;
+use crate::input::KeyCode;
 
 use crate::config;
 
@@ -60,7 +60,7 @@ impl Keycast {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use evdev::KeyCode as K;
+    use crate::input::KeyCode as K;
 
     #[test]
     fn history_rolls_over_expires_and_restarts_idle_timer() {

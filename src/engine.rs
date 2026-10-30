@@ -1,4 +1,4 @@
-use evdev::{EventType, InputEvent, KeyCode, RelativeAxisCode};
+use crate::input::{EventType, InputEvent, KeyCode, RelativeAxisCode};
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -280,15 +280,9 @@ impl Engine {
                     }
                 } else {
                     match value {
-                        1 if self.forwarded.insert(key) => {
-                            out.keyboard.push(key_event(key, 1))
-                        }
-                        0 if self.forwarded.remove(&key) => {
-                            out.keyboard.push(key_event(key, 0))
-                        }
-                        2 if self.forwarded.contains(&key) => {
-                            out.keyboard.push(key_event(key, 2))
-                        }
+                        1 if self.forwarded.insert(key) => out.keyboard.push(key_event(key, 1)),
+                        0 if self.forwarded.remove(&key) => out.keyboard.push(key_event(key, 0)),
+                        2 if self.forwarded.contains(&key) => out.keyboard.push(key_event(key, 2)),
                         _ => {}
                     }
                 }
@@ -384,11 +378,27 @@ impl Engine {
         let length = f64::from(direction[0] * direction[0] + direction[1] * direction[1]).sqrt();
         for (axis, direction) in direction.into_iter().enumerate() {
             let target = f64::from(direction) / length.max(1.0) * self.speed();
+            let easing = &self.config.easing;
+            let velocity = &mut self.velocity[axis];
+            let mut factor = easing.movement;
+            if target.abs() < velocity.abs() || target * *velocity < 0.0 {
+                let stop = easing.movement_stop.unwrap_or(easing.movement);
+                if instant(stop) {
+                    // Drop to target speed, or stop first on a reversal.
+                    *velocity = if target * *velocity < 0.0 {
+                        0.0
+                    } else {
+                        target
+                    };
+                } else {
+                    factor = stop;
+                }
+            }
             let amount = advance_axis(
                 &mut self.motion[axis],
-                &mut self.velocity[axis],
+                velocity,
                 target,
-                self.config.easing.movement,
+                factor,
                 seconds,
                 1.0,
             );
@@ -790,12 +800,14 @@ mod tests {
             e.key(K::KEY_L, 1);
             assert_eq!(e.keycast_keys(), [K::KEY_K, K::KEY_L]);
             let movement = e.advance(Duration::from_millis(20));
-            assert!(movement.mouse.iter().any(|event| {
-                event.code() == R::REL_X.0 && event.value() > 0
-            }));
-            assert!(movement.mouse.iter().any(|event| {
-                event.code() == R::REL_Y.0 && event.value() < 0
-            }));
+            assert!(movement
+                .mouse
+                .iter()
+                .any(|event| { event.code() == R::REL_X.0 && event.value() > 0 }));
+            assert!(movement
+                .mouse
+                .iter()
+                .any(|event| { event.code() == R::REL_Y.0 && event.value() < 0 }));
             e.key(K::KEY_ESC, 1);
             assert!(e.active());
             assert!(e.keycast_keys().is_empty());
@@ -1488,6 +1500,45 @@ mod tests {
     }
 
     #[test]
+    fn stop_easing_ramps_up_gently_and_stops_without_coasting() {
+        let mut config = Config::default();
+        config.speeds.normal = 1000.0;
+        config.easing.movement = 0.1;
+        config.easing.movement_stop = Some(1.0);
+        let mut e = Engine::new(config);
+        let moved = |output: Output| {
+            events(&output.mouse)
+                .iter()
+                .map(|event| event.2)
+                .sum::<i32>()
+        };
+        let tick = Duration::from_millis(10);
+        e.key(K::KEY_F3, 1);
+        e.key(K::KEY_L, 1);
+        let first = moved(e.advance(tick));
+        assert!((0..3).contains(&first), "starts gently: {first}");
+        let mut last = 0;
+        for _ in 0..100 {
+            last = moved(e.advance(tick));
+        }
+        assert!(last >= 9, "reaches full speed: {last}");
+        e.key(K::KEY_L, 0);
+        assert!(e.advance(tick).mouse.is_empty(), "stops without coasting");
+
+        e.key(K::KEY_L, 1);
+        for _ in 0..100 {
+            e.advance(tick);
+        }
+        e.key(K::KEY_L, 0);
+        e.key(K::KEY_H, 1);
+        let reversed = moved(e.advance(tick));
+        assert!(
+            (-3..=0).contains(&reversed),
+            "reversal restarts from rest: {reversed}"
+        );
+    }
+
+    #[test]
     fn easing_factors_match_sixty_hertz_response_and_handle_tiny_values() {
         for easing in [0.2, 0.3] {
             let mut velocity = 0.0;
@@ -1537,8 +1588,14 @@ mod tests {
     #[test]
     fn hold_toggle_locks_activation_and_unlocks_with_activation_or_toggle_key() {
         let mut e = engine();
-        assert_eq!(events(&e.key(K::KEY_Z, 1).keyboard), events(&[key_event(K::KEY_Z, 1)]));
-        assert_eq!(events(&e.key(K::KEY_Z, 0).keyboard), events(&[key_event(K::KEY_Z, 0)]));
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 1).keyboard),
+            events(&[key_event(K::KEY_Z, 1)])
+        );
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 0).keyboard),
+            events(&[key_event(K::KEY_Z, 0)])
+        );
 
         e.key(K::KEY_F3, 1);
         assert!(e.active());
@@ -1581,8 +1638,14 @@ mod tests {
         let mut e = toggle_engine();
         e.key(K::KEY_F3, 1);
         e.key(K::KEY_F3, 0);
-        assert_eq!(events(&e.key(K::KEY_Z, 1).keyboard), events(&[key_event(K::KEY_Z, 1)]));
-        assert_eq!(events(&e.key(K::KEY_Z, 0).keyboard), events(&[key_event(K::KEY_Z, 0)]));
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 1).keyboard),
+            events(&[key_event(K::KEY_Z, 1)])
+        );
+        assert_eq!(
+            events(&e.key(K::KEY_Z, 0).keyboard),
+            events(&[key_event(K::KEY_Z, 0)])
+        );
     }
 
     #[test]
@@ -2153,8 +2216,7 @@ mod tests {
             [keys]
             free_mouse = "f4"
             toggle_hold = "g"
-            left = "q"
-            locate = "f7"
+            left = "y"
             down = "e"
             up = "r"
             right = "t"
@@ -2180,7 +2242,7 @@ mod tests {
             assert_eq!(e.key(key, 0).keyboard.len(), 1);
         }
         for (key, axis, value) in [
-            (K::KEY_Q, R::REL_X, -10),
+            (K::KEY_Y, R::REL_X, -10),
             (K::KEY_E, R::REL_Y, 10),
             (K::KEY_R, R::REL_Y, -10),
             (K::KEY_T, R::REL_X, 10),

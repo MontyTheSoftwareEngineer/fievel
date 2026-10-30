@@ -1,5 +1,6 @@
-use evdev::KeyCode;
 use crate::engine::SpeedMode;
+use crate::grid::key_label;
+use crate::input::KeyCode;
 
 const COLUMNS: usize = 40;
 const CELL_WIDTH: u32 = 12;
@@ -16,30 +17,6 @@ fn foreground(speed: SpeedMode) -> u32 {
     }
 }
 
-pub(super) fn key_label(key: KeyCode) -> String {
-    let punctuation = match key {
-        KeyCode::KEY_COMMA => Some(","),
-        KeyCode::KEY_DOT => Some("."),
-        KeyCode::KEY_SEMICOLON => Some(";"),
-        KeyCode::KEY_APOSTROPHE => Some("'"),
-        KeyCode::KEY_GRAVE => Some("`"),
-        KeyCode::KEY_MINUS => Some("-"),
-        KeyCode::KEY_EQUAL => Some("="),
-        KeyCode::KEY_LEFTBRACE => Some("["),
-        KeyCode::KEY_RIGHTBRACE => Some("]"),
-        KeyCode::KEY_BACKSLASH => Some("\\"),
-        KeyCode::KEY_SLASH => Some("/"),
-        _ => None,
-    };
-    if let Some(label) = punctuation {
-        return label.into();
-    }
-    let name = format!("{key:?}");
-    name.strip_prefix("KEY_")
-        .unwrap_or(&name)
-        .to_ascii_uppercase()
-}
-
 pub(super) struct Layout {
     labels: Vec<String>,
     size: (u32, u32),
@@ -48,6 +25,10 @@ pub(super) struct Layout {
 impl Layout {
     pub(super) fn new(keys: &[KeyCode]) -> Self {
         let labels: Vec<_> = keys.iter().map(|key| key_label(*key)).collect();
+        Self::from_labels(labels)
+    }
+
+    fn from_labels(labels: Vec<String>) -> Self {
         let lines = wrap(&labels, COLUMNS);
         let columns = lines.iter().map(String::len).max().unwrap_or(1);
         let size = (
@@ -247,7 +228,9 @@ mod tests {
             (SpeedMode::Slow, 0xf0f0f000),
         ] {
             let pixels = layout.pixels(width, height, speed);
-            assert!(pixels.chunks_exact(4).any(|pixel| pixel == expected.to_ne_bytes()));
+            assert!(pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == expected.to_ne_bytes()));
             for pixel in pixels.chunks_exact(4) {
                 let color = u32::from_ne_bytes(pixel.try_into().unwrap());
                 assert!(color == expected || color == BACKGROUND);
@@ -277,6 +260,9 @@ mod tests {
             assert!(((color >> 16) & 255) <= alpha);
         }
         assert_eq!(layout.pixels(1, 1, SpeedMode::Normal).len(), 4);
-        assert_eq!(layout.pixels(100, 50, SpeedMode::Normal).len(), 100 * 50 * 4);
+        assert_eq!(
+            layout.pixels(100, 50, SpeedMode::Normal).len(),
+            100 * 50 * 4
+        );
     }
 }

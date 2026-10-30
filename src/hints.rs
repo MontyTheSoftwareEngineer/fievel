@@ -2,6 +2,7 @@ use crate::{
     config::Hints,
     detect::{self, DetectionLimits, DetectionTrace, Outcome, Rect},
     font::{Canvas, Color},
+    grid::{GridQuadrant, GridRect, GridSelection},
     label::{AppendResult, LabelAlphabet, LabelSelection},
 };
 use evdev::KeyCode as K;
@@ -37,6 +38,8 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(3);
 const INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 const HINT_NAMESPACE: &str = "fievel-hints";
 const CURSOR_PULSE_DURATION: Duration = Duration::from_millis(750);
+// wl_fixed has 8 fractional bits, so this is the smallest nonzero motion.
+const CURSOR_WAKE_NUDGE: f64 = 1.0 / 256.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClickKind {
@@ -46,7 +49,15 @@ pub enum ClickKind {
 
 pub fn locate_cursor() -> Result<(), Box<dyn Error>> {
     let mut backend = WaylandHints::connect_for_locator()?;
-    let (output_index, center) = backend.capture_cursor_position()?;
+    let position = match backend.capture_cursor_position(false)? {
+        Some(position) => Some(position),
+        None => {
+            backend.nudge_cursor()?;
+            backend.capture_cursor_position(false)?
+        }
+    };
+    let (output_index, center, _) =
+        position.ok_or("cursor remained invisible after virtual pointer nudge")?;
     backend.draw_cursor_pulse(output_index, center)?;
     std::thread::sleep(CURSOR_PULSE_DURATION);
     Ok(())
@@ -110,6 +121,8 @@ pub struct ActiveHints {
     click: ClickKind,
     cancel: K,
     background: HintBackground,
+    grid: Option<GridSelection>,
+    grid_output: Option<usize>,
     backend: WaylandHints,
 }
 
@@ -122,6 +135,10 @@ impl ActiveHints {
         self.click = click;
     }
 
+    pub fn is_grid_mode(&self) -> bool {
+        self.grid.is_some()
+    }
+
     pub fn cancel(&mut self) {
         self.backend.destroy();
     }
@@ -132,6 +149,39 @@ impl ActiveHints {
         let mut backend = WaylandHints::connect()?;
         let raw_regions = backend.capture_regions(config)?;
         Self::from_capture(config, click, alphabet, backend, raw_regions)
+    }
+
+    pub fn activate_grid(config: &Hints, click: ClickKind) -> Result<Self, Box<dyn Error>> {
+        let alphabet = LabelAlphabet::new(&config.label_symbols)
+            .map_err(|error| format!("hints.label_symbols: {error}"))?;
+        let mut backend = WaylandHints::connect()?;
+        let (output_index, cursor_position, cursor_visible) = backend
+            .capture_cursor_position(true)?
+            .ok_or("no cursor position is available for grid selection")?;
+        let overlay = &backend.state.overlays[output_index];
+        let mut grid = GridSelection::new(GridRect {
+            x: 0.0,
+            y: 0.0,
+            width: f64::from(overlay.logical_width),
+            height: f64::from(overlay.logical_height),
+        });
+        grid.set_cursor(f64::from(cursor_position.0), f64::from(cursor_position.1));
+        if !cursor_visible {
+            let (x, y) = grid.cursor();
+            backend.move_grid_cursor(output_index, x, y)?;
+        }
+        backend.redraw_grid(config, output_index, &grid, false)?;
+        Ok(Self {
+            alphabet: alphabet.clone(),
+            selection: LabelSelection::new(alphabet, 0),
+            regions: Vec::new(),
+            click,
+            cancel: config.keys.cancel,
+            background: HintBackground::default(),
+            grid: Some(grid),
+            grid_output: Some(output_index),
+            backend,
+        })
     }
 
     fn from_capture(
@@ -160,6 +210,8 @@ impl ActiveHints {
             click,
             cancel: config.keys.cancel,
             background,
+            grid: None,
+            grid_output: None,
             backend,
         })
     }
@@ -172,12 +224,7 @@ impl ActiveHints {
     ) -> Result<HintResult, Box<dyn Error>> {
         if key == config.keys.toggle_background {
             if self.background.handle_key(key, value, config) {
-                self.backend.redraw(
-                    config,
-                    &self.regions,
-                    &self.selection,
-                    self.background.hidden,
-                )?;
+                self.redraw(config)?;
             }
             return Ok(HintResult::Continue);
         }
@@ -191,9 +238,45 @@ impl ActiveHints {
         if self.background.hidden {
             return Ok(HintResult::Continue);
         }
-        if key == config.keys.debug {
+        if key == config.keys.debug && self.grid.is_none() {
             self.backend.debug_view = self.backend.debug_view.next();
-            self.backend.redraw(config, &self.regions, &self.selection, false)?;
+            self.backend
+                .redraw(config, &self.regions, &self.selection, false)?;
+            return Ok(HintResult::Continue);
+        }
+        if self.grid.is_some() {
+            if key == K::KEY_BACKSPACE {
+                if !self.grid.as_mut().unwrap().backspace() {
+                    self.cancel();
+                    return Ok(HintResult::Cancelled);
+                }
+                let (x, y) = self.grid.as_ref().unwrap().cursor();
+                self.backend
+                    .move_grid_cursor(self.grid_output.unwrap(), x, y)?;
+                self.redraw(config)?;
+                return Ok(HintResult::Continue);
+            }
+            if key == config.keys.grid_left_click || key == config.keys.grid_right_click {
+                let (x, y) = self.grid.as_ref().unwrap().cursor();
+                let click = if key == config.keys.grid_left_click {
+                    ClickKind::Left
+                } else {
+                    ClickKind::Right
+                };
+                self.backend
+                    .click_grid(self.grid_output.unwrap(), x, y, click)?;
+                self.backend.destroy();
+                return Ok(HintResult::Clicked);
+            }
+            let Some(quadrant) = GridQuadrant::from_key(key, &config.keys) else {
+                return Ok(HintResult::Continue);
+            };
+            if self.grid.as_mut().unwrap().select(quadrant) {
+                let (x, y) = self.grid.as_ref().unwrap().cursor();
+                self.backend
+                    .move_grid_cursor(self.grid_output.unwrap(), x, y)?;
+                self.redraw(config)?;
+            }
             return Ok(HintResult::Continue);
         }
         // Diagnostic rectangles have no labels. Never resolve an invisible
@@ -206,12 +289,7 @@ impl ActiveHints {
                 self.cancel();
                 return Ok(HintResult::Cancelled);
             }
-            self.backend.redraw(
-                config,
-                &self.regions,
-                &self.selection,
-                self.background.hidden,
-            )?;
+            self.redraw(config)?;
             return Ok(HintResult::Continue);
         }
         let Some(symbol) = key_to_symbol(key) else {
@@ -228,16 +306,29 @@ impl ActiveHints {
                     self.backend.destroy();
                     return Ok(HintResult::Clicked);
                 }
-                self.backend.redraw(
-                    config,
-                    &self.regions,
-                    &self.selection,
-                    self.background.hidden,
-                )?;
+                self.redraw(config)?;
             }
             AppendResult::Full | AppendResult::Overflow => {}
         }
         Ok(HintResult::Continue)
+    }
+
+    fn redraw(&mut self, config: &Hints) -> Result<(), Box<dyn Error>> {
+        if let Some(grid) = &self.grid {
+            self.backend.redraw_grid(
+                config,
+                self.grid_output.unwrap(),
+                grid,
+                self.background.hidden,
+            )
+        } else {
+            self.backend.redraw(
+                config,
+                &self.regions,
+                &self.selection,
+                self.background.hidden,
+            )
+        }
     }
 
     pub fn warning(error: &dyn Error) {
@@ -487,30 +578,34 @@ impl WaylandHints {
                 buffer.destroy();
             }
         }
-        if self.state.overlays.iter().all(|overlay| overlay.trace.is_none()) {
+        if self
+            .state
+            .overlays
+            .iter()
+            .all(|overlay| overlay.trace.is_none())
+        {
             return Err("failed to capture any Wayland output".into());
         }
         Ok(regions)
     }
 
-    fn capture_cursor_position(&mut self) -> Result<(usize, (i32, i32)), Box<dyn Error>> {
+    fn capture_cursor_position(
+        &mut self,
+        fallback_to_first_output: bool,
+    ) -> Result<Option<(usize, (i32, i32), bool)>, Box<dyn Error>> {
         self.prepare_overlays()?;
         self.state.captures.clear();
         let screencopy = self.state.screencopy.as_ref().unwrap().clone();
         for (output_index, output) in self.state.outputs.iter().enumerate() {
             let frame = screencopy.capture_output(0, &output.output, &self.qh, ());
-            self.state.captures.push(CaptureState::new(
-                output_index,
-                false,
-                frame,
-            ));
+            self.state
+                .captures
+                .push(CaptureState::new(output_index, false, frame));
 
             let frame = screencopy.capture_output(1, &output.output, &self.qh, ());
-            self.state.captures.push(CaptureState::new(
-                output_index,
-                true,
-                frame,
-            ));
+            self.state
+                .captures
+                .push(CaptureState::new(output_index, true, frame));
         }
         self.pump_until(
             CAPTURE_TIMEOUT,
@@ -551,13 +646,14 @@ impl WaylandHints {
             let overlay = &self.state.overlays[output_index];
             let center_x = rect.x + rect.width / 2;
             let center_y = rect.y + rect.height / 2;
-            let logical_x = (center_x as f64 * overlay.logical_width as f64
-                / width as f64)
-                .round() as i32;
-            let logical_y = (center_y as f64 * overlay.logical_height as f64
-                / height as f64)
-                .round() as i32;
-            if best.as_ref().map_or(true, |(best_score, _, _)| score > *best_score) {
+            let logical_x =
+                (center_x as f64 * overlay.logical_width as f64 / width as f64).round() as i32;
+            let logical_y =
+                (center_y as f64 * overlay.logical_height as f64 / height as f64).round() as i32;
+            if best
+                .as_ref()
+                .map_or(true, |(best_score, _, _)| score > *best_score)
+            {
                 best = Some((score, output_index, (logical_x, logical_y)));
             }
         }
@@ -566,11 +662,49 @@ impl WaylandHints {
                 buffer.destroy();
             }
         }
+        if let Some((_, output_index, center)) = best {
+            return Ok(Some((output_index, center, true)));
+        }
+        if fallback_to_first_output {
+            // Wayland exposes no global cursor position when screencopy cannot see it.
+            let overlay = self
+                .state
+                .overlays
+                .first()
+                .ok_or("no Wayland outputs are available for grid selection")?;
+            return Ok(Some((
+                overlay.output_index,
+                (
+                    (overlay.logical_width / 2) as i32,
+                    (overlay.logical_height / 2) as i32,
+                ),
+                false,
+            )));
+        }
         if valid_pairs == 0 {
             return Err("failed to capture cursor screenshots from any output".into());
         }
-        best.map(|(_, output_index, center)| (output_index, center))
-            .ok_or_else(|| "cursor was not visible in the Wayland screencopy frames".into())
+        Ok(None)
+    }
+
+    fn nudge_cursor(&mut self) -> Result<(), Box<dyn Error>> {
+        let manager = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .ok_or("compositor does not support zwlr_virtual_pointer_manager_v1")?
+            .clone();
+        let seat = self.state.seat.as_ref().ok_or("missing wl_seat")?.clone();
+        let pointer = manager.create_virtual_pointer_with_output(Some(&seat), None, &self.qh, ());
+        pointer.motion(time_ms(), CURSOR_WAKE_NUDGE, 0.0);
+        pointer.frame();
+        let nudge = self.sync(INPUT_TIMEOUT);
+        pointer.motion(time_ms(), -CURSOR_WAKE_NUDGE, 0.0);
+        pointer.frame();
+        let restore = self.sync(INPUT_TIMEOUT);
+        pointer.destroy();
+        let destroy = self.sync(INPUT_TIMEOUT);
+        nudge.and(restore).and(destroy)
     }
 
     fn draw_cursor_pulse(
@@ -591,27 +725,9 @@ impl WaylandHints {
         }
         let mut canvas = Canvas::new(&mut overlay.pixels, overlay.width, overlay.height);
         canvas.clear(Color::rgba(0, 0, 0, 0));
-        canvas.stroke_circle(
-            center.0,
-            center.1,
-            52,
-            4,
-            Color::rgba(255, 32, 32, 150),
-        );
-        canvas.stroke_circle(
-            center.0,
-            center.1,
-            34,
-            5,
-            Color::rgba(255, 32, 32, 220),
-        );
-        canvas.stroke_circle(
-            center.0,
-            center.1,
-            18,
-            3,
-            Color::rgba(255, 32, 32, 190),
-        );
+        canvas.stroke_circle(center.0, center.1, 52, 4, Color::rgba(255, 32, 32, 150));
+        canvas.stroke_circle(center.0, center.1, 34, 5, Color::rgba(255, 32, 32, 220));
+        canvas.stroke_circle(center.0, center.1, 18, 3, Color::rgba(255, 32, 32, 190));
         write_all_at(&overlay.file, &overlay.pixels, 0)?;
         overlay.surface.attach(Some(&overlay.buffer), 0, 0);
         overlay.surface.damage(
@@ -742,6 +858,49 @@ impl WaylandHints {
         Ok(())
     }
 
+    fn redraw_grid(
+        &mut self,
+        config: &Hints,
+        output_index: usize,
+        selection: &GridSelection,
+        hidden: bool,
+    ) -> Result<(), Box<dyn Error>> {
+        for overlay in &mut self.state.overlays {
+            if overlay.closed
+                || (overlay.width, overlay.height)
+                    != (overlay.logical_width, overlay.logical_height)
+            {
+                return Err(
+                    "output geometry changed during grid selection; activate hints again".into(),
+                );
+            }
+            let mut canvas = Canvas::new(&mut overlay.pixels, overlay.width, overlay.height);
+            canvas.clear(Color::rgba(0, 0, 0, 0));
+            if !hidden && overlay.output_index == output_index {
+                draw_grid(
+                    &mut canvas,
+                    selection,
+                    overlay.width,
+                    overlay.height,
+                    overlay.logical_width,
+                    overlay.logical_height,
+                    config,
+                );
+            }
+            write_all_at(&overlay.file, &overlay.pixels, 0)?;
+            overlay.surface.attach(Some(&overlay.buffer), 0, 0);
+            overlay.surface.damage(
+                0,
+                0,
+                overlay.logical_width as i32,
+                overlay.logical_height as i32,
+            );
+            overlay.surface.commit();
+        }
+        self.connection.flush()?;
+        Ok(())
+    }
+
     fn redraw(
         &mut self,
         config: &Hints,
@@ -806,16 +965,24 @@ impl WaylandHints {
             if !hidden {
                 if self.debug_view != DebugView::Normal {
                     Self::draw_diagnostics(
-                        &mut canvas, overlay.trace.as_ref(), self.debug_view,
-                        overlay.width, overlay.height,
+                        &mut canvas,
+                        overlay.trace.as_ref(),
+                        self.debug_view,
+                        overlay.width,
+                        overlay.height,
                     );
                 }
                 if self.debug_view != DebugView::Normal
-                    || !regions.iter().any(|region| region.output_index == overlay.output_index)
+                    || !regions
+                        .iter()
+                        .any(|region| region.output_index == overlay.output_index)
                 {
                     Self::draw_debug_legend(
-                        &mut canvas, overlay.trace.as_ref(), self.debug_view,
-                        config, overlay.width,
+                        &mut canvas,
+                        overlay.trace.as_ref(),
+                        self.debug_view,
+                        config,
+                        overlay.width,
                     );
                 }
             }
@@ -872,23 +1039,38 @@ impl WaylandHints {
             for component in &trace.components {
                 let rect = component.bounds;
                 canvas.stroke_rect(
-                    rect.x as i32, rect.y as i32, rect.width as i32, rect.height as i32,
+                    rect.x as i32,
+                    rect.y as i32,
+                    rect.width as i32,
+                    rect.height as i32,
                     Self::outcome_color(component.outcome),
                 );
                 if component.source == detect::Source::Underline {
-                    canvas.fill_rect(rect.x as i32, rect.y as i32, 3, 3,
-                        Color::rgba(80, 235, 235, 255));
+                    canvas.fill_rect(
+                        rect.x as i32,
+                        rect.y as i32,
+                        3,
+                        3,
+                        Color::rgba(80, 235, 235, 255),
+                    );
                 }
             }
         }
         for line in trace.components.iter().filter_map(|c| c.stroke_bounds) {
-            canvas.stroke_rect(line.x as i32, line.y as i32, line.width as i32,
-                line.height as i32, Color::rgba(80, 235, 235, 255));
+            canvas.stroke_rect(
+                line.x as i32,
+                line.y as i32,
+                line.width as i32,
+                line.height as i32,
+                Color::rgba(80, 235, 235, 255),
+            );
         }
     }
 
     fn key_caption(key: K) -> String {
-        format!("{key:?}").trim_start_matches("KEY_").replace('_', " ")
+        format!("{key:?}")
+            .trim_start_matches("KEY_")
+            .replace('_', " ")
     }
 
     fn draw_debug_legend(
@@ -906,29 +1088,75 @@ impl WaylandHints {
         };
         let mut lines = vec![(title.to_owned(), white)];
         if let Some(trace) = trace {
-            let edge_pixels = trace.components.iter()
-                .filter(|c| c.source == detect::Source::Grayscale).map(|c| c.edge_pixels).sum::<usize>();
-            lines.push((format!("COMPONENTS {}  EDGE PIXELS {}",
-                trace.components.len(), edge_pixels), white));
-            let icons: Vec<_> = trace.components.iter()
-                .filter(|c| c.source == detect::Source::Icon).collect();
-            lines.push((format!("ICON CONTOURS {}  ACCEPTED {}",
-                icons.len(), icons.iter().filter(|c| c.outcome == Outcome::Accepted).count()), white));
-            let color_components = trace.components.iter()
-                .filter(|c| c.source == detect::Source::Color).count();
-            let color_pixels = trace.components.iter()
-                .filter(|c| c.source == detect::Source::Color).map(|c| c.edge_pixels).sum::<usize>();
-            lines.push((format!("COLOR COMPONENTS {color_components}  STROKES {color_pixels}"),
-                Color::rgba(255, 180, 80, 255)));
-            let underlines: Vec<_> = trace.components.iter()
-                .filter(|c| c.source == detect::Source::Underline).collect();
-            lines.push((format!("UNDERLINE {}  ACCEPTED {}  REJECTED {}",
-                underlines.len(),
-                underlines.iter().filter(|c| c.outcome == Outcome::Accepted).count(),
-                underlines.iter().filter(|c| c.outcome != Outcome::Accepted).count()),
-                Color::rgba(80, 235, 235, 255)));
-            lines.push(("CYAN UNDERLINE EXTENT AND SOURCE MARK".to_owned(),
-                Color::rgba(80, 235, 235, 255)));
+            let edge_pixels = trace
+                .components
+                .iter()
+                .filter(|c| c.source == detect::Source::Grayscale)
+                .map(|c| c.edge_pixels)
+                .sum::<usize>();
+            lines.push((
+                format!(
+                    "COMPONENTS {}  EDGE PIXELS {}",
+                    trace.components.len(),
+                    edge_pixels
+                ),
+                white,
+            ));
+            let icons: Vec<_> = trace
+                .components
+                .iter()
+                .filter(|c| c.source == detect::Source::Icon)
+                .collect();
+            lines.push((
+                format!(
+                    "ICON CONTOURS {}  ACCEPTED {}",
+                    icons.len(),
+                    icons
+                        .iter()
+                        .filter(|c| c.outcome == Outcome::Accepted)
+                        .count()
+                ),
+                white,
+            ));
+            let color_components = trace
+                .components
+                .iter()
+                .filter(|c| c.source == detect::Source::Color)
+                .count();
+            let color_pixels = trace
+                .components
+                .iter()
+                .filter(|c| c.source == detect::Source::Color)
+                .map(|c| c.edge_pixels)
+                .sum::<usize>();
+            lines.push((
+                format!("COLOR COMPONENTS {color_components}  STROKES {color_pixels}"),
+                Color::rgba(255, 180, 80, 255),
+            ));
+            let underlines: Vec<_> = trace
+                .components
+                .iter()
+                .filter(|c| c.source == detect::Source::Underline)
+                .collect();
+            lines.push((
+                format!(
+                    "UNDERLINE {}  ACCEPTED {}  REJECTED {}",
+                    underlines.len(),
+                    underlines
+                        .iter()
+                        .filter(|c| c.outcome == Outcome::Accepted)
+                        .count(),
+                    underlines
+                        .iter()
+                        .filter(|c| c.outcome != Outcome::Accepted)
+                        .count()
+                ),
+                Color::rgba(80, 235, 235, 255),
+            ));
+            lines.push((
+                "CYAN UNDERLINE EXTENT AND SOURCE MARK".to_owned(),
+                Color::rgba(80, 235, 235, 255),
+            ));
             for (outcome, label) in [
                 (Outcome::Accepted, "ACCEPTED"),
                 (Outcome::TooSmall, "TOO SMALL"),
@@ -937,27 +1165,52 @@ impl WaylandHints {
                 (Outcome::NotTextLike, "NOT TEXT LIKE"),
                 (Outcome::NestedOrDuplicate, "NESTED OR DUPLICATE"),
             ] {
-                let count = trace.components.iter().filter(|c| c.outcome == outcome).count();
+                let count = trace
+                    .components
+                    .iter()
+                    .filter(|c| c.outcome == outcome)
+                    .count();
                 lines.push((format!("{label} {count}"), Self::outcome_color(outcome)));
             }
         } else {
             lines.push(("CAPTURE UNAVAILABLE".to_owned(), white));
         }
-        lines.push((format!("{} NEXT VIEW  ESC EXIT", Self::key_caption(config.keys.debug)), white));
-        lines.push((format!("HOLD {} TO PEEK", Self::key_caption(config.keys.toggle_background)), white));
+        lines.push((
+            format!(
+                "{} NEXT VIEW  ESC EXIT",
+                Self::key_caption(config.keys.debug)
+            ),
+            white,
+        ));
+        lines.push((
+            format!(
+                "HOLD {} TO PEEK",
+                Self::key_caption(config.keys.toggle_background)
+            ),
+            white,
+        ));
         if view != DebugView::Normal {
             lines.push(("SELECTION PAUSED  SAME SNAPSHOT".to_owned(), white));
         }
         let longest = lines.iter().map(|(text, _)| text.len()).max().unwrap_or(1) as i32;
-        let scale = if longest * 12 + 16 <= width as i32 { 2 } else { 1 };
+        let scale = if longest * 12 + 16 <= width as i32 {
+            2
+        } else {
+            1
+        };
         let columns = ((width as i32 - 16) / (6 * scale)).max(1) as usize;
         let mut y = 8;
         for (text, color) in lines {
             // Key names and captions are ASCII; wrap even custom long key names.
             for chunk in text.as_bytes().chunks(columns) {
                 let text = std::str::from_utf8(chunk).unwrap();
-                canvas.fill_rect(4, y - 3, (text.len() as i32 * 6 + 1) * scale + 8,
-                    10 * scale, Color::rgba(12, 16, 20, 255));
+                canvas.fill_rect(
+                    4,
+                    y - 3,
+                    (text.len() as i32 * 6 + 1) * scale + 8,
+                    10 * scale,
+                    Color::rgba(12, 16, 20, 255),
+                );
                 canvas.draw_text(8, y, text, scale, color);
                 y += 10 * scale;
             }
@@ -969,7 +1222,6 @@ impl WaylandHints {
         let overlay = &self.state.overlays[region.output_index];
         let (x, y, extent_width, extent_height) =
             click_coordinates(region.rect, overlay.width, overlay.height);
-
         // Unmap before moving so the compositor can restore the underlying
         // surface's focus. A flush alone does not acknowledge request handling.
         self.destroy_overlays();
@@ -993,6 +1245,94 @@ impl WaylandHints {
         pointer.destroy();
         // Keep the connection/device alive until release has been processed,
         // and acknowledge device destruction even when an earlier step failed.
+        let cleanup = self.sync(INPUT_TIMEOUT);
+        result.and(cleanup)?;
+        Ok(())
+    }
+
+    fn click_grid(
+        &mut self,
+        output_index: usize,
+        x: f64,
+        y: f64,
+        click: ClickKind,
+    ) -> Result<(), Box<dyn Error>> {
+        let output = self
+            .state
+            .outputs
+            .get(output_index)
+            .ok_or_else(|| io::Error::other("hint click references an unavailable output"))?
+            .output
+            .clone();
+        let overlay = self
+            .state
+            .overlays
+            .get(output_index)
+            .ok_or_else(|| io::Error::other("hint click references an unavailable overlay"))?;
+        let (x, y, extent_width, extent_height) = grid_pointer_coordinates(
+            x,
+            y,
+            overlay.width,
+            overlay.height,
+            overlay.logical_width,
+            overlay.logical_height,
+        );
+
+        self.destroy_overlays();
+        self.sync(INPUT_TIMEOUT)?;
+        let pointer = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .unwrap()
+            .create_virtual_pointer_with_output(
+                self.state.seat.as_ref(),
+                Some(&output),
+                &self.qh,
+                (),
+            );
+        pointer.motion_absolute(time_ms(), x, y, extent_width, extent_height);
+        pointer.frame();
+        let result = self
+            .sync(INPUT_TIMEOUT)
+            .and_then(|()| self.click_button(&pointer, click));
+        pointer.destroy();
+        let cleanup = self.sync(INPUT_TIMEOUT);
+        result.and(cleanup)?;
+        Ok(())
+    }
+
+    fn move_grid_cursor(
+        &mut self,
+        output_index: usize,
+        x: f64,
+        y: f64,
+    ) -> Result<(), Box<dyn Error>> {
+        let output = self.state.outputs[output_index].output.clone();
+        let overlay = &self.state.overlays[output_index];
+        let (x, y, extent_width, extent_height) = grid_pointer_coordinates(
+            x,
+            y,
+            overlay.width,
+            overlay.height,
+            overlay.logical_width,
+            overlay.logical_height,
+        );
+        let pointer = self
+            .state
+            .virtual_pointer
+            .as_ref()
+            .unwrap()
+            .create_virtual_pointer_with_output(
+                self.state.seat.as_ref(),
+                Some(&output),
+                &self.qh,
+                (),
+            );
+        pointer.motion_absolute(time_ms(), x, y, extent_width, extent_height);
+        pointer.frame();
+        let result = self.sync(INPUT_TIMEOUT);
+        pointer.destroy();
         let cleanup = self.sync(INPUT_TIMEOUT);
         result.and(cleanup)
     }
@@ -1529,7 +1869,10 @@ fn cursor_difference(
         }
         let density = count as f64 / (bounds_width * bounds_height) as f64;
         let score = count as f64 * density.sqrt();
-        if best.as_ref().map_or(true, |(_, best_score)| score > *best_score) {
+        if best
+            .as_ref()
+            .map_or(true, |(_, best_score)| score > *best_score)
+        {
             best = Some((
                 Rect {
                     x: min_x as u32,
@@ -1584,8 +1927,13 @@ fn normalize_capture_rgb(
 
 #[cfg(test)]
 fn normalize_capture(
-    data: &[u8], width: u32, height: u32, stride: u32, format: wl_shm::Format,
-    y_invert: bool, transform: wl_output::Transform,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: u32,
+    format: wl_shm::Format,
+    y_invert: bool,
+    transform: wl_output::Transform,
 ) -> Result<Vec<u8>, Box<dyn Error>> {
     normalize_capture_rgb(data, width, height, stride, format, y_invert, transform)
         .map(|rgb| detect::luma(&rgb))
@@ -1646,6 +1994,72 @@ fn click_coordinates(rect: Rect, width: u32, height: u32) -> (u32, u32, u32, u32
         width,
         height,
     )
+}
+
+fn grid_pointer_coordinates(
+    x: f64,
+    y: f64,
+    width: u32,
+    height: u32,
+    logical_width: u32,
+    logical_height: u32,
+) -> (u32, u32, u32, u32) {
+    let x = (x * f64::from(width) / f64::from(logical_width))
+        .round()
+        .clamp(0.0, f64::from(width.saturating_sub(1))) as u32;
+    let y = (y * f64::from(height) / f64::from(logical_height))
+        .round()
+        .clamp(0.0, f64::from(height.saturating_sub(1))) as u32;
+    (x, y, width, height)
+}
+
+fn draw_grid(
+    canvas: &mut Canvas<'_>,
+    selection: &GridSelection,
+    width: u32,
+    height: u32,
+    logical_width: u32,
+    logical_height: u32,
+    config: &Hints,
+) {
+    let scale_x = f64::from(width) / f64::from(logical_width);
+    let scale_y = f64::from(height) / f64::from(logical_height);
+    for (quadrant, rect) in selection.cells() {
+        let x = (rect.x * scale_x) as i32;
+        let y = (rect.y * scale_y) as i32;
+        let cell_width = (rect.width * scale_x) as i32;
+        let cell_height = (rect.height * scale_y) as i32;
+        canvas.fill_rect(
+            x,
+            y,
+            cell_width,
+            cell_height,
+            config.grid_fill_color(quadrant),
+        );
+        canvas.stroke_rect(
+            x,
+            y,
+            cell_width,
+            cell_height,
+            config.grid_border_color(quadrant),
+        );
+        let label = quadrant.label(&config.keys);
+        let mut label_scale = ((cell_height - 4) / 8).clamp(1, 3);
+        while label_scale > 1 && Canvas::text_size(&label, label_scale).0 + 6 > cell_width {
+            label_scale -= 1;
+        }
+        let (label_width, label_height) = Canvas::text_size(&label, label_scale);
+        let label_x = x + ((cell_width - label_width) / 2).max(1);
+        let label_y = y + ((cell_height - label_height) / 2).max(1);
+        canvas.fill_rect(
+            label_x - 3,
+            label_y - 2,
+            label_width + 6,
+            label_height + 4,
+            config.readability_color,
+        );
+        canvas.draw_text(label_x, label_y, &label, label_scale, config.label_color);
+    }
 }
 
 #[cfg(test)]
@@ -1822,7 +2236,8 @@ mod tests {
         ];
         for format in [wl_shm::Format::Abgr8888, wl_shm::Format::Xbgr8888] {
             assert_eq!(
-                normalize_capture_rgb(&data, 1, 2, 8, format, true, wl_output::Transform::_90).unwrap(),
+                normalize_capture_rgb(&data, 1, 2, 8, format, true, wl_output::Transform::_90)
+                    .unwrap(),
                 [[255, 0, 0], [0, 255, 0]],
             );
             assert_eq!(
@@ -1833,7 +2248,8 @@ mod tests {
         }
         for format in [wl_shm::Format::Argb8888, wl_shm::Format::Xrgb8888] {
             assert_eq!(
-                normalize_capture_rgb(&data, 1, 2, 8, format, true, wl_output::Transform::_90).unwrap(),
+                normalize_capture_rgb(&data, 1, 2, 8, format, true, wl_output::Transform::_90)
+                    .unwrap(),
                 [[0, 0, 255], [0, 255, 0]],
             );
         }
@@ -1884,11 +2300,24 @@ mod tests {
             );
             let oriented = transformed_size(capture.width, capture.height, output.transform);
             let count = regions.iter().filter(|(index, _)| *index == i).count();
-            let trace = overlay.trace.as_ref().expect("successful capture has diagnostics");
+            let trace = overlay
+                .trace
+                .as_ref()
+                .expect("successful capture has diagnostics");
             assert_eq!((trace.width, trace.height), (overlay.width, overlay.height));
-            assert_eq!(trace.components.iter().filter(|c| c.outcome == Outcome::Accepted).count(), count);
+            assert_eq!(
+                trace
+                    .components
+                    .iter()
+                    .filter(|c| c.outcome == Outcome::Accepted)
+                    .count(),
+                count
+            );
             assert_eq!(trace.edges.len(), (overlay.width * overlay.height) as usize);
-            assert!(capture.file.is_none() && capture.buffer.is_none(), "raw capture resources retained");
+            assert!(
+                capture.file.is_none() && capture.buffer.is_none(),
+                "raw capture resources retained"
+            );
             eprintln!(
                 "output {i}: mode={}x{}, capture={}x{}, oriented={}x{}, logical={}x{}, wl_scale={}, actual_scale={:.3}x{:.3}, transform={:?}, targets={count}",
                 output.pixel_width, output.pixel_height, capture.width, capture.height,
@@ -1991,6 +2420,8 @@ mod tests {
             click: ClickKind::Left,
             cancel: config.keys.cancel,
             background: HintBackground::default(),
+            grid: None,
+            grid_output: None,
             backend,
         };
         std::thread::sleep(Duration::from_millis(250));
@@ -2035,12 +2466,15 @@ mod click_protocol_tests {
         PointerDestroyed,
     }
 
-    fn send_event(socket: &mut UnixStream, object: u32, opcode: u16, payload: &[u8]) {
-        socket.write_all(&object.to_ne_bytes()).unwrap();
-        socket
-            .write_all(&(((payload.len() as u32 + 8) << 16) | opcode as u32).to_ne_bytes())
-            .unwrap();
-        socket.write_all(payload).unwrap();
+    fn send_event(
+        socket: &mut UnixStream,
+        object: u32,
+        opcode: u16,
+        payload: &[u8],
+    ) -> io::Result<()> {
+        socket.write_all(&object.to_ne_bytes())?;
+        socket.write_all(&(((payload.len() as u32 + 8) << 16) | opcode as u32).to_ne_bytes())?;
+        socket.write_all(payload)
     }
 
     fn words(values: &[u32]) -> Vec<u8> {
@@ -2075,7 +2509,14 @@ mod click_protocol_tests {
             let mut header = [0; 8];
             match socket.read_exact(&mut header) {
                 Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    break;
+                }
                 Err(error) => panic!("mock Wayland request failed: {error}"),
             }
             let object = u32::from_ne_bytes(header[..4].try_into().unwrap());
@@ -2099,15 +2540,25 @@ mod click_protocol_tests {
                             global.push(0);
                         }
                         global.extend_from_slice(&u32::to_ne_bytes(*version));
-                        send_event(&mut socket, registry, 0, &global);
+                        send_event(&mut socket, registry, 0, &global).unwrap();
                     }
                 }
                 ("wl_display", 0) => {
                     sync_count += 1;
                     requests.push(Request::Sync(sync_count));
                     if withheld_sync != Some(sync_count) {
-                        send_event(&mut socket, args[0], 0, &words(&[sync_count as u32]));
-                        send_event(&mut socket, 1, 1, &words(&[args[0]]));
+                        let result =
+                            send_event(&mut socket, args[0], 0, &words(&[sync_count as u32]))
+                                .and_then(|()| send_event(&mut socket, 1, 1, &words(&[args[0]])));
+                        if let Err(error) = result {
+                            if matches!(
+                                error.kind(),
+                                io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset
+                            ) {
+                                break;
+                            }
+                            panic!("mock Wayland response failed: {error}");
+                        }
                     }
                 }
                 ("wl_registry", 0) => {
@@ -2133,7 +2584,7 @@ mod click_protocol_tests {
                 }
                 ("wl_surface", 6) => {
                     if let Some(layer) = layers.get(&object) {
-                        send_event(&mut socket, *layer, 0, &words(&[1, 640, 480]));
+                        send_event(&mut socket, *layer, 0, &words(&[1, 640, 480])).unwrap();
                     }
                 }
                 ("zwlr_layer_surface_v1", 7) => requests.push(Request::LayerDestroyed),
@@ -2229,6 +2680,102 @@ mod click_protocol_tests {
     }
 
     #[test]
+    fn grid_quadrant_selection_moves_cursor_to_cell_center() {
+        use Request::*;
+
+        let (client, server) = UnixStream::pair().unwrap();
+        let server = thread::spawn(move || serve(server, None));
+        let mut backend =
+            WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
+        backend.prepare_overlays().unwrap();
+        let config = crate::config::Config::parse("[hints.keys]\ngrid_upper_left = 'a'")
+            .unwrap()
+            .hints;
+        let alphabet = LabelAlphabet::new(&config.label_symbols).unwrap();
+        let grid = GridSelection::new(GridRect {
+            x: 0.0,
+            y: 0.0,
+            width: 640.0,
+            height: 480.0,
+        });
+        let mut hints = ActiveHints {
+            alphabet: alphabet.clone(),
+            selection: LabelSelection::new(alphabet, 0),
+            regions: Vec::new(),
+            click: ClickKind::Left,
+            cancel: config.keys.cancel,
+            background: HintBackground::default(),
+            grid: Some(grid),
+            grid_output: Some(0),
+            backend,
+        };
+
+        assert!(matches!(
+            hints.handle_key(K::KEY_A, 1, &config).unwrap(),
+            HintResult::Continue
+        ));
+        assert_eq!(hints.grid.as_ref().unwrap().center(), (160.0, 120.0));
+        drop(hints);
+
+        assert_eq!(
+            server.join().unwrap(),
+            vec![
+                Sync(1),
+                PointerCreated,
+                Motion([160, 120, 640, 480]),
+                Frame,
+                Sync(2),
+                PointerDestroyed,
+                Sync(3),
+                LayerDestroyed,
+                SurfaceDestroyed,
+            ]
+        );
+    }
+
+    #[test]
+    fn grid_left_and_right_buttons_click_at_the_cursor() {
+        use Request::*;
+
+        for (key, button) in [(K::KEY_SPACE, K::BTN_LEFT), (K::KEY_R, K::BTN_RIGHT)] {
+            let (client, server) = UnixStream::pair().unwrap();
+            let server = thread::spawn(move || serve(server, None));
+            let mut backend =
+                WaylandHints::from_connection(Connection::from_socket(client).unwrap()).unwrap();
+            backend.prepare_overlays().unwrap();
+            let config = Hints::default();
+            let alphabet = LabelAlphabet::new(&config.label_symbols).unwrap();
+            let mut grid = GridSelection::new(GridRect {
+                x: 0.0,
+                y: 0.0,
+                width: 640.0,
+                height: 480.0,
+            });
+            grid.set_cursor(123.0, 234.0);
+            let mut hints = ActiveHints {
+                alphabet: alphabet.clone(),
+                selection: LabelSelection::new(alphabet, 0),
+                regions: Vec::new(),
+                click: ClickKind::Left,
+                cancel: config.keys.cancel,
+                background: HintBackground::default(),
+                grid: Some(grid),
+                grid_output: Some(0),
+                backend,
+            };
+
+            let HintResult::Clicked = hints.handle_key(key, 1, &config).unwrap() else {
+                panic!("expected grid click");
+            };
+            drop(hints);
+
+            let mut expected = successful_sequence(button);
+            expected[5] = Motion([123, 234, 640, 480]);
+            assert_eq!(server.join().unwrap(), expected);
+        }
+    }
+
+    #[test]
     fn press_timeout_still_releases_and_destroys_both_buttons() {
         for (click, button) in [
             (ClickKind::Left, K::BTN_LEFT),
@@ -2279,8 +2826,11 @@ mod click_protocol_tests {
     #[test]
     fn debug_cycles_zero_targets_and_selection_without_clicking_and_peek_restores() {
         for (count, color_links, underline_links) in [
-            (0, false, false), (27, false, false), (27, true, false),
-            (27, false, true), (27, true, true),
+            (0, false, false),
+            (27, false, false),
+            (27, true, false),
+            (27, false, true),
+            (27, true, true),
         ] {
             let (client, server) = UnixStream::pair().unwrap();
             let server = thread::spawn(move || serve(server, None));
@@ -2298,53 +2848,85 @@ mod click_protocol_tests {
                     }
                 }
             }
-            let mut detection = detect::detect_with_trace(&luma, 640, 480, 1.0, DetectionLimits::default());
+            let mut detection =
+                detect::detect_with_trace(&luma, 640, 480, 1.0, DetectionLimits::default());
             assert_eq!(detection.regions.len(), count);
             if color_links || underline_links {
                 let mut pixels: Vec<_> = luma.iter().flat_map(|&v| [v, v, v, 255]).collect();
                 let mut canvas = Canvas::new(&mut pixels, 640, 480);
                 canvas.draw_text(10, 240, "TEXT", 2, Color::rgba(90, 90, 90, 255));
-                let link_color = if color_links { Color::rgba(30, 90, 210, 255) }
-                    else { Color::rgba(90, 90, 90, 255) };
+                let link_color = if color_links {
+                    Color::rgba(30, 90, 210, 255)
+                } else {
+                    Color::rgba(90, 90, 90, 255)
+                };
                 canvas.draw_text(58, 240, "LINK", 2, link_color);
                 canvas.draw_text(106, 240, "TEXT", 2, Color::rgba(90, 90, 90, 255));
                 if underline_links {
                     canvas.fill_rect(58, 256, 46, 1, link_color);
                 }
                 let rgb: Vec<_> = pixels.chunks_exact(4).map(|p| [p[2], p[1], p[0]]).collect();
-                detection = detect::detect_rgb_with_trace(&rgb, (640, 480), (640, 480),
-                    DetectionLimits::default(), color_links, underline_links);
+                detection = detect::detect_rgb_with_trace(
+                    &rgb,
+                    (640, 480),
+                    (640, 480),
+                    DetectionLimits::default(),
+                    color_links,
+                    underline_links,
+                );
                 assert_eq!(detection.regions.len(), count + 2);
-                assert!(detection.trace.components.iter()
-                    .any(|c| c.source == if color_links { detect::Source::Color }
-                        else { detect::Source::Underline } && c.outcome == Outcome::Accepted));
+                assert!(detection.trace.components.iter().any(|c| c.source
+                    == if color_links {
+                        detect::Source::Color
+                    } else {
+                        detect::Source::Underline
+                    }
+                    && c.outcome == Outcome::Accepted));
                 if underline_links {
-                    assert!(detection.trace.components.iter().any(|c|
-                        c.source == detect::Source::Underline && c.stroke_bounds.is_some()));
+                    assert!(detection.trace.components.iter().any(|c| c.source
+                        == detect::Source::Underline
+                        && c.stroke_bounds.is_some()));
                 }
             }
             backend.state.overlays[0].trace = Some(detection.trace);
             let mut hints = ActiveHints::from_capture(
-                &config.hints, ClickKind::Left,
+                &config.hints,
+                ClickKind::Left,
                 LabelAlphabet::new(&config.hints.label_symbols).unwrap(),
-                backend, detection.regions.into_iter().map(|rect| (0, rect)).collect(),
-            ).unwrap();
+                backend,
+                detection
+                    .regions
+                    .into_iter()
+                    .map(|rect| (0, rect))
+                    .collect(),
+            )
+            .unwrap();
             if count > 0 {
                 hints.handle_key(K::KEY_A, 1, &config.hints).unwrap();
             }
             let selection = hints.selection.clone();
             let normal = hints.backend.state.overlays[0].pixels.clone();
-            assert!(normal.iter().any(|byte| *byte != 0), "zero targets must still be visible");
+            assert!(
+                normal.iter().any(|byte| *byte != 0),
+                "zero targets must still be visible"
+            );
             for view in [DebugView::Edges, DebugView::Components] {
-                hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
-                hints.handle_key(config.hints.keys.debug, 2, &config.hints).unwrap();
+                hints
+                    .handle_key(config.hints.keys.debug, 1, &config.hints)
+                    .unwrap();
+                hints
+                    .handle_key(config.hints.keys.debug, 2, &config.hints)
+                    .unwrap();
                 assert_eq!(hints.backend.debug_view, view);
                 let visible = hints.backend.state.overlays[0].pixels.clone();
                 if underline_links {
                     assert!(visible.chunks_exact(4).any(|p| p == [235, 235, 80, 255]));
                 }
                 for key in [K::KEY_A, K::KEY_Z, K::KEY_BACKSPACE] {
-                    assert!(matches!(hints.handle_key(key, 1, &config.hints).unwrap(), HintResult::Continue));
+                    assert!(matches!(
+                        hints.handle_key(key, 1, &config.hints).unwrap(),
+                        HintResult::Continue
+                    ));
                 }
                 assert_eq!(hints.selection, selection);
                 let mut input = crate::hint_input::HintInput::new(&config).unwrap();
@@ -2353,10 +2935,17 @@ mod click_protocol_tests {
                 for (key, value) in [(K::KEY_S, 1), (K::KEY_D, 1)] {
                     crate::handle_hint_input(input.key(key, value), &mut mode, &config);
                 }
-                assert!(mode.as_ref().unwrap().backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
+                assert!(mode.as_ref().unwrap().backend.state.overlays[0]
+                    .pixels
+                    .iter()
+                    .all(|byte| *byte == 0));
                 crate::handle_hint_input(
-                    vec![crate::hint_input::HintInputEvent::Key(config.hints.keys.debug, 1)],
-                    &mut mode, &config,
+                    vec![crate::hint_input::HintInputEvent::Key(
+                        config.hints.keys.debug,
+                        1,
+                    )],
+                    &mut mode,
+                    &config,
                 );
                 assert_eq!(mode.as_ref().unwrap().backend.debug_view, view);
                 crate::handle_hint_input(input.key(K::KEY_S, 0), &mut mode, &config);
@@ -2366,31 +2955,53 @@ mod click_protocol_tests {
                 assert_eq!(hints.backend.state.overlays[0].pixels, visible);
                 assert_eq!(hints.selection, selection);
             }
-            hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
+            hints
+                .handle_key(config.hints.keys.debug, 1, &config.hints)
+                .unwrap();
             assert_eq!(hints.backend.debug_view, DebugView::Normal);
             assert_eq!(hints.backend.state.overlays[0].pixels, normal);
             if count == 0 {
                 for key in [K::KEY_A, K::KEY_BACKSPACE] {
-                    assert!(matches!(hints.handle_key(key, 1, &config.hints).unwrap(), HintResult::Continue));
+                    assert!(matches!(
+                        hints.handle_key(key, 1, &config.hints).unwrap(),
+                        HintResult::Continue
+                    ));
                 }
             }
-            hints.handle_key(config.hints.keys.debug, 1, &config.hints).unwrap();
+            hints
+                .handle_key(config.hints.keys.debug, 1, &config.hints)
+                .unwrap();
             let mut mode = Some(hints);
-            crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Shortcut(ClickKind::Right)],
-                &mut mode, &config);
+            crate::handle_hint_input(
+                vec![crate::hint_input::HintInputEvent::Shortcut(
+                    ClickKind::Right,
+                )],
+                &mut mode,
+                &config,
+            );
             assert_eq!(mode.as_ref().unwrap().click_kind(), ClickKind::Right);
             assert_eq!(mode.as_ref().unwrap().backend.debug_view, DebugView::Edges);
             mode.as_mut().unwrap().backend.sync(INPUT_TIMEOUT).unwrap();
             if count == 0 {
-                crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Key(K::KEY_ESC, 1)],
-                    &mut mode, &config);
+                crate::handle_hint_input(
+                    vec![crate::hint_input::HintInputEvent::Key(K::KEY_ESC, 1)],
+                    &mut mode,
+                    &config,
+                );
             } else {
-                crate::handle_hint_input(vec![crate::hint_input::HintInputEvent::Shortcut(ClickKind::Right)],
-                    &mut mode, &config);
+                crate::handle_hint_input(
+                    vec![crate::hint_input::HintInputEvent::Shortcut(
+                        ClickKind::Right,
+                    )],
+                    &mut mode,
+                    &config,
+                );
             }
             assert!(mode.is_none());
             let requests = server.join().unwrap();
-            assert!(!requests.iter().any(|request| matches!(request, Request::PointerCreated)));
+            assert!(!requests
+                .iter()
+                .any(|request| matches!(request, Request::PointerCreated)));
         }
     }
 
@@ -2423,6 +3034,8 @@ mod click_protocol_tests {
             click: ClickKind::Left,
             cancel: K::KEY_ESC,
             background: HintBackground::default(),
+            grid: None,
+            grid_output: None,
             backend,
         };
         hints.handle_key(K::KEY_A, 1, &config).unwrap();
@@ -2456,14 +3069,20 @@ mod click_protocol_tests {
                 expected
             );
             if visible && redraw {
-                assert!(hints.backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
+                assert!(hints.backend.state.overlays[0]
+                    .pixels
+                    .iter()
+                    .all(|byte| *byte == 0));
                 for key in [K::KEY_A, K::KEY_BACKSPACE] {
                     assert!(matches!(
                         hints.handle_key(key, 1, &config).unwrap(),
                         HintResult::Continue
                     ));
                 }
-                assert!(hints.backend.state.overlays[0].pixels.iter().all(|byte| *byte == 0));
+                assert!(hints.backend.state.overlays[0]
+                    .pixels
+                    .iter()
+                    .all(|byte| *byte == 0));
             }
             assert_eq!(hints.selection.split_index(0).unwrap(), prefix);
             if !visible && redraw {

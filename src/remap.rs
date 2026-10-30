@@ -1,5 +1,5 @@
 use crate::config::parse_key;
-use evdev::KeyCode as K;
+use crate::input::KeyCode as K;
 use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -43,13 +43,24 @@ struct Parsed {
 }
 
 fn action_key(text: &str) -> Result<K, String> {
-    match text.trim().to_ascii_lowercase().as_str() {
-        "ctrl" | "control" => Ok(K::KEY_LEFTCTRL),
-        "super" | "meta" => Ok(K::KEY_LEFTMETA),
-        "alt" => Ok(K::KEY_LEFTALT),
-        "shift" => Ok(K::KEY_LEFTSHIFT),
-        _ => parse_key(text),
-    }
+    parse_key(text)
+}
+
+fn is_modifier_alias(text: &str) -> bool {
+    matches!(
+        text.trim().to_ascii_lowercase().as_str(),
+        "ctrl"
+            | "control"
+            | "super"
+            | "meta"
+            | "win"
+            | "windows"
+            | "cmd"
+            | "command"
+            | "alt"
+            | "option"
+            | "shift"
+    )
 }
 
 fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
@@ -62,7 +73,7 @@ fn parse_action(text: &str, nested: bool) -> Result<Action, String> {
         .and_then(|s| s.strip_suffix(')'))
     {
         let name = body.trim();
-        if matches!(name, "control" | "ctrl" | "meta" | "super") {
+        if is_modifier_alias(name) {
             return action_key(name).map(Action::Key);
         }
         if name.is_empty()
@@ -164,7 +175,7 @@ impl RemapConfig {
                         || !name
                             .chars()
                             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
-                        || matches!(name.as_str(), "control" | "ctrl" | "meta" | "super")
+                        || is_modifier_alias(name)
                     {
                         return Err(format!("invalid or reserved layer name {name:?}"));
                     }
@@ -737,6 +748,22 @@ mod tests {
                 assert!(r.key(second, 0).is_empty());
             }
         }
+    }
+
+    #[test]
+    fn os_modifier_aliases_work_in_remap_actions_and_chords() {
+        let mut r = remap("[main]\n'cmd+a'='windows'\ns='option'\nd='control'");
+        assert!(r.key(K::KEY_LEFTMETA, 1).is_empty());
+        assert_eq!(r.key(K::KEY_A, 1), [Event::Key(K::KEY_LEFTMETA, 1)]);
+        assert_eq!(r.key(K::KEY_A, 0), [Event::Key(K::KEY_LEFTMETA, 0)]);
+        assert!(r.key(K::KEY_LEFTMETA, 0).is_empty());
+        assert_eq!(r.key(K::KEY_S, 1), [Event::Key(K::KEY_LEFTALT, 1)]);
+        assert_eq!(r.key(K::KEY_S, 0), [Event::Key(K::KEY_LEFTALT, 0)]);
+        assert_eq!(r.key(K::KEY_D, 1), [Event::Key(K::KEY_LEFTCTRL, 1)]);
+        assert_eq!(r.key(K::KEY_D, 0), [Event::Key(K::KEY_LEFTCTRL, 0)]);
+
+        let mut layered = remap("[main]\na='layer(command)'");
+        assert_eq!(layered.key(K::KEY_A, 1), [Event::Key(K::KEY_LEFTMETA, 1)]);
     }
 
     #[test]

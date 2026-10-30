@@ -99,16 +99,17 @@ pub fn detect_with_trace(
         || scale <= 0.0
         || luma.len() < (width as usize).saturating_mul(height as usize)
     {
-        return Detection { regions: Vec::new(), trace: DetectionTrace::default() };
+        return Detection {
+            regions: Vec::new(),
+            trace: DetectionTrace::default(),
+        };
     }
     // Work in logical pixels so morphology and size limits behave identically
     // on integer and fractional-scale outputs.
     let logical_width = (width as f64 / scale).round().max(1.0) as u32;
     let logical_height = (height as f64 / scale).round().max(1.0) as u32;
     let normalized = resize_luma(luma, width, height, logical_width, logical_height);
-    let mut detection = detect_normalized(
-        &normalized, logical_width, logical_height, limits, None,
-    );
+    let mut detection = detect_normalized(&normalized, logical_width, logical_height, limits, None);
     for rect in &mut detection.regions {
         *rect = map_rect(*rect, logical_width, logical_height, width, height);
     }
@@ -116,27 +117,23 @@ pub fn detect_with_trace(
 }
 
 fn detect_normalized(
-    luma: &[u8], width: u32, height: u32, limits: DetectionLimits, rgb: Option<&[Rgb]>,
+    luma: &[u8],
+    width: u32,
+    height: u32,
+    limits: DetectionLimits,
+    rgb: Option<&[Rgb]>,
 ) -> Detection {
     let (edges, mut strong_edges) = sobel_edges(luma, width as usize, height as usize);
-    let dilated = dilate(
-        &edges,
-        width as usize,
-        height as usize,
-        3,
-        5,
-    );
-    let components = connected_edge_components(
-        &dilated,
-        &edges,
-        width as usize,
-        height as usize,
-    );
+    let dilated = dilate(&edges, width as usize, height as usize, 3, 5);
+    let components = connected_edge_components(&dilated, &edges, width as usize, height as usize);
     let (rects, components) = classify_components(components, limits);
     let mut detection = Detection {
         regions: rects,
         trace: DetectionTrace {
-            width, height, edges, components,
+            width,
+            height,
+            edges,
+            components,
             color_strokes: Vec::new(),
         },
     };
@@ -146,7 +143,9 @@ fn detect_normalized(
             add_icon_regions(&mut detection, &strong_edges, limits);
         }
     }
-    detection.regions.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
+    detection
+        .regions
+        .sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
     detection
 }
 
@@ -154,16 +153,26 @@ fn classify_components(
     components: Vec<Component>,
     limits: DetectionLimits,
 ) -> (Vec<Rect>, Vec<DiagnosticComponent>) {
-    let mut components: Vec<_> = components.into_iter().map(|component| {
-        let rect = component.bounds;
-        let outcome = size_outcome(rect, component.edge_pixels, limits);
-        DiagnosticComponent {
-            bounds: rect, edge_pixels: component.edge_pixels, outcome, source: Source::Grayscale,
-            stroke_bounds: None,
-        }
-    }).collect();
+    let mut components: Vec<_> = components
+        .into_iter()
+        .map(|component| {
+            let rect = component.bounds;
+            let outcome = size_outcome(rect, component.edge_pixels, limits);
+            DiagnosticComponent {
+                bounds: rect,
+                edge_pixels: component.edge_pixels,
+                outcome,
+                source: Source::Grayscale,
+                stroke_bounds: None,
+            }
+        })
+        .collect();
     let rects = filter_nested(
-        components.iter().filter(|c| c.outcome == Outcome::Accepted).map(|c| c.bounds).collect(),
+        components
+            .iter()
+            .filter(|c| c.outcome == Outcome::Accepted)
+            .map(|c| c.bounds)
+            .collect(),
         1.0,
     );
     let mut accepted: std::collections::HashSet<_> = rects.iter().copied().collect();
@@ -212,9 +221,9 @@ pub fn resize_luma(luma: &[u8], width: u32, height: u32, out_w: u32, out_h: u32)
 pub type Rgb = [u8; 3];
 
 pub fn luma(rgb: &[Rgb]) -> Vec<u8> {
-    rgb.iter().map(|&[r, g, b]| {
-        ((r as u16 * 77 + g as u16 * 150 + b as u16 * 29) / 256) as u8
-    }).collect()
+    rgb.iter()
+        .map(|&[r, g, b]| ((r as u16 * 77 + g as u16 * 150 + b as u16 * 29) / 256) as u8)
+        .collect()
 }
 
 pub fn resize_rgb(rgb: &[Rgb], width: u32, height: u32, out_w: u32, out_h: u32) -> Vec<Rgb> {
@@ -222,8 +231,13 @@ pub fn resize_rgb(rgb: &[Rgb], width: u32, height: u32, out_w: u32, out_h: u32) 
 }
 
 fn resize_channels<T: Copy, const N: usize>(
-    pixels: &[T], width: u32, height: u32, out_w: u32, out_h: u32,
-    channels: impl Fn(T) -> [u8; N], pixel: impl Fn([u8; N]) -> T,
+    pixels: &[T],
+    width: u32,
+    height: u32,
+    out_w: u32,
+    out_h: u32,
+    channels: impl Fn(T) -> [u8; N],
+    pixel: impl Fn([u8; N]) -> T,
 ) -> Vec<T> {
     if (width, height) == (out_w, out_h) {
         return pixels.to_vec();
@@ -241,7 +255,10 @@ fn resize_channels<T: Copy, const N: usize>(
                 for sx in left.floor() as u32..(right.ceil() as u32).min(width) {
                     let weight = (bottom.min((sy + 1) as f64) - top.max(sy as f64))
                         * (right.min((sx + 1) as f64) - left.max(sx as f64));
-                    for (sum, value) in sum.iter_mut().zip(channels(pixels[(sy * width + sx) as usize])) {
+                    for (sum, value) in sum
+                        .iter_mut()
+                        .zip(channels(pixels[(sy * width + sx) as usize]))
+                    {
                         *sum += value as f64 * weight;
                     }
                 }
@@ -264,10 +281,16 @@ pub fn detect_rgb_with_trace(
 ) -> Detection {
     let (width, height) = size;
     let (out_w, out_h) = logical_size;
-    if width == 0 || height == 0 || out_w == 0 || out_h == 0
+    if width == 0
+        || height == 0
+        || out_w == 0
+        || out_h == 0
         || rgb.len() < width as usize * height as usize
     {
-        return Detection { regions: Vec::new(), trace: DetectionTrace::default() };
+        return Detection {
+            regions: Vec::new(),
+            trace: DetectionTrace::default(),
+        };
     }
     // Convert before resampling to retain the primary detector's rounding.
     let normalized = resize_luma(&luma(rgb), width, height, out_w, out_h);
@@ -305,8 +328,12 @@ fn similar_hue(a: Rgb, b: Rgb) -> bool {
 fn color_distance(a: Rgb, b: Rgb) -> i16 {
     // Opponent channels ignore brightness, including equal-luminance strokes.
     let opponent = |p: Rgb| [p[0] as i16 - p[1] as i16, p[2] as i16 - p[1] as i16];
-    opponent(a).into_iter().zip(opponent(b))
-        .map(|(a, b)| (a - b).abs()).max().unwrap()
+    opponent(a)
+        .into_iter()
+        .zip(opponent(b))
+        .map(|(a, b)| (a - b).abs())
+        .max()
+        .unwrap()
 }
 
 fn color_strokes(rgb: &[Rgb], width: usize, height: usize) -> Vec<u8> {
@@ -342,7 +369,8 @@ fn color_strokes(rgb: &[Rgb], width: usize, height: usize) -> Vec<u8> {
 }
 
 fn near_duplicate(a: Rect, b: Rect) -> bool {
-    a.x.abs_diff(b.x) <= 3 && a.y.abs_diff(b.y) <= 3
+    a.x.abs_diff(b.x) <= 3
+        && a.y.abs_diff(b.y) <= 3
         && (a.x + a.width).abs_diff(b.x + b.width) <= 3
         && (a.y + a.height).abs_diff(b.y + b.height) <= 3
         && (a.width as u64 * a.height as u64).min(b.width as u64 * b.height as u64) * 100
@@ -363,7 +391,10 @@ impl SupplementalTargets {
     }
 
     fn insert(&mut self, rect: Rect) {
-        self.0.entry((rect.x / 8, rect.y / 8)).or_default().push(rect);
+        self.0
+            .entry((rect.x / 8, rect.y / 8))
+            .or_default()
+            .push(rect);
     }
 
     fn record(&mut self, detection: &mut Detection, mut component: DiagnosticComponent) {
@@ -372,8 +403,9 @@ impl SupplementalTargets {
             let (cx, cy) = (rect.x / 8, rect.y / 8);
             let duplicate = (cy.saturating_sub(1)..=cy + 1).any(|y| {
                 (cx.saturating_sub(1)..=cx + 1).any(|x| {
-                    self.0.get(&(x, y)).is_some_and(|rects|
-                        rects.iter().any(|&other| near_duplicate(rect, other)))
+                    self.0
+                        .get(&(x, y))
+                        .is_some_and(|rects| rects.iter().any(|&other| near_duplicate(rect, other)))
                 })
             });
             if duplicate {
@@ -424,11 +456,16 @@ fn add_color_regions(detection: &mut Detection, rgb: &[Rgb], limits: DetectionLi
             }
         }
         let bounds = Rect {
-            x: left as u32, y: top as u32,
-            width: (right - left + 1) as u32, height: (bottom - top + 1) as u32,
+            x: left as u32,
+            y: top as u32,
+            width: (right - left + 1) as u32,
+            height: (bottom - top + 1) as u32,
         };
         let mut component = DiagnosticComponent {
-            bounds, edge_pixels: pixels, outcome: Outcome::Accepted, source: Source::Color,
+            bounds,
+            edge_pixels: pixels,
+            outcome: Outcome::Accepted,
+            source: Source::Color,
             stroke_bounds: None,
         };
         let size = size_outcome(bounds, pixels, limits);
@@ -442,7 +479,9 @@ fn add_color_regions(detection: &mut Detection, rgb: &[Rgb], limits: DetectionLi
         targets.record(detection, component);
     }
     detection.trace.color_strokes = mask;
-    detection.regions.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
+    detection
+        .regions
+        .sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
 }
 
 fn separate_chromatic_edges(edges: &mut [u8], rgb: &[Rgb], width: usize, height: usize) -> bool {
@@ -455,10 +494,10 @@ fn separate_chromatic_edges(edges: &mut [u8], rgb: &[Rgb], width: usize, height:
             }
             // Sobel samples a 3x3 neighborhood: exclude the whole chromatic
             // boundary, including neutral pixels just outside a colored badge.
-            if (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|yy|
-                (x.saturating_sub(1)..=(x + 1).min(width - 1)).any(|xx|
-                    chroma(rgb[yy * width + xx]) >= 24))
-            {
+            if (y.saturating_sub(1)..=(y + 1).min(height - 1)).any(|yy| {
+                (x.saturating_sub(1)..=(x + 1).min(width - 1))
+                    .any(|xx| chroma(rgb[yy * width + xx]) >= 24)
+            }) {
                 edges[index] = 0;
                 changed = true;
             }
@@ -469,30 +508,43 @@ fn separate_chromatic_edges(edges: &mut [u8], rgb: &[Rgb], width: usize, height:
 
 fn add_icon_regions(detection: &mut Detection, strong_edges: &[u8], limits: DetectionLimits) {
     let components = connected_edge_components(
-        strong_edges, strong_edges, detection.trace.width as usize, detection.trace.height as usize,
+        strong_edges,
+        strong_edges,
+        detection.trace.width as usize,
+        detection.trace.height as usize,
     );
     let mut targets = SupplementalTargets::new(&detection.regions);
     for component in components {
         let bounds = component.bounds;
         // Undilated strong contours recover icons joined to badges or nearby
         // controls by faint backgrounds. Exclude glyphs and thin decorations.
-        if !(16..=48).contains(&bounds.width) || !(16..=48).contains(&bounds.height)
-            || bounds.width > bounds.height * 2 || bounds.height > bounds.width * 2
+        if !(16..=48).contains(&bounds.width)
+            || !(16..=48).contains(&bounds.height)
+            || bounds.width > bounds.height * 2
+            || bounds.height > bounds.width * 2
         {
             continue;
         }
         let mut outcome = size_outcome(bounds, component.edge_pixels, limits);
         // Keep same-line glyph clusters inside their existing text target.
-        if outcome == Outcome::Accepted && detection.regions.iter().any(|&parent| {
-            contains(&parent, &bounds)
-                && (parent.height <= bounds.height + 8 || nested_target(parent, bounds, 1.0))
-        }) {
+        if outcome == Outcome::Accepted
+            && detection.regions.iter().any(|&parent| {
+                contains(&parent, &bounds)
+                    && (parent.height <= bounds.height + 8 || nested_target(parent, bounds, 1.0))
+            })
+        {
             outcome = Outcome::NestedOrDuplicate;
         }
-        targets.record(detection, DiagnosticComponent {
-            bounds, edge_pixels: component.edge_pixels, outcome, source: Source::Icon,
-            stroke_bounds: None,
-        });
+        targets.record(
+            detection,
+            DiagnosticComponent {
+                bounds,
+                edge_pixels: component.edge_pixels,
+                outcome,
+                source: Source::Icon,
+                stroke_bounds: None,
+            },
+        );
     }
 }
 
@@ -516,9 +568,18 @@ fn thin_stroke(luma: &[u8], width: usize, x: usize, y: usize) -> usize {
 }
 
 fn underline_text_bounds(
-    luma: &[u8], width: usize, height: usize, line: Rect, background: u8, dark: bool,
+    luma: &[u8],
+    width: usize,
+    height: usize,
+    line: Rect,
+    background: u8,
+    dark: bool,
 ) -> Option<Rect> {
-    let (left, right, y) = (line.x as usize, (line.x + line.width) as usize, line.y as usize);
+    let (left, right, y) = (
+        line.x as usize,
+        (line.x + line.width) as usize,
+        line.y as usize,
+    );
     let ink = |x: usize, y: usize| {
         let value = luma[y * width + x];
         value.abs_diff(background) >= 24 && (value < background) == dark
@@ -559,10 +620,12 @@ fn underline_text_bounds(
         }
     }
     let band_height = bottom - top;
-    if !(5..=32).contains(&band_height) || split_rows < 3
+    if !(5..=32).contains(&band_height)
+        || split_rows < 3
         || samples * 100 < (right - left) * band_height * 10
         || samples * 100 > (right - left) * band_height * 65
-        || first > left + (right - left) / 5 || last + 1 < right - (right - left) / 5
+        || first > left + (right - left) / 5
+        || last + 1 < right - (right - left) / 5
     {
         return None;
     }
@@ -593,12 +656,19 @@ fn underline_text_bounds(
             return None;
         }
     }
-    Some(Rect { x: line.x, y: top as u32, width: line.width,
-        height: line.y + line.height - top as u32 })
+    Some(Rect {
+        x: line.x,
+        y: top as u32,
+        width: line.width,
+        height: line.y + line.height - top as u32,
+    })
 }
 
 fn add_underline_regions(detection: &mut Detection, luma: &[u8], limits: DetectionLimits) {
-    let (width, height) = (detection.trace.width as usize, detection.trace.height as usize);
+    let (width, height) = (
+        detection.trace.width as usize,
+        detection.trace.height as usize,
+    );
     if width < 12 || height < 8 {
         return;
     }
@@ -643,20 +713,36 @@ fn add_underline_regions(detection: &mut Detection, luma: &[u8], limits: Detecti
             if !(12..=1024).contains(&span) || covered * 100 < span * 75 {
                 continue;
             }
-            let line = Rect { x: left as u32, y: y as u32,
-                width: span as u32, height: thickness as u32 };
+            let line = Rect {
+                x: left as u32,
+                y: y as u32,
+                width: span as u32,
+                height: thickness as u32,
+            };
             let text = underline_text_bounds(luma, width, height, line, background, dark);
             let bounds = text.unwrap_or(line);
             let size = size_outcome(bounds, pixels, limits);
-            targets.record(detection, DiagnosticComponent {
-                bounds, edge_pixels: pixels, source: Source::Underline, stroke_bounds: Some(line),
-                outcome: if text.is_none() { Outcome::NotTextLike }
-                    else if size != Outcome::Accepted { size }
-                    else { Outcome::Accepted },
-            });
+            targets.record(
+                detection,
+                DiagnosticComponent {
+                    bounds,
+                    edge_pixels: pixels,
+                    source: Source::Underline,
+                    stroke_bounds: Some(line),
+                    outcome: if text.is_none() {
+                        Outcome::NotTextLike
+                    } else if size != Outcome::Accepted {
+                        size
+                    } else {
+                        Outcome::Accepted
+                    },
+                },
+            );
         }
     }
-    detection.regions.sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
+    detection
+        .regions
+        .sort_by_key(|rect| (rect.y, rect.x, rect.width, rect.height));
 }
 
 fn text_like(rgb: &[Rgb], width: usize, bounds: Rect, anchor: Rgb) -> bool {
@@ -818,7 +904,8 @@ fn filter_nested(rects: Vec<Rect>, scale: f64) -> Vec<Rect> {
         let Some(parent_index) = parents[index] else {
             continue;
         };
-        filtered[index] = filtered[parent_index] || nested_target(rects[parent_index], *rect, scale);
+        filtered[index] =
+            filtered[parent_index] || nested_target(rects[parent_index], *rect, scale);
     }
     rects
         .into_iter()
@@ -833,7 +920,8 @@ fn nested_target(parent: Rect, rect: Rect, scale: f64) -> bool {
     rect.height as f64 <= 6.0 * scale
         || ((cx - px).abs() < 8.0 * scale && (cy - py).abs() < 8.0 * scale)
         || ((parent.width as f64 - parent.height as f64).abs() < 5.0 * scale
-            && parent.width as f64 <= 40.0 * scale && parent.height as f64 <= 40.0 * scale)
+            && parent.width as f64 <= 40.0 * scale
+            && parent.height as f64 <= 40.0 * scale)
 }
 
 fn parent_indices(rects: &[Rect]) -> Vec<Option<usize>> {
@@ -878,10 +966,17 @@ mod tests {
 
     fn rgb_text(pixels: &mut [Rgb], width: u32, x: i32, y: i32, text: &str, color: Rgb) {
         use crate::font::{Canvas, Color};
-        let mut bgra: Vec<_> = pixels.iter().flat_map(|&[r, g, b]| [b, g, r, 255]).collect();
+        let mut bgra: Vec<_> = pixels
+            .iter()
+            .flat_map(|&[r, g, b]| [b, g, r, 255])
+            .collect();
         let height = pixels.len() as u32 / width;
         Canvas::new(&mut bgra, width, height).draw_text(
-            x, y, text, 2, Color::rgba(color[0], color[1], color[2], 255),
+            x,
+            y,
+            text,
+            2,
+            Color::rgba(color[0], color[1], color[2], 255),
         );
         for (pixel, bgra) in pixels.iter_mut().zip(bgra.chunks_exact(4)) {
             *pixel = [bgra[2], bgra[1], bgra[0]];
@@ -889,13 +984,24 @@ mod tests {
     }
 
     fn rgb_targets(rgb: &[Rgb], width: u32, height: u32, enabled: bool) -> Detection {
-        detect_rgb_with_trace(rgb, (width, height), (width, height), DetectionLimits::default(), enabled, false)
+        detect_rgb_with_trace(
+            rgb,
+            (width, height),
+            (width, height),
+            DetectionLimits::default(),
+            enabled,
+            false,
+        )
     }
 
     fn accepted_color(detection: &Detection) -> Vec<Rect> {
-        detection.trace.components.iter()
+        detection
+            .trace
+            .components
+            .iter()
             .filter(|c| c.source == Source::Color && c.outcome == Outcome::Accepted)
-            .map(|c| c.bounds).collect()
+            .map(|c| c.bounds)
+            .collect()
     }
 
     fn underline_targets(rgb: &[Rgb], size: (u32, u32), logical: (u32, u32)) -> Detection {
@@ -903,9 +1009,13 @@ mod tests {
     }
 
     fn accepted_underlines(detection: &Detection) -> Vec<Rect> {
-        detection.trace.components.iter()
+        detection
+            .trace
+            .components
+            .iter()
             .filter(|c| c.source == Source::Underline && c.outcome == Outcome::Accepted)
-            .map(|c| c.bounds).collect()
+            .map(|c| c.bounds)
+            .collect()
     }
 
     fn underline(rgb: &mut [Rgb], width: usize, left: usize, right: usize, y: usize, color: Rgb) {
@@ -914,12 +1024,21 @@ mod tests {
 
     #[test]
     fn underline_same_color_inline_light_dark_antialias_and_skip_ink() {
-        let expected = Rect { x: 60, y: 20, width: 46, height: 17 };
+        let expected = Rect {
+            x: 60,
+            y: 20,
+            width: 46,
+            height: 17,
+        };
         for (bg, fg) in [(245, 70), (20, 220)] {
             for style in 0..5 {
                 let mut rgb = vec![[bg; 3]; 200 * 80];
                 rgb_text(&mut rgb, 200, 12, 20, "TEXTLINKTEXT", [fg; 3]);
-                let line_color = if style == 1 { ((bg as u16 + fg as u16) / 2) as u8 } else { fg };
+                let line_color = if style == 1 {
+                    ((bg as u16 + fg as u16) / 2) as u8
+                } else {
+                    fg
+                };
                 underline(&mut rgb, 200, 60, 106, 36, [line_color; 3]);
                 if style == 2 {
                     for x in [70, 71, 72, 94, 95, 96] {
@@ -938,13 +1057,22 @@ mod tests {
                     underline(&mut rgb, 200, 60, 106, 35, [fringe; 3]);
                     underline(&mut rgb, 200, 60, 106, 37, [fringe; 3]);
                 }
-                let expected = Rect { height: if style >= 3 { 18 } else { 17 }, ..expected };
+                let expected = Rect {
+                    height: if style >= 3 { 18 } else { 17 },
+                    ..expected
+                };
                 let off = rgb_targets(&rgb, 200, 80, false);
                 let detection = underline_targets(&rgb, (200, 80), (200, 80));
-                assert_eq!(accepted_underlines(&detection), [expected],
-                    "bg={bg}, style={style}: {:?}", detection.trace.components);
-                assert_eq!(center(&accepted_underlines(&detection)[0]),
-                    (83.0, if style >= 3 { 29.0 } else { 28.5 }));
+                assert_eq!(
+                    accepted_underlines(&detection),
+                    [expected],
+                    "bg={bg}, style={style}: {:?}",
+                    detection.trace.components
+                );
+                assert_eq!(
+                    center(&accepted_underlines(&detection)[0]),
+                    (83.0, if style >= 3 { 29.0 } else { 28.5 })
+                );
                 assert!(off.regions.iter().any(|r| contains(r, &expected)));
                 assert!(off.regions.iter().all(|r| detection.regions.contains(r)));
                 assert_trace_consistent(&detection);
@@ -961,11 +1089,31 @@ mod tests {
             underline(&mut rgb, 240, 110, 154, y as usize + 16, [70; 3]);
         }
         let detection = underline_targets(&rgb, (240, 100), (240, 100));
-        let expected: Vec<_> = [20, 40, 60].into_iter().flat_map(|y| [
-            Rect { x: 60, y, width: 46, height: 17 },
-            Rect { x: 110, y, width: 44, height: 17 },
-        ]).collect();
-        assert_eq!(accepted_underlines(&detection), expected, "{:?}", detection.trace.components);
+        let expected: Vec<_> = [20, 40, 60]
+            .into_iter()
+            .flat_map(|y| {
+                [
+                    Rect {
+                        x: 60,
+                        y,
+                        width: 46,
+                        height: 17,
+                    },
+                    Rect {
+                        x: 110,
+                        y,
+                        width: 44,
+                        height: 17,
+                    },
+                ]
+            })
+            .collect();
+        assert_eq!(
+            accepted_underlines(&detection),
+            expected,
+            "{:?}",
+            detection.trace.components
+        );
         for (rect, expected) in accepted_underlines(&detection).iter().zip(expected) {
             assert_eq!(center(rect), center(&expected));
         }
@@ -1015,11 +1163,18 @@ mod tests {
                 }
             }
             let detection = underline_targets(&rgb, (240, 100), (240, 100));
-            assert!(accepted_underlines(&detection).is_empty(),
-                "case={case}: {:?}", detection.trace.components);
+            assert!(
+                accepted_underlines(&detection).is_empty(),
+                "case={case}: {:?}",
+                detection.trace.components
+            );
             if (1..=3).contains(&case) {
-                assert!(detection.trace.components.iter().any(|c|
-                    c.source == Source::Underline && c.outcome == Outcome::NotTextLike
+                assert!(detection
+                    .trace
+                    .components
+                    .iter()
+                    .any(|c| c.source == Source::Underline
+                        && c.outcome == Outcome::NotTextLike
                         && c.stroke_bounds.is_some()));
             }
             assert_trace_consistent(&detection);
@@ -1038,32 +1193,91 @@ mod tests {
             let scaled = resize_rgb(&rgb, 200, 80, size.0, size.1);
             let detection = underline_targets(&scaled, size, (200, 80));
             let links = accepted_underlines(&detection);
-            assert_eq!(links.len(), 1, "scale={scale}: {:?}", detection.trace.components);
+            assert_eq!(
+                links.len(),
+                1,
+                "scale={scale}: {:?}",
+                detection.trace.components
+            );
             let rect = links[0];
             assert!(rect.x.abs_diff(60) <= 1 && rect.y.abs_diff(20) <= 1);
             assert!(rect.width.abs_diff(46) <= 2 && rect.height.abs_diff(17) <= 2);
             let (cx, cy) = center(&rect);
             assert!((cx - 83.0).abs() <= 1.0 && (cy - 28.5).abs() <= 1.0);
             let physical = map_rect(rect, 200, 80, size.0, size.1);
-            assert!(covers(&physical, (83.0 * scale) as u32, (28.5 * scale) as u32));
-            let both = detect_rgb_with_trace(&scaled, size, (200, 80), DetectionLimits::default(), true, true);
-            let color_only = detect_rgb_with_trace(&scaled, size, (200, 80), DetectionLimits::default(), true, false);
+            assert!(covers(
+                &physical,
+                (83.0 * scale) as u32,
+                (28.5 * scale) as u32
+            ));
+            let both = detect_rgb_with_trace(
+                &scaled,
+                size,
+                (200, 80),
+                DetectionLimits::default(),
+                true,
+                true,
+            );
+            let color_only = detect_rgb_with_trace(
+                &scaled,
+                size,
+                (200, 80),
+                DetectionLimits::default(),
+                true,
+                false,
+            );
             assert_eq!(both.regions, color_only.regions);
             assert_eq!(both.trace.color_strokes, color_only.trace.color_strokes);
             assert_eq!(both.trace.edges, color_only.trace.edges);
-            assert!(both.trace.components.iter().any(|c|
-                c.source == Source::Underline && c.outcome == Outcome::NestedOrDuplicate));
-            assert!(color_only.trace.components.iter().all(|c| c.source != Source::Underline));
+            assert!(both
+                .trace
+                .components
+                .iter()
+                .any(|c| c.source == Source::Underline && c.outcome == Outcome::NestedOrDuplicate));
+            assert!(color_only
+                .trace
+                .components
+                .iter()
+                .all(|c| c.source != Source::Underline));
             assert_trace_consistent(&both);
         }
         for (limits, outcome) in [
-            (DetectionLimits { min_width: 47.0, ..DetectionLimits::default() }, Outcome::TooSmall),
-            (DetectionLimits { max_width: 45.0, ..DetectionLimits::default() }, Outcome::TooLarge),
-            (DetectionLimits { max_height: 16.0, ..DetectionLimits::default() }, Outcome::TooLarge),
+            (
+                DetectionLimits {
+                    min_width: 47.0,
+                    ..DetectionLimits::default()
+                },
+                Outcome::TooSmall,
+            ),
+            (
+                DetectionLimits {
+                    max_width: 45.0,
+                    ..DetectionLimits::default()
+                },
+                Outcome::TooLarge,
+            ),
+            (
+                DetectionLimits {
+                    max_height: 16.0,
+                    ..DetectionLimits::default()
+                },
+                Outcome::TooLarge,
+            ),
         ] {
             let detection = detect_rgb_with_trace(&rgb, (200, 80), (200, 80), limits, false, true);
-            assert!(detection.trace.components.iter().any(|c| c.source == Source::Underline
-                && c.outcome == outcome && c.bounds == Rect { x: 60, y: 20, width: 46, height: 17 }));
+            assert!(detection
+                .trace
+                .components
+                .iter()
+                .any(|c| c.source == Source::Underline
+                    && c.outcome == outcome
+                    && c.bounds
+                        == Rect {
+                            x: 60,
+                            y: 20,
+                            width: 46,
+                            height: 17
+                        }));
             assert_trace_consistent(&detection);
         }
         let mut isolated = vec![[245; 3]; 160 * 80];
@@ -1072,30 +1286,60 @@ mod tests {
         let baseline = rgb_targets(&isolated, 160, 80, false);
         let detection = underline_targets(&isolated, (160, 80), (160, 80));
         assert_eq!(detection.regions, baseline.regions);
-        assert_eq!(detection.regions, [Rect { x: 39, y: 19, width: 48, height: 19 }]);
-        assert!(detection.trace.components.iter().any(|c|
-            c.source == Source::Underline && c.outcome == Outcome::NestedOrDuplicate));
+        assert_eq!(
+            detection.regions,
+            [Rect {
+                x: 39,
+                y: 19,
+                width: 48,
+                height: 19
+            }]
+        );
+        assert!(detection
+            .trace
+            .components
+            .iter()
+            .any(|c| c.source == Source::Underline && c.outcome == Outcome::NestedOrDuplicate));
         assert_trace_consistent(&detection);
     }
 
     fn assert_trace_consistent(detection: &Detection) {
         let trace = &detection.trace;
         for component in &trace.components {
-            assert_eq!(component.stroke_bounds.is_some(), component.source == Source::Underline);
+            assert_eq!(
+                component.stroke_bounds.is_some(),
+                component.source == Source::Underline
+            );
             if let Some(line) = component.stroke_bounds {
                 assert!(component.edge_pixels <= (line.width * line.height) as usize);
                 assert_eq!(component.bounds.x, line.x);
                 assert_eq!(component.bounds.width, line.width);
-                assert_eq!(component.bounds.y + component.bounds.height, line.y + line.height);
+                assert_eq!(
+                    component.bounds.y + component.bounds.height,
+                    line.y + line.height
+                );
             }
         }
-        for (source, mask) in [(Source::Grayscale, &trace.edges), (Source::Color, &trace.color_strokes)] {
-            assert_eq!(mask.iter().map(|&v| v as usize).sum::<usize>(),
-                trace.components.iter().filter(|c| c.source == source)
-                    .map(|c| c.edge_pixels).sum::<usize>());
+        for (source, mask) in [
+            (Source::Grayscale, &trace.edges),
+            (Source::Color, &trace.color_strokes),
+        ] {
+            assert_eq!(
+                mask.iter().map(|&v| v as usize).sum::<usize>(),
+                trace
+                    .components
+                    .iter()
+                    .filter(|c| c.source == source)
+                    .map(|c| c.edge_pixels)
+                    .sum::<usize>()
+            );
         }
-        let mut accepted: Vec<_> = trace.components.iter()
-            .filter(|c| c.outcome == Outcome::Accepted).map(|c| c.bounds).collect();
+        let mut accepted: Vec<_> = trace
+            .components
+            .iter()
+            .filter(|c| c.outcome == Outcome::Accepted)
+            .map(|c| c.bounds)
+            .collect();
         accepted.sort_by_key(|r| (r.y, r.x, r.width, r.height));
         assert_eq!(accepted, detection.regions);
     }
@@ -1117,13 +1361,27 @@ mod tests {
                     }
                     let baseline = rgb_targets(&rgb, 200, 80, false);
                     let detection = rgb_targets(&rgb, 200, 80, true);
-                    let expected = Rect { x: 60, y: 20, width: 46, height: if underline { 17 } else { 14 } };
-                    assert_eq!(accepted_color(&detection), [expected],
+                    let expected = Rect {
+                        x: 60,
+                        y: 20,
+                        width: 46,
+                        height: if underline { 17 } else { 14 },
+                    };
+                    assert_eq!(
+                        accepted_color(&detection),
+                        [expected],
                         "background={background:?}, color={color:?}, underline={underline}: {:?}",
-                        detection.trace.components);
-                    assert_eq!(center(&expected), (83.0, if underline { 28.5 } else { 27.0 }));
+                        detection.trace.components
+                    );
+                    assert_eq!(
+                        center(&expected),
+                        (83.0, if underline { 28.5 } else { 27.0 })
+                    );
                     assert!(baseline.regions.iter().any(|r| contains(r, &expected)));
-                    assert!(baseline.regions.iter().all(|r| detection.regions.contains(r)));
+                    assert!(baseline
+                        .regions
+                        .iter()
+                        .all(|r| detection.regions.contains(r)));
                     assert_trace_consistent(&detection);
                 }
             }
@@ -1137,7 +1395,15 @@ mod tests {
         rgb_text(&mut rgb, 160, 40, 20, "LINK", color);
         let detection = rgb_targets(&rgb, 160, 60, true);
         assert!(detection.trace.edges.iter().all(|&v| v == 0));
-        assert_eq!(detection.regions, [Rect { x: 40, y: 20, width: 46, height: 14 }]);
+        assert_eq!(
+            detection.regions,
+            [Rect {
+                x: 40,
+                y: 20,
+                width: 46,
+                height: 14
+            }]
+        );
         assert_trace_consistent(&detection);
     }
 
@@ -1151,10 +1417,25 @@ mod tests {
             rgb_text(&mut rgb, 240, second_x + 48, 20, "TEXT", [90; 3]);
             let detection = rgb_targets(&rgb, 240, 80, true);
             let links = accepted_color(&detection);
-            assert_eq!(links, [
-                Rect { x: 60, y: 20, width: 46, height: 14 },
-                Rect { x: second_x as u32, y: 20, width: 46, height: 14 },
-            ], "{:?}", detection.trace.components);
+            assert_eq!(
+                links,
+                [
+                    Rect {
+                        x: 60,
+                        y: 20,
+                        width: 46,
+                        height: 14
+                    },
+                    Rect {
+                        x: second_x as u32,
+                        y: 20,
+                        width: 46,
+                        height: 14
+                    },
+                ],
+                "{:?}",
+                detection.trace.components
+            );
             assert!(!links.iter().any(|r| r.width > 46));
             assert_trace_consistent(&detection);
         }
@@ -1163,9 +1444,20 @@ mod tests {
         let baseline = rgb_targets(&rgb, 160, 80, false);
         let detection = rgb_targets(&rgb, 160, 80, true);
         assert_eq!(detection.regions, baseline.regions);
-        assert_eq!(detection.regions, [Rect { x: 39, y: 19, width: 48, height: 16 }]);
-        assert!(detection.trace.components.iter().any(|c|
-            c.source == Source::Color && c.outcome == Outcome::NestedOrDuplicate));
+        assert_eq!(
+            detection.regions,
+            [Rect {
+                x: 39,
+                y: 19,
+                width: 48,
+                height: 16
+            }]
+        );
+        assert!(detection
+            .trace
+            .components
+            .iter()
+            .any(|c| c.source == Source::Color && c.outcome == Outcome::NestedOrDuplicate));
         assert_trace_consistent(&detection);
     }
 
@@ -1179,8 +1471,10 @@ mod tests {
         assert!(detection.trace.color_strokes.iter().all(|&v| v == 0));
         assert_trace_consistent(&detection);
         assert!(baseline.trace.color_strokes.is_empty());
-        assert_eq!(baseline.regions, detect_with_trace(&luma(&rgb), 320, 160, 1.0,
-            DetectionLimits::default()).regions);
+        assert_eq!(
+            baseline.regions,
+            detect_with_trace(&luma(&rgb), 320, 160, 1.0, DetectionLimits::default()).regions
+        );
 
         for (i, pixel) in rgb.iter_mut().enumerate() {
             *pixel = [240 + (i % 5) as u8, 240, 240];
@@ -1200,11 +1494,21 @@ mod tests {
             }
         }
         let detection = rgb_targets(&rgb, 320, 160, true);
-        assert!(accepted_color(&detection).is_empty(), "{:?}", detection.trace.components);
-        assert!(detection.trace.components.iter().any(|c|
-            c.source == Source::Color && c.outcome == Outcome::NotTextLike));
-        assert!(detection.trace.components.iter().any(|c|
-            c.source == Source::Color && c.outcome == Outcome::InsufficientEdges));
+        assert!(
+            accepted_color(&detection).is_empty(),
+            "{:?}",
+            detection.trace.components
+        );
+        assert!(detection
+            .trace
+            .components
+            .iter()
+            .any(|c| c.source == Source::Color && c.outcome == Outcome::NotTextLike));
+        assert!(detection
+            .trace
+            .components
+            .iter()
+            .any(|c| c.source == Source::Color && c.outcome == Outcome::InsufficientEdges));
         assert_trace_consistent(&detection);
 
         let mut state = 17u32;
@@ -1215,7 +1519,11 @@ mod tests {
             });
         }
         let noise = rgb_targets(&rgb, 320, 160, true);
-        assert!(accepted_color(&noise).is_empty(), "{:?}", accepted_color(&noise));
+        assert!(
+            accepted_color(&noise).is_empty(),
+            "{:?}",
+            accepted_color(&noise)
+        );
         assert_trace_consistent(&noise);
     }
 
@@ -1224,14 +1532,39 @@ mod tests {
         let mut rgb = vec![[245; 3]; 160 * 60];
         rgb_text(&mut rgb, 160, 40, 20, "LINK", [30, 90, 210]);
         for (limits, expected) in [
-            (DetectionLimits { min_width: 50.0, ..DetectionLimits::default() }, Outcome::TooSmall),
-            (DetectionLimits { max_width: 40.0, ..DetectionLimits::default() }, Outcome::TooLarge),
+            (
+                DetectionLimits {
+                    min_width: 50.0,
+                    ..DetectionLimits::default()
+                },
+                Outcome::TooSmall,
+            ),
+            (
+                DetectionLimits {
+                    max_width: 40.0,
+                    ..DetectionLimits::default()
+                },
+                Outcome::TooLarge,
+            ),
         ] {
             let detection = detect_rgb_with_trace(&rgb, (160, 60), (160, 60), limits, true, false);
-            let color: Vec<_> = detection.trace.components.iter().filter(|c| c.source == Source::Color).collect();
+            let color: Vec<_> = detection
+                .trace
+                .components
+                .iter()
+                .filter(|c| c.source == Source::Color)
+                .collect();
             assert_eq!(color.len(), 1);
             assert_eq!(color[0].outcome, expected);
-            assert_eq!(color[0].bounds, Rect { x: 40, y: 20, width: 46, height: 14 });
+            assert_eq!(
+                color[0].bounds,
+                Rect {
+                    x: 40,
+                    y: 20,
+                    width: 46,
+                    height: 14
+                }
+            );
             assert_trace_consistent(&detection);
         }
         for (rgb, size, logical_size) in [
@@ -1239,7 +1572,14 @@ mod tests {
             (&rgb[..], (0, 60), (160, 60)),
             (&rgb[..], (160, 60), (160, 0)),
         ] {
-            let detection = detect_rgb_with_trace(rgb, size, logical_size, DetectionLimits::default(), true, true);
+            let detection = detect_rgb_with_trace(
+                rgb,
+                size,
+                logical_size,
+                DetectionLimits::default(),
+                true,
+                true,
+            );
             assert!(detection.regions.is_empty());
             assert!(detection.trace.components.is_empty());
         }
@@ -1251,16 +1591,34 @@ mod tests {
         rgb_text(&mut rgb, 200, 12, 20, "TEXT", [90; 3]);
         rgb_text(&mut rgb, 200, 60, 20, "LINK", [30, 90, 210]);
         rgb_text(&mut rgb, 200, 108, 20, "TEXT", [90; 3]);
-        let expected = Rect { x: 60, y: 20, width: 46, height: 14 };
+        let expected = Rect {
+            x: 60,
+            y: 20,
+            width: 46,
+            height: 14,
+        };
         for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
             let (width, height) = ((200.0 * scale) as u32, (80.0 * scale) as u32);
             let scaled = resize_rgb(&rgb, 200, 80, width, height);
-            let detection = detect_rgb_with_trace(&scaled, (width, height), (200, 80),
-                DetectionLimits::default(), true, false);
-            let disabled = detect_rgb_with_trace(&scaled, (width, height), (200, 80),
-                DetectionLimits::default(), false, false);
+            let detection = detect_rgb_with_trace(
+                &scaled,
+                (width, height),
+                (200, 80),
+                DetectionLimits::default(),
+                true,
+                false,
+            );
+            let disabled = detect_rgb_with_trace(
+                &scaled,
+                (width, height),
+                (200, 80),
+                DetectionLimits::default(),
+                false,
+                false,
+            );
             let baseline_luma = resize_luma(&luma(&scaled), width, height, 200, 80);
-            let baseline = detect_with_trace(&baseline_luma, 200, 80, 1.0, DetectionLimits::default());
+            let baseline =
+                detect_with_trace(&baseline_luma, 200, 80, 1.0, DetectionLimits::default());
             assert_eq!(disabled.regions, baseline.regions);
             assert_eq!(disabled.trace.edges, baseline.trace.edges);
             assert!(disabled.trace.color_strokes.is_empty());
@@ -1268,11 +1626,18 @@ mod tests {
             assert_eq!(links.len(), 1, "scale={scale}: {links:?}");
             let rect = links[0];
             assert!(rect.x.abs_diff(expected.x) <= 1 && rect.y.abs_diff(expected.y) <= 1);
-            assert!(rect.width.abs_diff(expected.width) <= 2 && rect.height.abs_diff(expected.height) <= 2);
+            assert!(
+                rect.width.abs_diff(expected.width) <= 2
+                    && rect.height.abs_diff(expected.height) <= 2
+            );
             let (x, y) = center(&rect);
             assert!((x - 83.0).abs() <= 1.0 && (y - 27.0).abs() <= 1.0);
             let physical = map_rect(rect, 200, 80, width, height);
-            assert!(covers(&physical, (83.0 * scale) as u32, (27.0 * scale) as u32));
+            assert!(covers(
+                &physical,
+                (83.0 * scale) as u32,
+                (27.0 * scale) as u32
+            ));
             assert_trace_consistent(&detection);
         }
     }
@@ -1298,7 +1663,10 @@ mod tests {
                 start.elapsed(), detection.regions.len(), accepted_color(&detection).len(),
                 detection.trace.edges.len() + detection.trace.color_strokes.len(),
                 detection.trace.components.capacity() * std::mem::size_of::<DiagnosticComponent>());
-            assert_eq!(accepted_color(&detection).len(), if enabled { 270 } else { 0 });
+            assert_eq!(
+                accepted_color(&detection).len(),
+                if enabled { 270 } else { 0 }
+            );
             assert_trace_consistent(&detection);
         }
     }
@@ -1312,22 +1680,50 @@ mod tests {
             rgb_text(&mut row, 1920, x, 10, "TEXT", [90; 3]);
             rgb_text(&mut row, 1920, x + 48, 10, "LINK", [30, 90, 210]);
             rgb_text(&mut row, 1920, x + 96, 10, "TEXT", [90; 3]);
-            underline(&mut row, 1920, x as usize + 48, x as usize + 94, 26, [30, 90, 210]);
+            underline(
+                &mut row,
+                1920,
+                x as usize + 48,
+                x as usize + 94,
+                26,
+                [30, 90, 210],
+            );
         }
         for chunk in rgb.chunks_exact_mut(row.len()) {
             chunk.copy_from_slice(&row);
         }
-        for (color_links, underline_links) in [(false, false), (false, true), (true, false), (true, true)] {
+        for (color_links, underline_links) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
             let start = std::time::Instant::now();
-            let detection = detect_rgb_with_trace(&rgb, (1920, 1080), (1920, 1080),
-                DetectionLimits::default(), color_links, underline_links);
+            let detection = detect_rgb_with_trace(
+                &rgb,
+                (1920, 1080),
+                (1920, 1080),
+                DetectionLimits::default(),
+                color_links,
+                underline_links,
+            );
             eprintln!("1920x1080 color_links={color_links} underline_links={underline_links}: {:?}, {} targets, {} underline targets, {} retained mask bytes, {} metadata bytes",
                 start.elapsed(), detection.regions.len(), accepted_underlines(&detection).len(),
                 detection.trace.edges.len() + detection.trace.color_strokes.len(),
                 detection.trace.components.capacity() * std::mem::size_of::<DiagnosticComponent>());
-            assert_eq!(accepted_underlines(&detection).len(),
-                if underline_links && !color_links { 270 } else { 0 });
-            assert_eq!(detection.regions.len(), if color_links || underline_links { 540 } else { 270 });
+            assert_eq!(
+                accepted_underlines(&detection).len(),
+                if underline_links && !color_links {
+                    270
+                } else {
+                    0
+                }
+            );
+            assert_eq!(
+                detection.regions.len(),
+                if color_links || underline_links {
+                    540
+                } else {
+                    270
+                }
+            );
             assert_trace_consistent(&detection);
         }
         let mut state = 17u32;
@@ -1335,34 +1731,59 @@ mod tests {
             state = state.wrapping_mul(1664525).wrapping_add(1013904223);
             *pixel = [(state >> 24) as u8; 3];
         }
-        let mut detection = Detection { regions: Vec::new(), trace: DetectionTrace {
-            width: 1920, height: 1080, ..DetectionTrace::default()
-        } };
+        let mut detection = Detection {
+            regions: Vec::new(),
+            trace: DetectionTrace {
+                width: 1920,
+                height: 1080,
+                ..DetectionTrace::default()
+            },
+        };
         let gray = luma(&rgb);
         let start = std::time::Instant::now();
         add_underline_regions(&mut detection, &gray, DetectionLimits::default());
-        eprintln!("1920x1080 noise underline-only work: {:?}, {} candidates, {} targets",
-            start.elapsed(), detection.trace.components.len(), detection.regions.len());
+        eprintln!(
+            "1920x1080 noise underline-only work: {:?}, {} candidates, {} targets",
+            start.elapsed(),
+            detection.trace.components.len(),
+            detection.regions.len()
+        );
         assert!(detection.regions.is_empty());
     }
 
     #[test]
     fn diagnostic_outcomes_follow_filter_order_and_deduplication() {
         let component = |x, y, width, height, edge_pixels| Component {
-            bounds: Rect { x, y, width, height }, edge_pixels,
+            bounds: Rect {
+                x,
+                y,
+                width,
+                height,
+            },
+            edge_pixels,
         };
-        let (regions, trace) = classify_components(vec![
-            component(10, 10, 30, 30, 100),
-            component(20, 20, 10, 10, 30),
-            component(10, 10, 30, 30, 100),
-            component(100, 10, 2, 2, 7),
-            component(110, 10, 7, 10, 20),
-            component(150, 10, 500, 20, 1000),
-        ], DetectionLimits::default());
-        assert_eq!(trace.iter().map(|c| c.outcome).collect::<Vec<_>>(), [
-            Outcome::Accepted, Outcome::NestedOrDuplicate, Outcome::NestedOrDuplicate,
-            Outcome::InsufficientEdges, Outcome::TooSmall, Outcome::TooLarge,
-        ]);
+        let (regions, trace) = classify_components(
+            vec![
+                component(10, 10, 30, 30, 100),
+                component(20, 20, 10, 10, 30),
+                component(10, 10, 30, 30, 100),
+                component(100, 10, 2, 2, 7),
+                component(110, 10, 7, 10, 20),
+                component(150, 10, 500, 20, 1000),
+            ],
+            DetectionLimits::default(),
+        );
+        assert_eq!(
+            trace.iter().map(|c| c.outcome).collect::<Vec<_>>(),
+            [
+                Outcome::Accepted,
+                Outcome::NestedOrDuplicate,
+                Outcome::NestedOrDuplicate,
+                Outcome::InsufficientEdges,
+                Outcome::TooSmall,
+                Outcome::TooLarge,
+            ]
+        );
         assert_eq!(regions, [trace[0].bounds]);
     }
 
@@ -1371,18 +1792,48 @@ mod tests {
         let mut pixels = image(200, 120);
         stroke_rect(&mut pixels, 200, 10, 10, 30, 20);
         stroke_rect(&mut pixels, 200, 70, 10, 50, 70);
-        let detection = detect_with_trace(&pixels, 200, 120, 1.0, DetectionLimits::default());
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
+        let detection = detect_with_trace(&pixels, 200, 120, 1.0, limits);
         assert_trace_consistent(&detection);
         let trace = detection.trace;
-        assert_eq!((trace.width, trace.height, trace.edges.len()), (200, 120, 24000));
-        assert_eq!(trace.edges.iter().map(|v| *v as usize).sum::<usize>(),
-            trace.components.iter().filter(|c| c.source == Source::Grayscale)
-                .map(|c| c.edge_pixels).sum::<usize>());
-        assert_eq!(trace.components.iter().filter(|c| c.source == Source::Grayscale).count(), 2);
+        assert_eq!(
+            (trace.width, trace.height, trace.edges.len()),
+            (200, 120, 24000)
+        );
+        assert_eq!(
+            trace.edges.iter().map(|v| *v as usize).sum::<usize>(),
+            trace
+                .components
+                .iter()
+                .filter(|c| c.source == Source::Grayscale)
+                .map(|c| c.edge_pixels)
+                .sum::<usize>()
+        );
+        assert_eq!(
+            trace
+                .components
+                .iter()
+                .filter(|c| c.source == Source::Grayscale)
+                .count(),
+            2
+        );
         assert_eq!(detection.regions.len(), 1);
-        assert_eq!(trace.components.iter().filter(|c| c.outcome == Outcome::Accepted)
-            .map(|c| c.bounds).collect::<Vec<_>>(), detection.regions);
-        assert!(trace.components.iter().any(|c| c.outcome == Outcome::TooLarge));
+        assert_eq!(
+            trace
+                .components
+                .iter()
+                .filter(|c| c.outcome == Outcome::Accepted)
+                .map(|c| c.bounds)
+                .collect::<Vec<_>>(),
+            detection.regions
+        );
+        assert!(trace
+            .components
+            .iter()
+            .any(|c| c.outcome == Outcome::TooLarge));
         let blank = detect_with_trace(&image(20, 20), 20, 20, 1.0, DetectionLimits::default());
         assert!(blank.regions.is_empty());
         assert!(blank.trace.components.is_empty());
@@ -1466,11 +1917,18 @@ mod tests {
 
         assert_eq!(rects.len(), 12);
         for (rect, (x, y)) in rects.iter().zip(
-            [22, 103, 184].into_iter().flat_map(|y| [22, 80, 139, 197].into_iter().map(move |x| (x, y))),
+            [22, 103, 184]
+                .into_iter()
+                .flat_map(|y| [22, 80, 139, 197].into_iter().map(move |x| (x, y))),
         ) {
             assert_eq!(
                 *rect,
-                Rect { x: x - 1, y: y - 1, width: 53, height: 74 },
+                Rect {
+                    x: x - 1,
+                    y: y - 1,
+                    width: 53,
+                    height: 74
+                },
             );
         }
     }
@@ -1559,42 +2017,75 @@ mod tests {
             padded[(y + 19) * 280 + 20..(y + 19) * 280 + 228]
                 .copy_from_slice(&screenshot[y * 210 + 1..y * 210 + 209]);
         }
-        for (rgb, logical_size, offset) in [
-            (&screenshot, (210, 56), 0),
-            (&padded, (280, 100), 19),
-        ] {
+        for (rgb, logical_size, offset) in [(&screenshot, (210, 56), 0), (&padded, (280, 100), 19)]
+        {
             for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
-                let size = ((logical_size.0 as f64 * scale) as u32,
-                    (logical_size.1 as f64 * scale) as u32);
+                let size = (
+                    (logical_size.0 as f64 * scale) as u32,
+                    (logical_size.1 as f64 * scale) as u32,
+                );
                 let scaled = resize_rgb(rgb, logical_size.0, logical_size.1, size.0, size.1);
-                for (color, underline) in [(false, false), (true, false), (false, true), (true, true)] {
+                for (color, underline) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
                     let detection = detect_rgb_with_trace(
-                        &scaled, size, logical_size, DetectionLimits::default(), color, underline,
+                        &scaled,
+                        size,
+                        logical_size,
+                        DetectionLimits::default(),
+                        color,
+                        underline,
                     );
                     assert_trace_consistent(&detection);
                     for x in [32, 80, 128] {
-                        let centers = detection.regions.iter().filter(|rect| {
-                            let (cx, cy) = center(rect);
-                            (cx - (x + offset) as f64).abs() <= 4.0
-                                && (cy - (29 + offset) as f64).abs() <= 4.0
-                        }).count();
-                        assert_eq!(centers, 1,
-                            "x={x}, scale={scale}, offset={offset}: {:?}", detection.regions);
+                        let centers = detection
+                            .regions
+                            .iter()
+                            .filter(|rect| {
+                                let (cx, cy) = center(rect);
+                                (cx - (x + offset) as f64).abs() <= 4.0
+                                    && (cy - (29 + offset) as f64).abs() <= 4.0
+                            })
+                            .count();
+                        assert_eq!(
+                            centers, 1,
+                            "x={x}, scale={scale}, offset={offset}: {:?}",
+                            detection.regions
+                        );
                     }
                 }
             }
         }
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
         for limits in [
-            DetectionLimits { max_width: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { max_height: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { min_width: 25.0, ..DetectionLimits::default() },
-            DetectionLimits { min_height: 25.0, ..DetectionLimits::default() },
+            DetectionLimits {
+                max_width: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                max_height: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_width: 25.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_height: 25.0,
+                ..limits
+            },
         ] {
-            let detection = detect_rgb_with_trace(
-                &screenshot, (210, 56), (210, 56), limits, false, false,
-            );
+            let detection =
+                detect_rgb_with_trace(&screenshot, (210, 56), (210, 56), limits, false, false);
             assert_trace_consistent(&detection);
-            assert!(!detection.regions.iter().any(|rect| covers(rect, 80, 29)));
+            assert!(
+                !detection.regions.iter().any(|rect| covers(rect, 80, 29)),
+                "limits={limits:?}, regions={:?}",
+                detection.regions
+            );
         }
     }
 
@@ -1616,7 +2107,12 @@ mod tests {
             }
         }
         let detection = detect_rgb_with_trace(
-            &neutral, (80, 60), (80, 60), DetectionLimits::default(), false, false,
+            &neutral,
+            (80, 60),
+            (80, 60),
+            DetectionLimits::default(),
+            false,
+            false,
         );
         assert_trace_consistent(&detection);
         assert_eq!(detection.regions.len(), 1);
@@ -1633,30 +2129,48 @@ mod tests {
             padded[(y + 19) * 300 + 20..(y + 19) * 300 + 262]
                 .copy_from_slice(&screenshot[y * 244 + 1..y * 244 + 243]);
         }
-        for (rgb, logical_size, offset) in [
-            (&screenshot, (244, 56), 0),
-            (&padded, (300, 100), 19),
-        ] {
+        for (rgb, logical_size, offset) in [(&screenshot, (244, 56), 0), (&padded, (300, 100), 19)]
+        {
             for scale in [1.0, 1.25, 1.5, 2.0, 3.0] {
-                let size = ((logical_size.0 as f64 * scale) as u32,
-                    (logical_size.1 as f64 * scale) as u32);
+                let size = (
+                    (logical_size.0 as f64 * scale) as u32,
+                    (logical_size.1 as f64 * scale) as u32,
+                );
                 let scaled = resize_rgb(rgb, logical_size.0, logical_size.1, size.0, size.1);
-                for (color, underline) in [(false, false), (true, false), (false, true), (true, true)] {
+                for (color, underline) in
+                    [(false, false), (true, false), (false, true), (true, true)]
+                {
                     let detection = detect_rgb_with_trace(
-                        &scaled, size, logical_size, DetectionLimits::default(), color, underline,
+                        &scaled,
+                        size,
+                        logical_size,
+                        DetectionLimits::default(),
+                        color,
+                        underline,
                     );
                     assert_trace_consistent(&detection);
                     for x in [60, 108, 156] {
-                        let centers = detection.regions.iter().filter(|rect| {
-                            let (cx, cy) = center(rect);
-                            (cx - (x + offset) as f64).abs() <= 4.0
-                                && (cy - (27 + offset) as f64).abs() <= 4.0
-                        }).count();
-                        assert_eq!(centers, 1,
-                            "x={x}, scale={scale}, offset={offset}: {:?}", detection.regions);
+                        let centers = detection
+                            .regions
+                            .iter()
+                            .filter(|rect| {
+                                let (cx, cy) = center(rect);
+                                (cx - (x + offset) as f64).abs() <= 4.0
+                                    && (cy - (27 + offset) as f64).abs() <= 4.0
+                            })
+                            .count();
+                        assert_eq!(
+                            centers, 1,
+                            "x={x}, scale={scale}, offset={offset}: {:?}",
+                            detection.regions
+                        );
                     }
-                    assert!(detection.trace.components.iter().any(|component|
-                        component.source == Source::Icon && component.outcome == Outcome::Accepted
+                    assert!(detection
+                        .trace
+                        .components
+                        .iter()
+                        .any(|component| component.source == Source::Icon
+                            && component.outcome == Outcome::Accepted
                             && covers(&component.bounds, 156 + offset, 27 + offset)));
                 }
             }
@@ -1666,19 +2180,41 @@ mod tests {
     #[test]
     fn icon_fallback_respects_size_limits_and_does_not_duplicate_standalone_icons() {
         let screenshot = notification_toolbar();
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
         for limits in [
-            DetectionLimits { max_width: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { max_height: 19.0, ..DetectionLimits::default() },
-            DetectionLimits { min_width: 25.0, ..DetectionLimits::default() },
-            DetectionLimits { min_height: 25.0, ..DetectionLimits::default() },
+            DetectionLimits {
+                max_width: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                max_height: 19.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_width: 25.0,
+                ..limits
+            },
+            DetectionLimits {
+                min_height: 25.0,
+                ..limits
+            },
         ] {
-            let detection = detect_rgb_with_trace(
-                &screenshot, (244, 56), (244, 56), limits, false, false,
-            );
+            let detection =
+                detect_rgb_with_trace(&screenshot, (244, 56), (244, 56), limits, false, false);
             assert_trace_consistent(&detection);
-            assert!(!detection.regions.iter().any(|rect| covers(rect, 156, 27)));
-            assert!(detection.trace.components.iter().any(|component|
-                component.source == Source::Icon
+            assert!(
+                !detection.regions.iter().any(|rect| covers(rect, 156, 27)),
+                "limits={limits:?}, regions={:?}",
+                detection.regions
+            );
+            assert!(detection
+                .trace
+                .components
+                .iter()
+                .any(|component| component.source == Source::Icon
                     && matches!(component.outcome, Outcome::TooSmall | Outcome::TooLarge)
                     && covers(&component.bounds, 156, 27)));
         }
@@ -1688,7 +2224,12 @@ mod tests {
                 .copy_from_slice(&screenshot[y * 244 + 144..y * 244 + 168]);
         }
         let detection = detect_rgb_with_trace(
-            &standalone, (80, 60), (80, 60), DetectionLimits::default(), false, false,
+            &standalone,
+            (80, 60),
+            (80, 60),
+            DetectionLimits::default(),
+            false,
+            false,
         );
         assert_trace_consistent(&detection);
         assert_eq!(detection.regions.len(), 1, "{:?}", detection.regions);
@@ -1790,10 +2331,14 @@ mod tests {
         assert!(targets(&[], 0, 0).is_empty());
         let mut pixels = image(200, 100);
         stroke_rect(&mut pixels, 200, 12, 12, 100, 60);
-        assert!(targets(&pixels, 200, 100).is_empty());
+        let limits = DetectionLimits {
+            max_height: 49.0,
+            ..DetectionLimits::default()
+        };
+        assert!(detect_regions_from_luma(&pixels, 200, 100, 1.0, limits).is_empty());
         let limits = DetectionLimits {
             max_height: 80.0,
-            ..DetectionLimits::default()
+            ..limits
         };
         assert_eq!(
             detect_regions_from_luma(&pixels, 200, 100, 1.0, limits).len(),
