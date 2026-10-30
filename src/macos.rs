@@ -121,7 +121,11 @@ fn load_config(args: &Args) -> Result<(PathBuf, Config), Box<dyn Error>> {
             PathBuf::from(home).join(".config/fievel/fievel.config")
         }
     };
-    let mut config = Config::load(&path, args.config.is_some())?;
+    let mut config = if args.config.is_some() {
+        Config::load(&path, true)?
+    } else {
+        Config::load_or_create_default(&path)?
+    };
     if let Some(speed) = args.speed {
         config.speeds.normal = speed;
     }

@@ -6,6 +6,7 @@ use std::{
     collections::{BTreeMap, HashSet},
     error::Error,
     fs, io,
+    io::Write,
     path::Path,
 };
 
@@ -1672,6 +1673,40 @@ impl Config {
         }
     }
 
+    pub fn load_or_create_default(path: &Path) -> Result<Self, Box<dyn Error>> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| {
+                format!(
+                    "Cannot create config directory {}: {error}",
+                    parent.display()
+                )
+            })?;
+        }
+
+        match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(mut file) => file
+                .write_all(include_str!("../fievel.config").as_bytes())
+                .map_err(|error| {
+                    format!("Cannot write default config {}: {error}", path.display())
+                })?,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                return Err(
+                    format!("Cannot create default config {}: {error}", path.display()).into(),
+                )
+            }
+        }
+
+        Self::load(path, true)
+    }
+
     pub fn validate(&self) -> Result<(), String> {
         self.remap.validate()?;
         if !(1..=32).contains(&self.keycast.max_keys) {
@@ -2671,6 +2706,31 @@ mod tests {
         assert!(path.parent().unwrap().is_dir());
         assert!(Config::load(&path, true).is_err());
         assert!(Config::load(Path::new(env!("CARGO_MANIFEST_DIR")), false).is_err());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn creates_missing_default_config_and_preserves_existing_config() {
+        let directory = std::env::temp_dir().join(format!(
+            "fievel-default-config-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = directory.join("nested/fievel.config");
+
+        let config = Config::load_or_create_default(&path).unwrap();
+        assert_eq!(config.keys.free_mouse, vec![K::KEY_F3]);
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            include_str!("../fievel.config")
+        );
+
+        fs::write(&path, "notify = false\n").unwrap();
+        assert!(!Config::load_or_create_default(&path).unwrap().notify);
+
         fs::remove_dir_all(directory).unwrap();
     }
 }

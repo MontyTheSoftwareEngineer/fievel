@@ -61,7 +61,6 @@ archive_tmp=$(mktemp "$archive.tmp.XXXXXX")
 cp -p "$binary" "$staging/fievel"
 cp -p "$repo_root/README.md" "$staging/README.md"
 cp -p "$repo_root/LICENSE" "$staging/LICENSE"
-cp -p "$repo_root/fievel.config" "$staging/fievel.config"
 
 app_bundle="$app_staging/Fievel.app"
 app_contents="$app_bundle/Contents"
@@ -113,7 +112,7 @@ codesign --force --deep --sign - \
 
 ditto "$app_bundle" "$staging/Fievel.app"
 tar -czf "$archive_tmp" -C "$staging" \
-    fievel Fievel.app README.md LICENSE fievel.config
+    fievel Fievel.app README.md LICENSE
 mv -f -- "$archive_tmp" "$archive"
 
 rm -rf -- "$app_path"

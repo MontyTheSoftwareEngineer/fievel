@@ -32,7 +32,8 @@ tar -xzf fievel-linux-x64.tar.gz
 chmod +x fievel
 ./fievel
 ```
-On Linux, fievel.config should be placed in ~/.config/fievel/fievel.config
+On first launch, Fievel creates `~/.config/fievel/fievel.config` from the
+commented defaults embedded in the binary.
 
 ### MacOS:
 Start the fievel binary from Terminal, or double click the Fievel.app app bundle to launch. 
@@ -44,23 +45,26 @@ without it. Press keybind for Hint Mode (default is cmd + space) for it to trigg
 screen recording permissions. Hint Mode requires this permission as it needs to catpure a screenshot of the 
 screen for hint processing.
 
-On Mac, fievel.config should live in ~/.config/fievel/fievel.config
+On first launch, Fievel creates `~/.config/fievel/fievel.config` from the
+commented defaults embedded in the binary.
 
 ### Windows:
 
-For Windows, just launch the Fievel.exe. Config file is in APPDATA Roaming.
+For Windows, just launch the Fievel.exe. On first launch, Fievel creates
+`%APPDATA%\Fievel\fievel.config` from the commented defaults embedded in the
+binary.
 Hold **F3** and use **H/J/K/L** to move the mouse. Release F3 to type normally.
-Press **Ctrl+C** to stop. No config file is required to use the defaults.
+Press **Ctrl+C** to stop. No manual config setup is needed to use the defaults.
 If a keyboard disconnects, fievel releases its keys and keeps running. In the
 default automatic mode, newly connected keyboards are detected and attached;
 with `--device`, it waits for that same event-node path to return.
 
-To customize, copy the source repository's [`fievel.config`](fievel.config) to
-`~/.config/fievel/fievel.config` (create the directory if needed), then stop
-and restart Fievel to reload it, or press **Super+Shift+R** while Fievel is
-running. The reload shortcut can be changed with `keys.reload_config`, and a
-desktop notification confirms whether the reload succeeded. This example also
-enables [home-row mods and navigation layers](#home-row-mods-and-navigation-layers),
+To customize, edit the generated `fievel.config` at the platform-specific
+location above, then stop and restart Fievel to reload it, or press
+**Super+Shift+R** while Fievel is running. The reload shortcut can be changed
+with `keys.reload_config`, and a desktop notification confirms whether the
+reload succeeded. The source [`fievel.config`](fievel.config) is also available
+as an example and enables [home-row mods and navigation layers](#home-row-mods-and-navigation-layers),
 including **D+F** for Free Mouse Mode alongside **F3**.
 Press **Super+Shift+?** to open the non-blocking settings screen in your browser.
 It shows the complete configuration, including defaults; saving validates,
@@ -101,9 +105,9 @@ The archive contains both the standalone `fievel` executable and `Fievel.app`.
 The app bundle is ad-hoc signed with a stable identifier so macOS privacy
 permissions can be associated with Fievel across rebuilds; it is not Developer
 ID signed or notarized.
-The menu bar menu shows the config file Fievel loaded, or that it is using
-defaults when the optional config file is missing. It can open the config
-folder and reload configuration changes without restarting Fievel.
+The menu bar menu shows the config file Fievel loaded and can open the config
+folder or reload configuration changes without restarting Fievel. If the file
+is missing, Fievel recreates it from the embedded defaults on startup.
 
 The app bundle uses the generic macOS icon unless `assets/fievel.icns` exists.
 To provide a custom Finder icon, replace that optional file with an `.icns`
@@ -344,7 +348,9 @@ After building the release binary, create a versioned Linux x64 archive with:
 ```
 
 This writes `target/release/fievel-<version>-linux-x64.tar.gz`, containing the
-binary, repository scripts, systemd unit, example config, README, and license.
+binary, repository scripts, systemd unit, README, and license. The binary
+includes the commented default config and creates the user config file on first
+launch.
 The installer in the archive uses its bundled `fievel` binary and does not need
 the Rust toolchain. Pass an archive path to write somewhere else:
 
@@ -422,9 +428,10 @@ permission mechanism instead.
 ## Configuration
 
 On startup, Linux and macOS read `~/.config/fievel/fievel.config`; Windows
-reads `%APPDATA%\Fievel\fievel.config`. Select another file with
-`--config PATH`.
-The built-in defaults below do not enable remappings. The bundled
+reads `%APPDATA%\Fievel\fievel.config`. If the file is missing, Fievel creates
+it from the commented defaults embedded in the binary. Select another file
+with `--config PATH`.
+The built-in defaults below do not enable remappings. The source
 [`fievel.config`](fievel.config) uses these defaults and adds the home-row
 mappings described below.
 
@@ -554,7 +561,7 @@ Fievel provides chord-based home-row mods: press neighboring letter keys
 together to hold a modifier, and use those letters normally when no chord
 completes. It also supports timed keys and named navigation layers.
 These mappings are optional and disabled in the built-in defaults, but enabled
-in the bundled `fievel.config`. There is no separate `homerow.config` to load.
+in the embedded default config. There is no separate `homerow.config` to load.
 To disable them, remove or comment out all `[remap...]` tables and their entries.
 The bundled mappings are:
 

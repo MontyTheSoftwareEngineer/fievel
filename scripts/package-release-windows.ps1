@@ -49,7 +49,6 @@ try {
     Copy-Item -LiteralPath $binary -Destination (Join-Path $staging "fievel.exe")
     Copy-Item -LiteralPath (Join-Path $repoRoot "README.md") -Destination $staging
     Copy-Item -LiteralPath (Join-Path $repoRoot "LICENSE") -Destination $staging
-    Copy-Item -LiteralPath (Join-Path $repoRoot "fievel.config") -Destination $staging
 
     Compress-Archive -Path (Join-Path $staging "*") -DestinationPath $archiveTemp -Force
     Move-Item -LiteralPath $archiveTemp -Destination $archive -Force

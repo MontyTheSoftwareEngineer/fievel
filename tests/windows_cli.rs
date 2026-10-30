@@ -73,3 +73,30 @@ fn config_validation_and_overrides_work_on_windows() {
     assert!(stdout.contains("normal: 250.0"));
     fs::remove_dir_all(directory).unwrap();
 }
+
+#[test]
+fn first_run_creates_commented_config_under_appdata() {
+    let directory = std::env::temp_dir().join(format!(
+        "fievel-windows-default-config-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let output = Command::new(env!("CARGO_BIN_EXE_fievel"))
+        .env("APPDATA", &directory)
+        .env_remove("USERPROFILE")
+        .arg("--check-config")
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    let config = directory.join("Fievel/fievel.config");
+    assert_eq!(
+        fs::read_to_string(&config).unwrap(),
+        include_str!("../fievel.config")
+    );
+
+    fs::remove_dir_all(directory).unwrap();
+}
