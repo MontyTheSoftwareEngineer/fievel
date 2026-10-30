@@ -348,9 +348,9 @@ After building the release binary, create a versioned Linux x64 archive with:
 ```
 
 This writes `target/release/fievel-<version>-linux-x64.tar.gz`, containing the
-binary, repository scripts, systemd unit, README, and license. The binary
-includes the commented default config and creates the user config file on first
-launch.
+binary, example config, repository scripts, systemd unit, README, and license.
+The binary also includes the commented default config and creates the user
+config file on first launch.
 The installer in the archive uses its bundled `fievel` binary and does not need
 the Rust toolchain. Pass an archive path to write somewhere else:
 

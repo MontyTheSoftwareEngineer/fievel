@@ -2107,7 +2107,7 @@ mod tests {
         assert!(default.remap.layers.is_empty());
         assert_eq!(config.remap.main["d+f"], "free_mouse");
         assert_eq!(config.remap.layers["nav"]["h"], "left");
-        assert_eq!(config.easing.movement, 0.2);
+        assert_eq!(config.easing.movement, 0.4);
         assert_eq!(config.easing.scroll, 0.3);
         for speeds in [
             config.speeds,

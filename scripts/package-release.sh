@@ -47,11 +47,12 @@ mkdir -p "$staging/scripts" "$staging/systemd"
 cp -p "$binary" "$staging/fievel"
 cp -R "$repo_root/scripts/." "$staging/scripts/"
 cp -p "$repo_root/systemd/fievel.service" "$staging/systemd/fievel.service"
+cp -p "$repo_root/fievel.config" "$staging/fievel.config"
 cp -p "$repo_root/README.md" "$staging/README.md"
 cp -p "$repo_root/LICENSE" "$staging/LICENSE"
 
 tar -czf "$archive_tmp" -C "$staging" \
-    fievel README.md LICENSE scripts systemd
+    fievel README.md LICENSE fievel.config scripts systemd
 mv -f -- "$archive_tmp" "$archive"
 
 echo "Created $archive"
