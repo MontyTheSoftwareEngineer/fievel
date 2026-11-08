@@ -342,6 +342,34 @@ Set up [device permissions](#device-permissions) once, then run the binary:
 
 Or copy it to a directory on your `PATH`
 
+### Nix
+
+With flakes enabled, and the [device permissions](#device-permissions) set up,
+run the latest version on x86_64 or aarch64 Linux without installing it:
+
+```sh
+nix run github:MontyTheSoftwareEngineer/fievel
+```
+
+On NixOS, add the flake as an input and import its module. It installs Fievel,
+sets up the device permissions, and starts Fievel with your graphical session:
+
+```nix
+{
+  imports = [ inputs.fievel.nixosModules.default ];
+
+  services.fievel = {
+    enable = true;
+    users = [ "alice" ];
+  };
+}
+```
+
+Reboot after the first switch so the new groups apply. To manage the
+configuration from Nix, set `services.fievel.settings`, for example
+`settings.mode = "toggle";`. That file is read-only, so the config screen can't
+save changes to it. Leave it empty to keep using `~/.config/fievel/fievel.config`.
+
 ### Package a release
 
 After building the release binary, create a versioned Linux x64 archive with:
@@ -422,6 +450,8 @@ echo "uinput" | sudo tee /etc/modules-load.d/uinput.conf
 
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
+
+On NixOS, use the [NixOS module](#nix) instead of running this script.
 
 **Log out and back in** for the new group memberships to take effect. The module
 will also load automatically on future boots. If your distribution does not use
