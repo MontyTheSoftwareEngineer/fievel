@@ -319,6 +319,7 @@ impl Engine {
         for (control, button) in [
             (self.config.keys.left_click, K::BTN_LEFT),
             (self.config.keys.right_click, K::BTN_RIGHT),
+            (self.config.keys.middle_click, K::BTN_MIDDLE),
         ] {
             let down = self.active() && self.control_held(control);
             if down && self.buttons.insert(button) {
@@ -1818,7 +1819,11 @@ mod tests {
     fn clicks_follow_press_and_release_without_autorepeat() {
         let mut e = engine();
         e.key(K::KEY_F3, 1);
-        for (key, button) in [(K::KEY_SPACE, K::BTN_LEFT), (K::KEY_I, K::BTN_RIGHT)] {
+        for (key, button) in [
+            (K::KEY_SPACE, K::BTN_LEFT),
+            (K::KEY_I, K::BTN_RIGHT),
+            (K::KEY_O, K::BTN_MIDDLE),
+        ] {
             assert_eq!(
                 events(&e.key(key, 1).mouse),
                 vec![(EventType::KEY.0, button.0, 1)]
@@ -1832,17 +1837,17 @@ mod tests {
     }
 
     #[test]
-    fn f3_release_stops_motion_scroll_and_both_buttons() {
+    fn f3_release_stops_motion_scroll_and_all_buttons() {
         let mut e = engine();
         e.key(K::KEY_F3, 1);
-        for key in [K::KEY_SPACE, K::KEY_I, K::KEY_H, K::KEY_M] {
+        for key in [K::KEY_SPACE, K::KEY_I, K::KEY_O, K::KEY_H, K::KEY_M] {
             e.key(key, 1);
         }
         let output = e.key(K::KEY_F3, 0);
-        assert_eq!(output.mouse.len(), 2);
+        assert_eq!(output.mouse.len(), 3);
         assert!(output.mouse.iter().all(|event| event.value() == 0));
         assert!(e.advance(Duration::from_millis(50)).mouse.is_empty());
-        for key in [K::KEY_SPACE, K::KEY_I, K::KEY_H, K::KEY_M] {
+        for key in [K::KEY_SPACE, K::KEY_I, K::KEY_O, K::KEY_H, K::KEY_M] {
             assert!(e.key(key, 2).keyboard.is_empty());
             assert!(e.key(key, 0).keyboard.is_empty());
             assert_eq!(e.key(key, 1).keyboard.len(), 1);
@@ -2222,6 +2227,7 @@ mod tests {
             right = "t"
             left_click = "z"
             right_click = "x"
+            middle_click = "w"
             scroll_left = "c"
             scroll_down = "v"
             scroll_up = "b"
@@ -2254,7 +2260,11 @@ mod tests {
             );
             e.key(key, 0);
         }
-        for (key, button) in [(K::KEY_Z, K::BTN_LEFT), (K::KEY_X, K::BTN_RIGHT)] {
+        for (key, button) in [
+            (K::KEY_Z, K::BTN_LEFT),
+            (K::KEY_X, K::BTN_RIGHT),
+            (K::KEY_W, K::BTN_MIDDLE),
+        ] {
             for value in [1, 0] {
                 assert_eq!(
                     events(&e.key(key, value).mouse),

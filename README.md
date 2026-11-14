@@ -253,6 +253,7 @@ Mouse Mode is active. You can hide this by setting `notify = false`.
 | N + . | End (bottom of page) |
 | Space | Left button down on press, up on release (supports dragging) |
 | I | Right button down on press, up on release |
+| O | Middle button down on press, up on release |
 | N / M / , / . | Scroll left / down / up / right |
 | S | Hold for fast movement and scrolling; add either Shift key for double speed |
 | A | Hold for slow movement and scrolling; release for normal speed |
@@ -501,6 +502,7 @@ up = "k"
 right = "l"
 left_click = "space"
 right_click = "i"
+middle_click = "o"
 scroll_left = "n"
 scroll_down = "m"
 scroll_up = ","

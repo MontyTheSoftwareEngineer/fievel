@@ -39,8 +39,9 @@ use windows_sys::Win32::{
         Input::KeyboardAndMouse::{
             SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
             KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_HWHEEL,
-            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
-            MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_F13, VK_PAUSE, VK_SNAPSHOT, VK_VOLUME_UP,
+            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
+            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_F13,
+            VK_PAUSE, VK_SNAPSHOT, VK_VOLUME_UP,
         },
         WindowsAndMessaging::{
             CallNextHookEx, GetCursorPos, GetMessageW, PeekMessageW, PostThreadMessageW,
@@ -862,8 +863,9 @@ fn emit(
             EventType::KEY => {
                 flush_motion(&mut dx, &mut dy)?;
                 match K::new(event.code()) {
-                    K::BTN_LEFT => send_mouse_button(false, event.value() != 0)?,
-                    K::BTN_RIGHT => send_mouse_button(true, event.value() != 0)?,
+                    K::BTN_LEFT | K::BTN_RIGHT | K::BTN_MIDDLE => {
+                        send_mouse_button(K::new(event.code()), event.value() != 0)?
+                    }
                     _ => {}
                 }
             }
@@ -936,12 +938,19 @@ fn send_key(key: K, value: i32) -> io::Result<()> {
     Ok(())
 }
 
-fn send_mouse_button(right: bool, down: bool) -> io::Result<()> {
-    let flags = match (right, down) {
-        (false, true) => MOUSEEVENTF_LEFTDOWN,
-        (false, false) => MOUSEEVENTF_LEFTUP,
-        (true, true) => MOUSEEVENTF_RIGHTDOWN,
-        (true, false) => MOUSEEVENTF_RIGHTUP,
+fn send_mouse_button(button: K, down: bool) -> io::Result<()> {
+    let flags = match (button, down) {
+        (K::BTN_LEFT, true) => MOUSEEVENTF_LEFTDOWN,
+        (K::BTN_LEFT, false) => MOUSEEVENTF_LEFTUP,
+        (K::BTN_RIGHT, true) => MOUSEEVENTF_RIGHTDOWN,
+        (K::BTN_RIGHT, false) => MOUSEEVENTF_RIGHTUP,
+        (K::BTN_MIDDLE, true) => MOUSEEVENTF_MIDDLEDOWN,
+        (K::BTN_MIDDLE, false) => MOUSEEVENTF_MIDDLEUP,
+        _ => {
+            return Err(io::Error::other(format!(
+                "unsupported mouse button {button:?}"
+            )))
+        }
     };
     send_mouse_input(flags, 0)
 }

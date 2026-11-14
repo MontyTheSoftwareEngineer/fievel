@@ -168,6 +168,8 @@ pub struct Keys {
     #[serde(deserialize_with = "deserialize_key")]
     pub right_click: K,
     #[serde(deserialize_with = "deserialize_key")]
+    pub middle_click: K,
+    #[serde(deserialize_with = "deserialize_key")]
     pub scroll_left: K,
     #[serde(deserialize_with = "deserialize_key")]
     pub scroll_down: K,
@@ -196,6 +198,7 @@ impl Default for Keys {
             right: K::KEY_L,
             left_click: K::KEY_SPACE,
             right_click: K::KEY_I,
+            middle_click: K::KEY_O,
             scroll_left: K::KEY_N,
             scroll_down: K::KEY_M,
             scroll_up: K::KEY_COMMA,
@@ -208,7 +211,7 @@ impl Default for Keys {
 }
 
 impl Keys {
-    pub fn controls(&self) -> [K; 12] {
+    pub fn controls(&self) -> [K; 13] {
         [
             self.left,
             self.down,
@@ -216,6 +219,7 @@ impl Keys {
             self.right,
             self.left_click,
             self.right_click,
+            self.middle_click,
             self.scroll_left,
             self.scroll_down,
             self.scroll_up,
@@ -234,7 +238,7 @@ impl Keys {
             .collect()
     }
 
-    fn named_controls(&self) -> [(&'static str, K); 13] {
+    fn named_controls(&self) -> [(&'static str, K); 14] {
         [
             ("keys.left", self.left),
             ("keys.down", self.down),
@@ -242,6 +246,7 @@ impl Keys {
             ("keys.right", self.right),
             ("keys.left_click", self.left_click),
             ("keys.right_click", self.right_click),
+            ("keys.middle_click", self.middle_click),
             ("keys.scroll_left", self.scroll_left),
             ("keys.scroll_down", self.scroll_down),
             ("keys.scroll_up", self.scroll_up),
@@ -630,6 +635,7 @@ fn reset_config_value(config: &mut Config, path: &str) -> bool {
         "keys.right" => config.keys.right = defaults.keys.right,
         "keys.left_click" => config.keys.left_click = defaults.keys.left_click,
         "keys.right_click" => config.keys.right_click = defaults.keys.right_click,
+        "keys.middle_click" => config.keys.middle_click = defaults.keys.middle_click,
         "keys.scroll_left" => config.keys.scroll_left = defaults.keys.scroll_left,
         "keys.scroll_down" => config.keys.scroll_down = defaults.keys.scroll_down,
         "keys.scroll_up" => config.keys.scroll_up = defaults.keys.scroll_up,
@@ -983,6 +989,7 @@ impl Config {
                     "right",
                     "left_click",
                     "right_click",
+                    "middle_click",
                     "scroll_left",
                     "scroll_down",
                     "scroll_up",
@@ -1055,6 +1062,13 @@ impl Config {
                 "right_click",
                 "keys.right_click",
                 &mut config.keys.right_click,
+                &mut changed,
+            );
+            apply_key(
+                table,
+                "middle_click",
+                "keys.middle_click",
+                &mut config.keys.middle_click,
                 &mut changed,
             );
             apply_key(
@@ -1527,6 +1541,7 @@ impl Config {
                 ("right", toml_key(self.keys.right)),
                 ("left_click", toml_key(self.keys.left_click)),
                 ("right_click", toml_key(self.keys.right_click)),
+                ("middle_click", toml_key(self.keys.middle_click)),
                 ("scroll_left", toml_key(self.keys.scroll_left)),
                 ("scroll_down", toml_key(self.keys.scroll_down)),
                 ("scroll_up", toml_key(self.keys.scroll_up)),
@@ -2468,6 +2483,21 @@ mod tests {
         assert_eq!(config.keys.named(), Keys::default().named());
         assert_eq!(parse_key("Escape").unwrap(), K::KEY_ESC);
         assert_eq!(config.hints.border_color, Hints::default().border_color);
+    }
+
+    #[test]
+    fn middle_click_defaults_to_o_and_is_configurable() {
+        assert_eq!(Config::parse("").unwrap().keys.middle_click, K::KEY_O);
+
+        let config = Config::parse("[keys]\nmiddle_click = 'f4'").unwrap();
+        assert_eq!(config.keys.middle_click, K::KEY_F4);
+        assert_eq!(
+            Config::parse(&config.to_toml().unwrap())
+                .unwrap()
+                .keys
+                .middle_click,
+            K::KEY_F4
+        );
     }
 
     #[test]

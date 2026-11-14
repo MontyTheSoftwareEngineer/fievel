@@ -95,11 +95,11 @@ static pthread_mutex_t pointer_lock = PTHREAD_MUTEX_INITIALIZER;
 static CGPoint last_pointer = {NAN, NAN};
 static const int64_t event_marker = 0x66696576656c6d63LL;
 static bool posted_keys[256];
-static bool posted_buttons[2];
-static int last_click_counts[2];
-static double last_click_times[2];
-static CGPoint last_click_positions[2];
-static int posted_button_click_counts[2];
+static bool posted_buttons[3];
+static int last_click_counts[3];
+static double last_click_times[3];
+static CGPoint last_click_positions[3];
+static int posted_button_click_counts[3];
 static bool exit_cleanup_registered;
 static void fievel_release_posted_inputs(void);
 
@@ -1026,12 +1026,16 @@ static void fievel_release_posted_inputs(void) {
         point = CGEventGetLocation(current);
         CFRelease(current);
     }
-    for (int button = 0; button < 2; button++) {
+    for (int button = 0; button < 3; button++) {
         if (!posted_buttons[button]) {
             continue;
         }
-        CGMouseButton mouse_button = button == 0 ? kCGMouseButtonLeft : kCGMouseButtonRight;
-        CGEventType type = button == 0 ? kCGEventLeftMouseUp : kCGEventRightMouseUp;
+        CGMouseButton mouse_button = button == 0
+            ? kCGMouseButtonLeft
+            : (button == 1 ? kCGMouseButtonRight : kCGMouseButtonCenter);
+        CGEventType type = button == 0
+            ? kCGEventLeftMouseUp
+            : (button == 1 ? kCGEventRightMouseUp : kCGEventOtherMouseUp);
         CGEventRef event = CGEventCreateMouseEvent(source, type, point, mouse_button);
         if (event != NULL) {
             fievel_set_click_count(
@@ -1122,6 +1126,9 @@ bool fievel_move_pointer(double dx, double dy) {
     } else if (posted_buttons[1]) {
         type = kCGEventRightMouseDragged;
         button = kCGMouseButtonRight;
+    } else if (posted_buttons[2]) {
+        type = kCGEventOtherMouseDragged;
+        button = kCGMouseButtonCenter;
     }
     CGEventRef event = CGEventCreateMouseEvent(source, type, point, button);
     if (event != NULL) {
@@ -1136,7 +1143,10 @@ bool fievel_move_pointer(double dx, double dy) {
     return event != NULL;
 }
 
-bool fievel_mouse_button(bool right, bool down) {
+bool fievel_mouse_button(int button_index, bool down) {
+    if (button_index < 0 || button_index > 2) {
+        return false;
+    }
     CGEventSourceRef source = fievel_event_source();
     if (source == NULL) {
         return false;
@@ -1144,12 +1154,15 @@ bool fievel_mouse_button(bool right, bool down) {
     CGEventRef current = CGEventCreate(source);
     CGPoint point = current == NULL ? CGPointZero : CGEventGetLocation(current);
     if (current != NULL) CFRelease(current);
-    CGMouseButton button = right ? kCGMouseButtonRight : kCGMouseButtonLeft;
-    int button_index = right ? 1 : 0;
+    CGMouseButton button = button_index == 0
+        ? kCGMouseButtonLeft
+        : (button_index == 1 ? kCGMouseButtonRight : kCGMouseButtonCenter);
     posted_buttons[button_index] = down;
-    CGEventType type = right
-        ? (down ? kCGEventRightMouseDown : kCGEventRightMouseUp)
-        : (down ? kCGEventLeftMouseDown : kCGEventLeftMouseUp);
+    CGEventType type = button_index == 0
+        ? (down ? kCGEventLeftMouseDown : kCGEventLeftMouseUp)
+        : (button_index == 1
+            ? (down ? kCGEventRightMouseDown : kCGEventRightMouseUp)
+            : (down ? kCGEventOtherMouseDown : kCGEventOtherMouseUp));
     CGEventRef event = CGEventCreateMouseEvent(source, type, point, button);
     if (event != NULL) {
         int click_count = down
