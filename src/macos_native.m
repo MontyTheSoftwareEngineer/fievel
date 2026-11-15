@@ -4,6 +4,7 @@
 #import <CoreGraphics/CoreGraphics.h>
 #import <ScreenCaptureKit/ScreenCaptureKit.h>
 #import <dispatch/dispatch.h>
+#include "macos_edge_geometry.h"
 #include <limits.h>
 #include <math.h>
 #include <pthread.h>
@@ -1096,23 +1097,20 @@ bool fievel_move_pointer(double dx, double dy) {
     CGEventRef current = CGEventCreate(source);
     CGPoint point = current == NULL ? CGPointZero : CGEventGetLocation(current);
     if (current != NULL) CFRelease(current);
+    CGPoint start = point;
     point.x += dx;
     point.y += dy;
     uint32_t count = 0;
     if (CGGetActiveDisplayList(0, NULL, &count) == kCGErrorSuccess && count > 0) {
         CGDirectDisplayID *ids = calloc(count, sizeof(CGDirectDisplayID));
-        if (ids != NULL && CGGetActiveDisplayList(count, ids, &count) == kCGErrorSuccess) {
-            double min_x = INFINITY, min_y = INFINITY, max_x = -INFINITY, max_y = -INFINITY;
+        CGRect *bounds = calloc(count, sizeof(CGRect));
+        if (ids != NULL && bounds != NULL && CGGetActiveDisplayList(count, ids, &count) == kCGErrorSuccess) {
             for (uint32_t i = 0; i < count; i++) {
-                CGRect bounds = CGDisplayBounds(ids[i]);
-                min_x = fmin(min_x, CGRectGetMinX(bounds));
-                min_y = fmin(min_y, CGRectGetMinY(bounds));
-                max_x = fmax(max_x, CGRectGetMaxX(bounds));
-                max_y = fmax(max_y, CGRectGetMaxY(bounds));
+                bounds[i] = CGDisplayBounds(ids[i]);
             }
-            point.x = fmin(fmax(point.x, min_x), max_x - 1);
-            point.y = fmin(fmax(point.y, min_y), max_y - 1);
+            point = fievel_display_constrained_destination(start, CGPointMake(dx, dy), bounds, count);
         }
+        free(bounds);
         free(ids);
     }
     CGEventType type = kCGEventMouseMoved;
