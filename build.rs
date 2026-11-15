@@ -21,6 +21,7 @@ fn main() {
         }
         println!("cargo:rustc-link-arg=-mmacosx-version-min=14.0");
         println!("cargo:rerun-if-changed=src/macos_native.m");
+        println!("cargo:rerun-if-changed=src/macos_edge_geometry.h");
     }
 }
 
