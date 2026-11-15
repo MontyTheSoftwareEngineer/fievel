@@ -10,8 +10,8 @@ use crate::{
 };
 use clap::Parser;
 use evdev::{
-    uinput::VirtualDevice, AttributeSet, BusType, Device, EventType, InputId, KeyCode,
-    RelativeAxisCode,
+    uinput::VirtualDevice, AttributeSet, AttributeSetRef, BusType, Device, EventType, InputId,
+    KeyCode, RelativeAxisCode,
 };
 use std::{
     error::Error,
@@ -233,21 +233,33 @@ fn automatic_input(name: Option<&str>) -> bool {
     !matches!(name, Some(KEYBOARD_NAME | MOUSE_NAME))
 }
 
+// Mice such as the Logitech MX Master 3 also advertise a full keyboard key set.
+// Only key events are read from a grabbed device, so grabbing a pointer would
+// swallow its motion.
+fn reports_pointer_motion(axes: Option<&AttributeSetRef<RelativeAxisCode>>) -> bool {
+    axes.is_some_and(|axes| {
+        axes.contains(RelativeAxisCode::REL_X) || axes.contains(RelativeAxisCode::REL_Y)
+    })
+}
+
 // Returns true if `device` is a keyboard fievel should automatically read, printing a
-// diagnostic and returning false for Fievel's own output devices.
+// diagnostic and returning false for Fievel's own output devices and for pointers.
 fn is_auto_candidate(path: &Path, device: &Device, quiet: bool) -> bool {
-    if automatic_input(device.name()) {
-        true
+    let reason = if !automatic_input(device.name()) {
+        "Fievel output device"
+    } else if reports_pointer_motion(device.supported_relative_axes()) {
+        "pointer device; select it with --device to read it anyway"
     } else {
-        if !quiet {
-            eprintln!(
-                "Skipping {} ({}): Fievel output device",
-                path.display(),
-                device.name().unwrap_or("unnamed"),
-            );
-        }
-        false
+        return true;
+    };
+    if !quiet {
+        eprintln!(
+            "Skipping {} ({}): {reason}",
+            path.display(),
+            device.name().unwrap_or("unnamed"),
+        );
     }
+    false
 }
 
 fn select_devices(path: Option<PathBuf>) -> Result<Vec<(PathBuf, Device)>, Box<dyn Error>> {
@@ -1258,6 +1270,28 @@ mod tests {
     fn automatic_selection_excludes_feedback_outputs() {
         assert!(!automatic_input(Some(KEYBOARD_NAME)));
         assert!(!automatic_input(Some(MOUSE_NAME)));
+    }
+
+    #[test]
+    fn automatic_selection_excludes_pointers() {
+        let axes = |codes: &[RelativeAxisCode]| -> AttributeSet<RelativeAxisCode> {
+            codes.iter().copied().collect()
+        };
+        // MX Master 3: REL=1943
+        let mouse = axes(&[
+            RelativeAxisCode::REL_X,
+            RelativeAxisCode::REL_Y,
+            RelativeAxisCode::REL_HWHEEL,
+            RelativeAxisCode::REL_WHEEL,
+            RelativeAxisCode::REL_WHEEL_HI_RES,
+            RelativeAxisCode::REL_HWHEEL_HI_RES,
+        ]);
+        assert!(reports_pointer_motion(Some(&mouse)));
+        // A volume knob or scroll wheel alone does not make a keyboard a pointer.
+        let knob = axes(&[RelativeAxisCode::REL_WHEEL, RelativeAxisCode::REL_HWHEEL]);
+        assert!(!reports_pointer_motion(Some(&knob)));
+        assert!(!reports_pointer_motion(Some(&axes(&[]))));
+        assert!(!reports_pointer_motion(None));
     }
 
     #[test]
