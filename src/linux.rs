@@ -508,9 +508,10 @@ impl Outputs {
             .input_id(InputId::new(BusType::BUS_USB, 0x1209, 0xf301, 1))
             .with_keys(&keys)?
             .build()?;
-        let buttons: AttributeSet<KeyCode> = [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT]
-            .into_iter()
-            .collect();
+        let buttons: AttributeSet<KeyCode> =
+            [KeyCode::BTN_LEFT, KeyCode::BTN_RIGHT, KeyCode::BTN_MIDDLE]
+                .into_iter()
+                .collect();
         let axes: AttributeSet<RelativeAxisCode> = [
             RelativeAxisCode::REL_X,
             RelativeAxisCode::REL_Y,

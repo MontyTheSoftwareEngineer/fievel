@@ -92,7 +92,7 @@ unsafe extern "C" {
     fn fievel_input_repost(event: *mut NativeInputEvent);
     fn fievel_send_key(keycode: u16, value: i32) -> bool;
     fn fievel_move_pointer(dx: f64, dy: f64) -> bool;
-    fn fievel_mouse_button(right: bool, down: bool) -> bool;
+    fn fievel_mouse_button(button: i32, down: bool) -> bool;
     fn fievel_scroll(vertical: i32, horizontal: i32) -> bool;
     fn fievel_ui_pump();
     fn fievel_ui_set_odometer_stats(fievel_miles: f64, physical_miles: f64);
@@ -532,8 +532,9 @@ fn emit(output: Output, odometer: &mut odometer::Odometer) -> io::Result<()> {
             EventType::KEY => {
                 flush_motion(&mut dx, &mut dy)?;
                 match K(event.code()) {
-                    K::BTN_LEFT => emit_mouse_button(false, event.value())?,
-                    K::BTN_RIGHT => emit_mouse_button(true, event.value())?,
+                    K::BTN_LEFT => emit_mouse_button(0, event.value())?,
+                    K::BTN_RIGHT => emit_mouse_button(1, event.value())?,
+                    K::BTN_MIDDLE => emit_mouse_button(2, event.value())?,
                     _ => {}
                 }
             }
@@ -573,8 +574,8 @@ fn flush_motion(dx: &mut f64, dy: &mut f64) -> io::Result<()> {
     Ok(())
 }
 
-fn emit_mouse_button(right: bool, value: i32) -> io::Result<()> {
-    if !unsafe { fievel_mouse_button(right, value != 0) } {
+fn emit_mouse_button(button: i32, value: i32) -> io::Result<()> {
+    if !unsafe { fievel_mouse_button(button, value != 0) } {
         return Err(io::Error::other("failed to emit macOS mouse-button event"));
     }
     Ok(())
