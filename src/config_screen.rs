@@ -876,10 +876,10 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
     function makeInput(type, value, field) {
       const input = document.createElement("input");
       input.type = type;
-      input.value = value ?? "";
       if (field.min !== undefined) input.min = field.min;
       if (field.max !== undefined) input.max = field.max;
       if (field.step !== undefined) input.step = field.step;
+      input.value = value ?? "";
       if (field.kind === "key" || field.kind === "chord") {
         input.autocomplete = "off";
         input.spellcheck = false;
@@ -932,11 +932,10 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
         }
         const color = makeInput("color", value ? value.slice(0, 7) : "#ffffff", field);
         color.id = id;
-        const alpha = makeInput("range", value ? parseInt(value.slice(7, 9), 16) : 255, field);
+        const alpha = makeInput("range", value ? parseInt(value.slice(7, 9), 16) : 255, {
+          min: 0, max: 255, step: 1
+        });
         alpha.setAttribute("aria-label", `${field.label} alpha`);
-        alpha.min = "0";
-        alpha.max = "255";
-        alpha.step = "1";
         const output = document.createElement("output");
         const updateAlpha = () => { output.value = `${Math.round(Number(alpha.value) / 255 * 100)}%`; };
         alpha.addEventListener("input", updateAlpha);
@@ -1307,6 +1306,8 @@ mod tests {
         assert!(saved.contains("\"config_screen\":\"LEFTMETA + LEFTSHIFT + F9\""));
         let loaded = Config::load(&path, true).unwrap();
         assert!(!loaded.notify);
+        assert_eq!(loaded.mode, config.mode);
+        assert_eq!(loaded.hints, config.hints);
         assert_eq!(
             loaded.keys.config_screen,
             [
