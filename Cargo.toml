@@ -20,6 +20,7 @@ rustix = { version = "1", features = ["event", "fs"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+xkbcommon = { version = "0.9", default-features = false }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = [

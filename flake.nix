@@ -23,6 +23,9 @@
         {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "fievel";
+            # libxkbcommon supplies the XKB keymap used for layout-aware keys.
+            buildInputs = [ pkgs.libxkbcommon ];
+            nativeBuildInputs = [ pkgs.pkg-config ];
             inherit ((lib.importTOML ./Cargo.toml).package) version;
 
             # Only what the build reads, which leaves out the demo videos.

@@ -5,6 +5,7 @@ use crate::{
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
     input::{EventType, KeyCode as K, RelativeAxisCode as R},
+    layout::{Layout, LayoutEmitter, LayoutSource, Target},
     odometer,
     pipeline::{HintRequest, InputEngine},
     reload,
@@ -12,7 +13,7 @@ use crate::{
 };
 use clap::Parser;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     io,
     path::PathBuf,
@@ -37,17 +38,19 @@ use windows_sys::Win32::{
     },
     UI::{
         Input::KeyboardAndMouse::{
-            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT,
-            KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, KEYEVENTF_SCANCODE, MOUSEEVENTF_HWHEEL,
-            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-            MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEINPUT, VK_F13,
-            VK_PAUSE, VK_SNAPSHOT, VK_VOLUME_UP,
+            GetKeyboardLayout, MapVirtualKeyExW, SendInput, VkKeyScanExW, HKL, INPUT, INPUT_0,
+            INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP,
+            KEYEVENTF_SCANCODE, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MAPVK_VSC_TO_VK_EX,
+            MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+            MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+            MOUSEINPUT, VK_F13, VK_PAUSE, VK_SNAPSHOT, VK_VOLUME_UP,
         },
         WindowsAndMessaging::{
-            CallNextHookEx, GetCursorPos, GetMessageW, PeekMessageW, PostThreadMessageW,
-            SetWindowsHookExW, UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_EXTENDED,
-            LLKHF_INJECTED, LLKHF_UP, LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL,
-            WH_MOUSE_LL, WM_KEYUP, WM_MOUSEMOVE, WM_QUIT, WM_SYSKEYUP,
+            CallNextHookEx, GetCursorPos, GetForegroundWindow, GetMessageW,
+            GetWindowThreadProcessId, PeekMessageW, PostThreadMessageW, SetWindowsHookExW,
+            UnhookWindowsHookEx, KBDLLHOOKSTRUCT, LLKHF_EXTENDED, LLKHF_INJECTED, LLKHF_UP,
+            LLMHF_INJECTED, MSG, MSLLHOOKSTRUCT, WH_KEYBOARD_LL, WH_MOUSE_LL, WM_KEYUP,
+            WM_MOUSEMOVE, WM_QUIT, WM_SYSKEYUP,
         },
     },
 };
@@ -55,6 +58,14 @@ use windows_sys::Win32::{
 const TICK: Duration = Duration::from_millis(4);
 static HOOK_SENDER: OnceLock<Sender<HookEvent>> = OnceLock::new();
 static PRESSED_KEYS: OnceLock<Mutex<BTreeSet<K>>> = OnceLock::new();
+/// Canonical keys for scan codes that are currently held down.
+///
+/// A layout change while a key is held would otherwise translate the release
+/// through a different layout, leaving the key stuck in the engine. The cache
+/// keeps the key-down resolution for the whole press.
+static HELD_LAYOUT_KEYS: OnceLock<Mutex<BTreeMap<u16, K>>> = OnceLock::new();
+/// The cached character table for the current foreground keyboard layout.
+static LAYOUT_TABLE: OnceLock<Mutex<Option<Arc<LayoutTable>>>> = OnceLock::new();
 static PREVIOUS_MOUSE: OnceLock<Mutex<Option<(i32, i32)>>> = OnceLock::new();
 static STOP_SIGNAL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
@@ -201,16 +212,36 @@ unsafe extern "system" fn keyboard_hook(code: i32, wparam: WPARAM, lparam: LPARA
     if event.flags & LLKHF_INJECTED != 0 && event.dwExtraInfo == INPUT_MARKER {
         return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
     }
-    let Some(key) = key_from_scan(
-        event.scanCode,
-        event.flags & LLKHF_EXTENDED != 0,
-        event.vkCode,
-    ) else {
-        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
-    };
+    let extended = event.flags & LLKHF_EXTENDED != 0;
     let is_release = event.flags & LLKHF_UP != 0
         || wparam == WM_KEYUP as usize
         || wparam == WM_SYSKEYUP as usize;
+    // Extended keys are not part of the character layout, so the physical table
+    // decides them. Non-extended keys follow the active layout, resolved once
+    // per press so a layout change cannot strand a held key.
+    let key = if extended {
+        key_from_scan(event.scanCode, true, event.vkCode)
+    } else {
+        let held = HELD_LAYOUT_KEYS.get_or_init(|| Mutex::new(BTreeMap::new()));
+        let Ok(mut held) = held.lock() else {
+            return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+        };
+        let scan = event.scanCode as u16;
+        if is_release {
+            held.remove(&scan).or_else(|| layout_key(scan))
+        } else if let Some(key) = held.get(&scan) {
+            Some(*key)
+        } else {
+            let key = layout_key(scan);
+            if let Some(key) = key {
+                held.insert(scan, key);
+            }
+            key
+        }
+    };
+    let Some(key) = key else {
+        return CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam);
+    };
     let pressed = PRESSED_KEYS.get_or_init(|| Mutex::new(BTreeSet::new()));
     let value = {
         let Ok(mut pressed) = pressed.lock() else {
@@ -379,7 +410,7 @@ fn key_from_virtual_key(vk: u32) -> Option<K> {
 
 fn scan_code_for_key(key: K) -> Option<(u16, bool)> {
     let code = key.0;
-    let keycode = match code {
+    match code {
         1 => Some((0x01, false)),
         2..=11 => Some((0x02 + code - 2, false)),
         16..=27 => Some((0x10 + code - 16, false)),
@@ -450,8 +481,7 @@ fn scan_code_for_key(key: K) -> Option<(u16, bool)> {
         126 => Some((0x5c, true)),
         139 => Some((0x5d, true)),
         _ => None,
-    };
-    keycode.map(|(scan, extended)| (scan as u16, extended))
+    }
 }
 
 fn virtual_key_for_key(key: K) -> Option<u16> {
@@ -462,6 +492,146 @@ fn virtual_key_for_key(key: K) -> Option<u16> {
         115 => Some(VK_VOLUME_UP),
         _ => None,
     }
+}
+
+/// A cached snapshot of the active Windows keyboard layout.
+///
+/// Built from the foreground window's `HKL` and reused until the layout
+/// changes. The character maps let the shared layout layer translate scan
+/// codes and characters without calling into Win32 for every event.
+struct LayoutTable {
+    hkl: usize,
+    base: BTreeMap<u32, char>,
+    shifted: BTreeMap<u32, char>,
+    by_char: BTreeMap<char, (u32, bool)>,
+}
+
+impl LayoutTable {
+    fn build(hkl: HKL) -> Self {
+        let mut base = BTreeMap::new();
+        let mut shifted = BTreeMap::new();
+        let mut by_char = BTreeMap::new();
+        for code in 0x20u32..=0x7e {
+            let Some(character) = char::from_u32(code) else {
+                continue;
+            };
+            let scan = unsafe { VkKeyScanExW(character as u16, hkl) };
+            if scan == -1 {
+                continue;
+            }
+            let value = scan as u16;
+            // Reject characters that need Ctrl or AltGr.
+            if value & 0x0600 != 0 {
+                continue;
+            }
+            let vk = u32::from(value & 0xff);
+            let needs_shift = value & 0x0100 != 0;
+            by_char.insert(character, (vk, needs_shift));
+            if needs_shift {
+                shifted.insert(vk, character);
+            } else {
+                base.insert(vk, character);
+            }
+        }
+        // Fill in base characters the layout produces that are not plain ASCII.
+        for vk in 0x08u32..=0xfe {
+            if base.contains_key(&vk) {
+                continue;
+            }
+            let value = unsafe { MapVirtualKeyExW(vk, MAPVK_VK_TO_CHAR, hkl) };
+            if value == 0 || value & 0x8000_0000 != 0 {
+                continue;
+            }
+            if let Some(character) = char::from_u32(value & 0xffff) {
+                base.insert(vk, character);
+            }
+        }
+        Self {
+            hkl: hkl as usize,
+            base,
+            shifted,
+            by_char,
+        }
+    }
+
+    fn hkl(&self) -> HKL {
+        self.hkl as HKL
+    }
+
+    /// The virtual key code behind a scan code in this layout.
+    fn virtual_key(&self, scan: u16) -> Option<u32> {
+        let vk = unsafe { MapVirtualKeyExW(u32::from(scan), MAPVK_VSC_TO_VK_EX, self.hkl()) };
+        if vk == 0 {
+            None
+        } else {
+            Some(vk)
+        }
+    }
+}
+
+/// The active Windows keyboard layout as a layout source.
+struct WindowsLayout;
+
+/// The keyboard layout of the foreground window's thread.
+fn foreground_hkl() -> HKL {
+    unsafe {
+        let window = GetForegroundWindow();
+        if window.is_null() {
+            return GetKeyboardLayout(0);
+        }
+        let thread = GetWindowThreadProcessId(window, std::ptr::null_mut());
+        GetKeyboardLayout(thread)
+    }
+}
+
+/// The cached layout table for the current foreground layout.
+fn layout_table() -> Arc<LayoutTable> {
+    let hkl = foreground_hkl();
+    let cache = LAYOUT_TABLE.get_or_init(|| Mutex::new(None));
+    let mut guard = cache.lock().unwrap_or_else(|error| error.into_inner());
+    if let Some(table) = guard.as_ref() {
+        if table.hkl == hkl as usize {
+            return Arc::clone(table);
+        }
+    }
+    let table = Arc::new(LayoutTable::build(hkl));
+    *guard = Some(Arc::clone(&table));
+    table
+}
+
+impl LayoutSource for WindowsLayout {
+    fn base_char(&self, keycode: u16) -> Option<char> {
+        let table = layout_table();
+        let vk = table.virtual_key(keycode)?;
+        table.base.get(&vk).copied()
+    }
+
+    fn shift_char(&self, keycode: u16) -> Option<char> {
+        let table = layout_table();
+        let vk = table.virtual_key(keycode)?;
+        table.shifted.get(&vk).copied()
+    }
+
+    fn key_for_char(&self, character: char) -> Option<(u16, bool)> {
+        let table = layout_table();
+        let (vk, needs_shift) = *table.by_char.get(&character)?;
+        let scan = unsafe { MapVirtualKeyExW(vk, MAPVK_VK_TO_VSC, table.hkl()) };
+        if scan == 0 {
+            return None;
+        }
+        Some((scan as u16, needs_shift))
+    }
+
+    fn physical_key(&self, keycode: u16) -> Option<K> {
+        let table = layout_table();
+        let vk = table.virtual_key(keycode)?;
+        key_from_scan(u32::from(keycode), false, vk)
+    }
+}
+
+/// Translate a scan code through the active layout.
+fn layout_key(scan: u16) -> Option<K> {
+    Layout::new(WindowsLayout).key_from_physical(scan)
 }
 
 fn positive_speed(value: &str) -> Result<f64, String> {
@@ -570,6 +740,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     );
     let mut engine = InputEngine::new(config.clone())?;
     let mut hint_input = HintInput::new(&config).map_err(io::Error::other)?;
+    let mut emitter = LayoutEmitter::new(Layout::new(WindowsLayout));
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
     let mut suppressed_keys = BTreeSet::new();
@@ -581,7 +752,12 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
             let elapsed = now.saturating_duration_since(last);
             last = now;
             if hints.is_none() {
-                emit(engine.advance(elapsed), &mut odometer, &mut overlay)?;
+                emit(
+                    engine.advance(elapsed),
+                    &mut odometer,
+                    &mut overlay,
+                    &mut emitter,
+                )?;
                 update_indicator(&mut overlay, &config, &engine)?;
                 activate_pending_hints(
                     &mut engine,
@@ -630,7 +806,12 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                             let actions = hint_input.key(key, value);
                             handle_hint_input(actions, &mut hints, &config, &mut overlay)?;
                         } else {
-                            emit(engine.key(key, value), &mut odometer, &mut overlay)?;
+                            emit(
+                                engine.key(key, value),
+                                &mut odometer,
+                                &mut overlay,
+                                &mut emitter,
+                            )?;
                             update_indicator(&mut overlay, &config, &engine)?;
                             activate_pending_hints(
                                 &mut engine,
@@ -681,7 +862,12 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         }
                         hints = None;
                         overlay.set_indicator(None)?;
-                        emit(engine.release_all(), &mut odometer, &mut overlay)?;
+                        emit(
+                            engine.release_all(),
+                            &mut odometer,
+                            &mut overlay,
+                            &mut emitter,
+                        )?;
                         suppressed_keys.extend(held.iter().copied());
                         held.clear();
                         hint_input = new_hint_input;
@@ -714,7 +900,12 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     if let Err(error) = overlay.set_indicator(None) {
         cleanup_errors.push(error);
     }
-    if let Err(error) = emit(engine.release_all(), &mut odometer, &mut overlay) {
+    if let Err(error) = emit(
+        engine.release_all(),
+        &mut odometer,
+        &mut overlay,
+        &mut emitter,
+    ) {
         cleanup_errors.push(error);
     }
     if let Err(error) = odometer.finish() {
@@ -847,6 +1038,7 @@ fn emit(
     output: Output,
     odometer: &mut odometer::Odometer,
     overlay: &mut Overlay,
+    emitter: &mut LayoutEmitter<WindowsLayout>,
 ) -> io::Result<()> {
     if output.locate {
         overlay.locate_cursor()?;
@@ -855,7 +1047,14 @@ fn emit(
         if event.event_type() != EventType::KEY {
             continue;
         }
-        send_key(K::new(event.code()), event.value())?;
+        emitter.emit(
+            K::new(event.code()),
+            event.value(),
+            &mut |target, value| match target {
+                Target::Physical(scan) => send_scan_code(scan, value),
+                Target::Logical(key) => send_key(key, value),
+            },
+        )?;
     }
     let (mut dx, mut dy) = (0, 0);
     for event in &output.mouse {
@@ -936,6 +1135,42 @@ fn send_key(key: K, value: i32) -> io::Result<()> {
         return Err(io::Error::last_os_error());
     }
     Ok(())
+}
+
+/// Send a key event for a raw scan code.
+fn send_scan_code(scan: u16, value: i32) -> io::Result<()> {
+    let mut flags = KEYEVENTF_SCANCODE;
+    if extended_scan_code(scan) {
+        flags |= KEYEVENTF_EXTENDEDKEY;
+    }
+    if value == 0 {
+        flags |= KEYEVENTF_KEYUP;
+    }
+    let input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: 0,
+                wScan: scan,
+                dwFlags: flags,
+                dwExtraInfo: INPUT_MARKER,
+                ..KEYBDINPUT::default()
+            },
+        },
+    };
+    if unsafe { SendInput(1, &input, std::mem::size_of::<INPUT>() as i32) } != 1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Whether a scan code is emitted with the `E0` extended-key prefix.
+///
+/// Scan codes `0x1c`, `0x1d`, `0x35`, and `0x38` are shared between a main-block
+/// key and an extended key; characters only live on the main-block keys, so they
+/// are emitted unprefixed.
+fn extended_scan_code(scan: u16) -> bool {
+    matches!(scan, 0x47..=0x53 | 0x5b..=0x5d)
 }
 
 fn send_mouse_button(button: K, down: bool) -> io::Result<()> {
@@ -1075,5 +1310,26 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("KEY_BRIGHTNESSUP"));
+    }
+
+    #[test]
+    fn extended_scan_codes_only_prefix_keys_without_characters() {
+        // Extended-only keys keep the E0 prefix.
+        for scan in [
+            0x47u16, 0x48, 0x49, 0x4b, 0x4d, 0x4f, 0x50, 0x51, 0x52, 0x53, 0x5b, 0x5d,
+        ] {
+            assert!(
+                extended_scan_code(scan),
+                "scan {scan:#04x} should be extended"
+            );
+        }
+        // Shared scan codes carry characters on the main-block key, so the
+        // character path must emit them unprefixed.
+        for scan in [0x1cu16, 0x1d, 0x35, 0x38, 0x1e, 0x23, 0x2c, 0x39] {
+            assert!(
+                !extended_scan_code(scan),
+                "scan {scan:#04x} should not be extended"
+            );
+        }
     }
 }

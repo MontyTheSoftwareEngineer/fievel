@@ -5,6 +5,7 @@ use crate::{
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
     indicator::Overlays as Indicator,
+    layout::{Layout, LayoutEmitter, LayoutSource, Target},
     pipeline::{HintRequest, InputEngine as Engine},
     reload,
 };
@@ -14,6 +15,7 @@ use evdev::{
     KeyCode, RelativeAxisCode,
 };
 use std::{
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     fs, io,
     path::{Path, PathBuf},
@@ -350,6 +352,7 @@ fn attach_new_keyboards(
         let index = inputs.len();
         // Seed held keys so modifiers already down when the keyboard reconnects still work.
         for key in keys.iter() {
+            let key = outputs.translate(key);
             if held.key(index, key, 1) {
                 outputs.emit(engine.key(key, 1))?;
                 indicator.update(
@@ -498,11 +501,13 @@ struct Outputs {
     mouse: VirtualDevice,
     odometer: odometer::Counter,
     locator: crate::locator::Locator,
+    emitter: LayoutEmitter<LinuxLayout>,
 }
 
 impl Outputs {
     fn new(input_keys: &evdev::AttributeSetRef<KeyCode>, config: &Config) -> io::Result<Self> {
-        let keys = keyboard_keys(input_keys, config).map_err(io::Error::other)?;
+        let layout = LinuxLayout::new(&config.layout);
+        let keys = keyboard_keys(input_keys, config, &layout).map_err(io::Error::other)?;
         let keyboard = VirtualDevice::builder()?
             .name(KEYBOARD_NAME)
             .input_id(InputId::new(BusType::BUS_USB, 0x1209, 0xf301, 1))
@@ -533,16 +538,35 @@ impl Outputs {
             mouse,
             odometer: odometer::Counter::default(),
             locator: crate::locator::Locator::new()?,
+            emitter: LayoutEmitter::new(Layout::new(layout)),
         })
     }
 
     fn emit(&mut self, output: Output) -> io::Result<()> {
         let locate = output.locate;
+        let mut keyboard_events = Vec::with_capacity(output.keyboard.len());
+        for event in &output.keyboard {
+            if event.event_type() != EventType::KEY {
+                continue;
+            }
+            self.emitter.emit(
+                KeyCode(event.code()),
+                event.value(),
+                &mut |target, value| {
+                    let code = match target {
+                        Target::Physical(code) => code,
+                        Target::Logical(key) => key.0,
+                    };
+                    keyboard_events.push(evdev::InputEvent::new(EventType::KEY.0, code, value));
+                    Ok(())
+                },
+            )?;
+        }
         // Attempt both writes even if one device fails, especially during cleanup.
-        let keyboard = if output.keyboard.is_empty() {
+        let keyboard = if keyboard_events.is_empty() {
             Ok(())
         } else {
-            self.keyboard.emit(&output.keyboard)
+            self.keyboard.emit(&keyboard_events)
         };
         let mouse = if output.mouse.is_empty() {
             Ok(())
@@ -559,17 +583,226 @@ impl Outputs {
         };
         keyboard.and(mouse).and(locator)
     }
+
+    /// The active layout, for translating input key codes.
+    fn layout(&self) -> &Layout<LinuxLayout> {
+        self.emitter.layout()
+    }
+
+    /// Translate a physical key code to a canonical key.
+    fn translate(&self, key: KeyCode) -> KeyCode {
+        self.layout().key_from_physical(key.0).unwrap_or(key)
+    }
 }
 
 fn keyboard_keys(
     input_keys: &evdev::AttributeSetRef<KeyCode>,
     config: &Config,
+    layout: &LinuxLayout,
 ) -> Result<AttributeSet<KeyCode>, String> {
     Ok(input_keys
         .iter()
         .chain([KeyCode::KEY_HOME, KeyCode::KEY_END])
+        .chain(layout.keycodes())
         .chain(config.remap.output_keys()?)
         .collect())
+}
+
+/// Translate a physical key code to a canonical key, caching the resolution for
+/// the whole press so a layout change cannot strand a release.
+fn layout_key(
+    outputs: &Outputs,
+    cache: &mut BTreeMap<KeyCode, KeyCode>,
+    physical: KeyCode,
+    release: bool,
+) -> KeyCode {
+    if release {
+        cache
+            .remove(&physical)
+            .unwrap_or_else(|| outputs.translate(physical))
+    } else if let Some(key) = cache.get(&physical) {
+        *key
+    } else {
+        let key = outputs.translate(physical);
+        cache.insert(physical, key);
+        key
+    }
+}
+
+/// The character tables built from an XKB keymap.
+///
+/// Fievel works on canonical Linux key codes, which are physical positions. The
+/// active layout decides which character each position produces, so both
+/// directions need a table: position to character for input and character to
+/// position for output.
+struct KeymapTable {
+    base: BTreeMap<u16, char>,
+    shifted: BTreeMap<u16, char>,
+    by_char: BTreeMap<char, (u16, bool)>,
+    keycodes: BTreeSet<u16>,
+}
+
+impl KeymapTable {
+    fn build(keymap: &xkbcommon::xkb::Keymap) -> Self {
+        let mut table = Self {
+            base: BTreeMap::new(),
+            shifted: BTreeMap::new(),
+            by_char: BTreeMap::new(),
+            keycodes: BTreeSet::new(),
+        };
+        // XKB key codes are evdev key codes offset by 8.
+        let first = keymap.min_keycode().raw().saturating_sub(8);
+        let last = keymap.max_keycode().raw().saturating_sub(8);
+        for raw in first..=last {
+            let keycode = raw as u16;
+            if keycode == 0 {
+                continue;
+            }
+            let xkb_code = xkbcommon::xkb::Keycode::new(raw + 8);
+            if let Some(character) = character_at(keymap, xkb_code, 0) {
+                table.base.insert(keycode, character);
+                table.by_char.entry(character).or_insert((keycode, false));
+                table.keycodes.insert(keycode);
+            }
+            if let Some(character) = character_at(keymap, xkb_code, 1) {
+                table.shifted.insert(keycode, character);
+                table.by_char.entry(character).or_insert((keycode, true));
+                table.keycodes.insert(keycode);
+            }
+        }
+        table
+    }
+}
+
+/// The character a key produces at one shift level of the base group.
+fn character_at(
+    keymap: &xkbcommon::xkb::Keymap,
+    keycode: xkbcommon::xkb::Keycode,
+    level: u32,
+) -> Option<char> {
+    keymap
+        .key_get_syms_by_level(keycode, 0, level)
+        .first()
+        .and_then(|symbol| symbol.key_char())
+}
+
+/// The active Linux keyboard layout as a layout source.
+#[derive(Clone)]
+struct LinuxLayout {
+    table: Option<Arc<KeymapTable>>,
+}
+
+impl LinuxLayout {
+    /// Build the layout from the `layout` config value.
+    fn new(spec: &str) -> Self {
+        Self {
+            table: build_keymap(spec).map(Arc::new),
+        }
+    }
+
+    /// The physical key codes this layout can produce.
+    fn keycodes(&self) -> impl Iterator<Item = KeyCode> + '_ {
+        self.table
+            .iter()
+            .flat_map(|table| table.keycodes.iter().copied())
+            .map(KeyCode::new)
+    }
+}
+
+impl LayoutSource for LinuxLayout {
+    fn base_char(&self, keycode: u16) -> Option<char> {
+        self.table.as_ref()?.base.get(&keycode).copied()
+    }
+
+    fn shift_char(&self, keycode: u16) -> Option<char> {
+        self.table.as_ref()?.shifted.get(&keycode).copied()
+    }
+
+    fn key_for_char(&self, character: char) -> Option<(u16, bool)> {
+        self.table.as_ref()?.by_char.get(&character).copied()
+    }
+
+    fn physical_key(&self, keycode: u16) -> Option<KeyCode> {
+        Some(KeyCode::new(keycode))
+    }
+}
+
+/// Build the keymap for a `layout` config value, or `None` for the physical
+/// table.
+fn build_keymap(spec: &str) -> Option<KeymapTable> {
+    let spec = spec.trim();
+    if spec.is_empty() || spec.eq_ignore_ascii_case("physical") {
+        return None;
+    }
+    let (layout, variant) = if spec.eq_ignore_ascii_case("auto") {
+        auto_layout()
+    } else {
+        split_layout_spec(spec)
+    };
+    let context = xkbcommon::xkb::Context::new(xkbcommon::xkb::CONTEXT_NO_FLAGS);
+    let keymap = xkbcommon::xkb::Keymap::new_from_names(
+        &context,
+        "",
+        "",
+        layout.as_str(),
+        variant.as_str(),
+        None,
+        xkbcommon::xkb::KEYMAP_COMPILE_NO_FLAGS,
+    )?;
+    Some(KeymapTable::build(&keymap))
+}
+
+/// The layout names from the environment or `/etc/default/keyboard`.
+fn auto_layout() -> (String, String) {
+    if let Ok(layout) = std::env::var("XKB_DEFAULT_LAYOUT") {
+        if !layout.trim().is_empty() {
+            let variant = std::env::var("XKB_DEFAULT_VARIANT").unwrap_or_default();
+            return (layout.trim().to_owned(), variant.trim().to_owned());
+        }
+    }
+    if let Ok(text) = fs::read_to_string("/etc/default/keyboard") {
+        let mut layout = None;
+        let mut variant = String::new();
+        for line in text.lines() {
+            let line = line.trim();
+            if let Some(value) = line.strip_prefix("XKBLAYOUT=") {
+                layout = Some(unquote(value));
+            } else if let Some(value) = line.strip_prefix("XKBVARIANT=") {
+                variant = unquote(value);
+            }
+        }
+        if let Some(layout) = layout {
+            if !layout.trim().is_empty() {
+                return (layout.trim().to_owned(), variant.trim().to_owned());
+            }
+        }
+    }
+    ("us".to_owned(), String::new())
+}
+
+fn unquote(value: &str) -> String {
+    value.trim().trim_matches('"').to_owned()
+}
+
+/// Split an XKB spec such as `de`, `us(dvorak)`, or `de,us(dvorak)` into the
+/// layout and variant name lists.
+fn split_layout_spec(spec: &str) -> (String, String) {
+    let mut layouts = Vec::new();
+    let mut variants = Vec::new();
+    for part in spec.split(',') {
+        let part = part.trim();
+        match part.split_once('(') {
+            Some((layout, variant)) => {
+                layouts.push(layout.trim().to_owned());
+                variants.push(variant.trim().trim_end_matches(')').to_owned());
+            }
+            None => {
+                layouts.push(part.to_owned());
+                variants.push(String::new());
+            }
+        }
+    }
+    (layouts.join(","), variants.join(","))
 }
 
 const RESCAN_INTERVAL: Duration = Duration::from_secs(2);
@@ -603,6 +836,9 @@ fn event_loop(
     let mut hint_mode: Option<ActiveHints> = None;
     let mut hint_input = HintInput::new(config).map_err(io::Error::other)?;
     let mut suppressed_keys = std::collections::BTreeSet::new();
+    // Physical key codes resolve to canonical keys for the whole press, so a
+    // layout change cannot strand a release on a different key.
+    let mut layout_keys: BTreeMap<KeyCode, KeyCode> = BTreeMap::new();
     while !stop.load(Ordering::Relaxed) {
         let now = Instant::now();
         if hint_mode.is_none() {
@@ -629,8 +865,9 @@ fn event_loop(
                         if event.event_type() != EventType::KEY {
                             continue;
                         }
-                        let key = KeyCode(event.code());
+                        let physical = KeyCode(event.code());
                         let value = event.value();
+                        let key = layout_key(outputs, &mut layout_keys, physical, value == 0);
                         let changed = held.key(index, key, value);
                         if suppressed_keys.contains(&key) {
                             if value == 0 && !held.contains(key) {
@@ -1026,6 +1263,7 @@ fn run_with_args(args: Args) -> Result<(), Box<dyn Error>> {
     let result = (|| -> io::Result<()> {
         for (index, (_, input)) in grabbed.iter().enumerate() {
             for key in input.get_key_state()?.iter() {
+                let key = outputs.translate(key);
                 if held.key(index, key, 1) {
                     outputs.emit(engine.key(key, 1))?;
                     indicator.update(
@@ -1223,7 +1461,12 @@ mod tests {
     fn keyboard_supports_home_end_even_when_source_does_not() {
         let input_keys: AttributeSet<KeyCode> =
             [KeyCode::KEY_A, KeyCode::KEY_F3].into_iter().collect();
-        let keys = keyboard_keys(&input_keys, &Config::default()).unwrap();
+        let keys = keyboard_keys(
+            &input_keys,
+            &Config::default(),
+            &LinuxLayout::new("physical"),
+        )
+        .unwrap();
         for key in [
             KeyCode::KEY_A,
             KeyCode::KEY_F3,
@@ -1242,7 +1485,7 @@ mod tests {
         )
         .unwrap();
         let input_keys: AttributeSet<KeyCode> = [KeyCode::KEY_A].into_iter().collect();
-        let keys = keyboard_keys(&input_keys, &config).unwrap();
+        let keys = keyboard_keys(&input_keys, &config, &LinuxLayout::new("physical")).unwrap();
         for key in [
             KeyCode::KEY_A,
             KeyCode::KEY_LEFTCTRL,
@@ -1332,7 +1575,7 @@ mod tests {
         assert!(validate_input_keys(&second, &config).is_err());
         let supported = merge_keys([&*first, &*second, &*third]);
         validate_input_keys(&supported, &config).unwrap();
-        let output = keyboard_keys(&supported, &config).unwrap();
+        let output = keyboard_keys(&supported, &config, &LinuxLayout::new("physical")).unwrap();
         for key in [KeyCode::KEY_Z, KeyCode::KEY_VOLUMEUP, KeyCode::KEY_F24] {
             assert!(output.contains(key));
         }
@@ -1687,5 +1930,68 @@ mod tests {
             [(EventType::KEY.0, KeyCode::KEY_H.0, 0)]
         );
         Ok(())
+    }
+
+    #[test]
+    fn layout_tables_follow_us_german_and_dvorak() {
+        // These need libxkbcommon; skip when it cannot compile a keymap.
+        if build_keymap("us").is_none() {
+            return;
+        }
+
+        // US: the physical H position types h.
+        let us = LinuxLayout::new("us");
+        assert_eq!(
+            Layout::new(us).key_from_physical(KeyCode::KEY_H.0),
+            Some(KeyCode::KEY_H)
+        );
+
+        // German QWERTZ: the physical Z position types y and the physical Y position types z.
+        let de = LinuxLayout::new("de");
+        assert_eq!(
+            Layout::new(de.clone()).key_from_physical(KeyCode::KEY_Z.0),
+            Some(KeyCode::KEY_Y)
+        );
+        assert_eq!(
+            Layout::new(de).key_from_physical(KeyCode::KEY_Y.0),
+            Some(KeyCode::KEY_Z)
+        );
+
+        // Dvorak: the physical J position types h.
+        let dvorak = LinuxLayout::new("us(dvorak)");
+        assert_eq!(
+            Layout::new(dvorak).key_from_physical(KeyCode::KEY_J.0),
+            Some(KeyCode::KEY_H)
+        );
+    }
+
+    #[test]
+    fn layout_tables_map_output_characters_back_to_positions() {
+        if build_keymap("us").is_none() {
+            return;
+        }
+
+        // Shifted characters report the shift requirement.
+        let us = LinuxLayout::new("us");
+        assert_eq!(us.key_for_char('h'), Some((KeyCode::KEY_H.0, false)));
+        assert_eq!(us.key_for_char('!'), Some((KeyCode::KEY_1.0, true)));
+        assert_eq!(us.base_char(KeyCode::KEY_H.0), Some('h'));
+        assert_eq!(us.shift_char(KeyCode::KEY_1.0), Some('!'));
+
+        // German swaps the Y and Z positions.
+        let de = LinuxLayout::new("de");
+        assert_eq!(de.key_for_char('y'), Some((KeyCode::KEY_Z.0, false)));
+        assert_eq!(de.key_for_char('z'), Some((KeyCode::KEY_Y.0, false)));
+    }
+
+    #[test]
+    fn physical_layout_keeps_the_old_behaviour() {
+        let physical = LinuxLayout::new("physical");
+        assert_eq!(
+            Layout::new(physical.clone()).key_from_physical(KeyCode::KEY_H.0),
+            Some(KeyCode::KEY_H)
+        );
+        assert_eq!(physical.key_for_char('h'), None);
+        assert_eq!(physical.base_char(KeyCode::KEY_H.0), None);
     }
 }
