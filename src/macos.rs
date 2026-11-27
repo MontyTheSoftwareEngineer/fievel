@@ -5,6 +5,7 @@ use crate::{
     hint_input::{HintInput, HintInputEvent},
     hints::{ActiveHints, HintResult},
     indicator::Overlays,
+    layout::{Layout, LayoutEmitter, LayoutSource, Target},
     odometer,
     pipeline::{HintRequest, InputEngine},
     reload,
@@ -12,7 +13,7 @@ use crate::{
 use clap::Parser;
 use evdev::{EventType, KeyCode as K, RelativeAxisCode as R};
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     error::Error,
     ffi::{c_void, CString},
     io,
@@ -103,6 +104,9 @@ unsafe extern "C" {
     fn fievel_ui_is_app_bundle() -> bool;
     fn fievel_ui_show_error(message: *const std::ffi::c_char);
     fn fievel_ui_locate_cursor();
+    fn fievel_keyboard_character(keycode: u16, shift: bool) -> u32;
+    fn fievel_character_keycode(character: u32, shift: *mut bool) -> u16;
+    fn fievel_layout_poll();
 }
 
 fn positive_speed(value: &str) -> Result<f64, String> {
@@ -233,6 +237,11 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
     let mut hints: Option<ActiveHints> = None;
     let mut held = BTreeSet::new();
     let mut suppressed_keys = BTreeSet::new();
+    let mut emitter = LayoutEmitter::new(Layout::new(MacLayout));
+    let mut held_layout: BTreeMap<u16, K> = BTreeMap::new();
+    // TIS validates input sources on the main dispatch queue, so prime the
+    // layout cache here. The UI pump refreshes it when the source changes.
+    unsafe { fievel_layout_poll() };
     let mut last = Instant::now();
     let worker = thread::Builder::new()
         .name("fievel-input-engine".into())
@@ -244,7 +253,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                     let elapsed = now.saturating_duration_since(last);
                     last = now;
                     if hints.is_none() {
-                        emit(engine.advance(elapsed), &mut odometer)?;
+                        emit(engine.advance(elapsed), &mut odometer, &mut emitter)?;
                         indicator.update(
                             engine.active(),
                             engine.keycast_keys(),
@@ -276,7 +285,22 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                         let mut event = NativeInputEventGuard(event);
                         match event.0.kind {
                             1 => {
-                                let Some(key) = linux_keycode(event.0.keycode) else {
+                                // Translate through the active layout. A press is
+                                // cached so autorepeat and release keep the same
+                                // canonical key even if the layout changes.
+                                let physical = event.0.keycode;
+                                let key = if event.0.value == 0 {
+                                    held_layout.remove(&physical)
+                                } else if let Some(key) = held_layout.get(&physical) {
+                                    Some(*key)
+                                } else {
+                                    let key = emitter.key_from_physical(physical);
+                                    if let Some(key) = key {
+                                        held_layout.insert(physical, key);
+                                    }
+                                    key
+                                };
+                                let Some(key) = key else {
                                     unsafe { fievel_input_repost(&mut event.0) };
                                     continue;
                                 };
@@ -293,10 +317,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                                     continue;
                                 }
                                 let changed = match value {
-                                    1 => {
-                                        let fresh = held.insert(key);
-                                        fresh
-                                    }
+                                    1 => held.insert(key),
                                     0 => held.remove(&key),
                                     2 => held.contains(&key),
                                     _ => false,
@@ -322,7 +343,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                                         let actions = hint_input.key(key, value);
                                         handle_hint_input(actions, &mut hints, &config);
                                     } else {
-                                        emit(engine.key(key, value), &mut odometer)?;
+                                        emit(engine.key(key, value), &mut odometer, &mut emitter)?;
                                         indicator.update(
                                             engine.active(),
                                             engine.keycast_keys(),
@@ -376,7 +397,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                                 }
                                 hints = None;
                                 indicator.clear();
-                                emit(engine.release_all(), &mut odometer)?;
+                                emit(engine.release_all(), &mut odometer, &mut emitter)?;
                                 suppressed_keys.extend(held.iter().copied());
                                 held.clear();
                                 hint_input = new_hint_input;
@@ -408,7 +429,7 @@ fn run_inner(args: Args) -> Result<(), Box<dyn Error>> {
                 active.cancel();
             }
             indicator.clear();
-            let release = emit(engine.release_all(), &mut odometer);
+            let release = emit(engine.release_all(), &mut odometer, &mut emitter);
             let saved = odometer.finish();
             result.map_err(|error| error.to_string())?;
             release.map_err(|error| error.to_string())?;
@@ -507,7 +528,11 @@ fn handle_hint_input(
     }
 }
 
-fn emit(output: Output, odometer: &mut odometer::Odometer) -> io::Result<()> {
+fn emit(
+    output: Output,
+    odometer: &mut odometer::Odometer,
+    emitter: &mut LayoutEmitter<MacLayout>,
+) -> io::Result<()> {
     if output.locate {
         unsafe { fievel_ui_locate_cursor() };
     }
@@ -516,14 +541,29 @@ fn emit(output: Output, odometer: &mut odometer::Odometer) -> io::Result<()> {
             continue;
         }
         let key = K(event.code());
-        let code = mac_keycode(key).ok_or_else(|| {
-            io::Error::other(format!("no macOS virtual keycode exists for {key:?}"))
+        emitter.emit(key, event.value(), &mut |target, value| match target {
+            Target::Physical(code) => {
+                if unsafe { fievel_send_key(code, value) } {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!(
+                        "failed to emit macOS key event for physical keycode {code}"
+                    )))
+                }
+            }
+            Target::Logical(key) => {
+                let code = mac_keycode(key).ok_or_else(|| {
+                    io::Error::other(format!("no macOS virtual keycode exists for {key:?}"))
+                })?;
+                if unsafe { fievel_send_key(code, value) } {
+                    Ok(())
+                } else {
+                    Err(io::Error::other(format!(
+                        "failed to emit keyboard event for {key:?}"
+                    )))
+                }
+            }
         })?;
-        if !unsafe { fievel_send_key(code, event.value()) } {
-            return Err(io::Error::other(format!(
-                "failed to emit keyboard event for {key:?}"
-            )));
-        }
     }
 
     let (mut dx, mut dy) = (0.0, 0.0);
@@ -581,6 +621,45 @@ fn emit_mouse_button(button: i32, value: i32) -> io::Result<()> {
     Ok(())
 }
 
+/// The active macOS input source as a layout source.
+///
+/// The native helpers cache the current key layout and the reverse character
+/// table, so these calls are cheap enough to run per key event.
+struct MacLayout;
+
+impl LayoutSource for MacLayout {
+    fn base_char(&self, keycode: u16) -> Option<char> {
+        let character = unsafe { fievel_keyboard_character(keycode, false) };
+        if character == 0 {
+            None
+        } else {
+            char::from_u32(character)
+        }
+    }
+
+    fn shift_char(&self, keycode: u16) -> Option<char> {
+        let character = unsafe { fievel_keyboard_character(keycode, true) };
+        if character == 0 {
+            None
+        } else {
+            char::from_u32(character)
+        }
+    }
+
+    fn key_for_char(&self, character: char) -> Option<(u16, bool)> {
+        let mut shift = false;
+        let keycode = unsafe { fievel_character_keycode(character as u32, &mut shift) };
+        if keycode == u16::MAX {
+            None
+        } else {
+            Some((keycode, shift))
+        }
+    }
+
+    fn physical_key(&self, keycode: u16) -> Option<K> {
+        linux_keycode(keycode)
+    }
+}
 fn linux_keycode(keycode: u16) -> Option<K> {
     Some(match keycode {
         0 => K::KEY_A,
@@ -858,6 +937,44 @@ mod tests {
         ] {
             assert_eq!(linux_keycode(mac_keycode(key).unwrap()), Some(key));
         }
+    }
+
+    #[test]
+    fn macos_layout_round_trips_canonical_characters() {
+        // Skip when no input source is available (for example a headless CI).
+        if MacLayout.base_char(0).is_none() {
+            return;
+        }
+        let layout = Layout::new(MacLayout);
+        for character in "abcdefghijklmnopqrstuvwxyz0123456789`-=[]\\;',./ ".chars() {
+            let key = crate::layout::unshifted_key(character).unwrap();
+            match layout.emission_for(key) {
+                crate::layout::Emission::Physical {
+                    keycode,
+                    needs_shift,
+                } => {
+                    let produced = if needs_shift {
+                        MacLayout.shift_char(keycode)
+                    } else {
+                        MacLayout.base_char(keycode)
+                    };
+                    assert_eq!(produced, Some(character), "key {key:?}");
+                }
+                crate::layout::Emission::Logical => {
+                    panic!("no physical key produces {character:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn macos_layout_falls_back_to_physical_positions() {
+        if MacLayout.base_char(0).is_none() {
+            return;
+        }
+        let layout = Layout::new(MacLayout);
+        // F3 produces no character, so the physical table decides.
+        assert_eq!(layout.key_from_physical(99), Some(K::KEY_F3));
     }
 
     #[test]

@@ -335,6 +335,10 @@ With [Rust and Cargo](https://rustup.rs/) installed, build from the project dire
 cargo build --release
 ```
 
+On Linux the build links against `libxkbcommon` for layout-aware keys; install
+the development package (for example `libxkbcommon-dev` on Debian/Ubuntu) or use
+the Nix build below, which supplies it.
+
 Set up [device permissions](#device-permissions) once, then run the binary:
 
 ```sh
@@ -473,6 +477,7 @@ mappings described below.
 mode = "hold" # "hold" (default) or "toggle"
 notify = true # Persistent, faint Free Mouse Mode indicator
 home_end_enabled = true # Scroll up+down sends Home; scroll left+right sends End
+layout = "auto" # Linux only: "auto", "physical", or an XKB spec such as "de"
 
 [macros]
 enabled = false # Set true to enable macro recording and playback
@@ -591,6 +596,25 @@ whole chord becomes held; releases and keyboard autorepeat do not toggle it.
 Release and repress at least one member to toggle again. Slow/fast and
 mouse-button bindings still use hold behavior in either mode.
 
+
+### Keyboard layouts
+
+Bindings and hint labels name *layout characters*, not physical positions. On a
+Dvorak, Colemak, AZERTY, or QWERTZ layout, `left = "h"` means the key that types
+`h` under the active layout, and hint labels follow the same rule. Special keys
+(F-keys, arrows, modifiers, keypad, media keys) stay physical. Output remaps are
+layout-aware too: a remap that emits `h` types `h` on the active layout, and
+Fievel presses Shift automatically when the character needs it.
+
+macOS and Windows follow the active layout automatically and follow live layout
+switches. Linux reads the XKB layout at startup from the `layout` value:
+`"auto"` (the default) reads the environment or `/etc/default/keyboard`,
+`"physical"` keeps raw key positions, and any XKB spec such as `"de"` or
+`"us(dvorak)"` selects a layout explicitly. A background client cannot observe
+layout switches on Wayland, and Fievel does not open a display connection on
+X11, so reload or restart Fievel after changing your layout. Characters the
+canonical table does not know (umlauts, accents, CJK) fall back to the physical
+key so typing still works.
 
 ### Home-row mods and navigation layers
 

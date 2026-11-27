@@ -25,6 +25,7 @@ const MAX_CONFIG_SIZE: usize = 1024 * 1024;
 struct EditorConfig {
     mode: String,
     notify: bool,
+    layout: String,
     home_end_enabled: bool,
     speeds: EditorSpeeds,
     easing: EditorEasing,
@@ -173,6 +174,7 @@ impl From<&Config> for EditorConfig {
             }
             .to_owned(),
             notify: config.notify,
+            layout: config.layout.clone(),
             home_end_enabled: config.home_end_enabled,
             speeds: EditorSpeeds {
                 normal: config.speeds.normal,
@@ -786,7 +788,8 @@ const CONFIG_PAGE: &str = r##"<!doctype html>
       { title: "General", fields: [
         { path: "mode", label: "Free Mouse mode", kind: "select", options: [["hold", "Hold"], ["toggle", "Toggle"]] },
         { path: "notify", label: "Show notifications", kind: "checkbox" },
-        { path: "home_end_enabled", label: "Enable Home/End navigation", kind: "checkbox" }
+        { path: "home_end_enabled", label: "Enable Home/End navigation", kind: "checkbox" },
+        { path: "layout", label: "Keyboard layout (Linux: auto, physical, or XKB spec)", kind: "text" }
       ]},
       { title: "Movement and scrolling", fields: [
         { path: "speeds.normal", label: "Movement speed", kind: "number", min: 0.0001, max: 100000, step: "any" },

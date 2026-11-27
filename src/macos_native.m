@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <Carbon/Carbon.h>
 #import <ApplicationServices/ApplicationServices.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <CoreGraphics/CoreGraphics.h>
@@ -103,6 +104,7 @@ static CGPoint last_click_positions[3];
 static int posted_button_click_counts[3];
 static bool exit_cleanup_registered;
 static void fievel_release_posted_inputs(void);
+void fievel_layout_poll(void);
 
 @interface FievelMenuTarget : NSObject
 - (void)requestExit:(id)sender;
@@ -550,6 +552,12 @@ void fievel_ui_clear_hints(void) {
 void fievel_ui_pump(void) {
     @autoreleasepool {
         fievel_ui_ensure();
+        static CFTimeInterval next_layout_poll = 0;
+        CFTimeInterval now = CFAbsoluteTimeGetCurrent();
+        if (now >= next_layout_poll) {
+            fievel_layout_poll();
+            next_layout_poll = now + 0.25;
+        }
         if (cursor_pulse_until > 0 && CFAbsoluteTimeGetCurrent() >= cursor_pulse_until) {
             cursor_pulse_until = 0;
             [overlay_view setNeedsDisplay:YES];
@@ -1051,6 +1059,178 @@ static void fievel_release_posted_inputs(void) {
     CFRelease(source);
 }
 
+/*
+ * Layout-aware key translation.
+ *
+ * Fievel works on canonical key codes, but macOS virtual key codes are physical
+ * positions. These helpers translate a virtual key code into the character the
+ * active input source produces, and back, so bindings follow the user's layout.
+ */
+
+typedef struct {
+    uint16_t keycode;
+    bool shift;
+} FievelCharacterKey;
+
+static pthread_mutex_t layout_lock = PTHREAD_MUTEX_INITIALIZER;
+static TISInputSourceRef layout_source = NULL;
+static CFDataRef layout_data = NULL;
+static uint32_t layout_keyboard_type = 0;
+static uint32_t layout_generation = 0;
+static uint32_t reverse_generation = 0;
+static FievelCharacterKey reverse_keys[95];
+
+static void fievel_layout_clear_locked(void) {
+    if (layout_data != NULL) {
+        CFRelease(layout_data);
+        layout_data = NULL;
+    }
+    if (layout_source != NULL) {
+        CFRelease(layout_source);
+        layout_source = NULL;
+    }
+    layout_keyboard_type = 0;
+    layout_generation += 1;
+}
+
+/* Refresh the cached layout. TIS validates input sources on the main dispatch
+ * queue, so this must only be called from the main thread. */
+static bool fievel_layout_poll_locked(void) {
+    TISInputSourceRef source = TISCopyCurrentKeyboardLayoutInputSource();
+    if (source == NULL) {
+        return false;
+    }
+    uint32_t keyboard_type = (uint32_t)LMGetKbdType();
+    bool unchanged = layout_source != NULL &&
+                     layout_data != NULL &&
+                     layout_keyboard_type == keyboard_type &&
+                     CFEqual(layout_source, source);
+    if (!unchanged) {
+        CFDataRef data = (CFDataRef)TISGetInputSourceProperty(
+            source, kTISPropertyUnicodeKeyLayoutData);
+        if (data == NULL) {
+            CFRelease(source);
+            fievel_layout_clear_locked();
+            return false;
+        }
+        CFRetain(data);
+        fievel_layout_clear_locked();
+        layout_source = (TISInputSourceRef)CFRetain(source);
+        layout_data = data;
+        layout_keyboard_type = keyboard_type;
+        layout_generation += 1;
+    }
+    CFRelease(source);
+    return layout_data != NULL;
+}
+
+/* Refresh the layout cache. Main thread only. */
+void fievel_layout_poll(void) {
+    pthread_mutex_lock(&layout_lock);
+    fievel_layout_poll_locked();
+    pthread_mutex_unlock(&layout_lock);
+}
+
+/* Translate one virtual key code with the active layout. */
+static uint32_t fievel_layout_translate_locked(uint16_t keycode, bool shift, bool *ok) {
+    if (ok != NULL) {
+        *ok = false;
+    }
+    if (keycode >= 128 || layout_data == NULL) {
+        return 0;
+    }
+    const UCKeyboardLayout *layout = (const UCKeyboardLayout *)CFDataGetBytePtr(layout_data);
+    if (layout == NULL) {
+        return 0;
+    }
+    UInt32 dead_key_state = 0;
+    UniChar characters[4];
+    UniCharCount length = 0;
+    UInt32 modifier_state = shift ? (shiftKey >> 8) : 0;
+    OSStatus status = UCKeyTranslate(
+        layout,
+        keycode,
+        kUCKeyActionDown,
+        modifier_state,
+        layout_keyboard_type,
+        kUCKeyTranslateNoDeadKeysMask,
+        &dead_key_state,
+        (UniCharCount)(sizeof(characters) / sizeof(characters[0])),
+        &length,
+        characters);
+    if (status != noErr || length == 0) {
+        return 0;
+    }
+    if (ok != NULL) {
+        *ok = true;
+    }
+    return (uint32_t)characters[0];
+}
+
+/* Fill the reverse table mapping printable ASCII to a key code and Shift. */
+static void fievel_reverse_rebuild_locked(void) {
+    if (reverse_generation == layout_generation) {
+        return;
+    }
+    for (size_t index = 0; index < sizeof(reverse_keys) / sizeof(reverse_keys[0]); index++) {
+        reverse_keys[index].keycode = UINT16_MAX;
+        reverse_keys[index].shift = false;
+    }
+    for (uint16_t keycode = 0; keycode < 128; keycode++) {
+        bool ok = false;
+        uint32_t base = fievel_layout_translate_locked(keycode, false, &ok);
+        if (ok && base >= 0x20 && base <= 0x7e) {
+            size_t slot = (size_t)(base - 0x20);
+            if (reverse_keys[slot].keycode == UINT16_MAX) {
+                reverse_keys[slot].keycode = keycode;
+                reverse_keys[slot].shift = false;
+            }
+        }
+        uint32_t shifted = fievel_layout_translate_locked(keycode, true, &ok);
+        if (ok && shifted >= 0x20 && shifted <= 0x7e) {
+            size_t slot = (size_t)(shifted - 0x20);
+            if (reverse_keys[slot].keycode == UINT16_MAX) {
+                reverse_keys[slot].keycode = keycode;
+                reverse_keys[slot].shift = true;
+            }
+        }
+    }
+    reverse_generation = layout_generation;
+}
+
+/* The character a virtual key code produces with the active layout. */
+uint32_t fievel_keyboard_character(uint16_t keycode, bool shift) {
+    pthread_mutex_lock(&layout_lock);
+    bool ok = false;
+    uint32_t character = fievel_layout_translate_locked(keycode, shift, &ok);
+    pthread_mutex_unlock(&layout_lock);
+    return ok ? character : 0;
+}
+
+/* The virtual key code and Shift requirement for a character, or UINT16_MAX. */
+uint16_t fievel_character_keycode(uint32_t character, bool *shift) {
+    if (shift != NULL) {
+        *shift = false;
+    }
+    if (character < 0x20 || character > 0x7e) {
+        return UINT16_MAX;
+    }
+    pthread_mutex_lock(&layout_lock);
+    if (layout_data == NULL) {
+        pthread_mutex_unlock(&layout_lock);
+        return UINT16_MAX;
+    }
+    fievel_reverse_rebuild_locked();
+    FievelCharacterKey found = reverse_keys[(size_t)(character - 0x20)];
+    pthread_mutex_unlock(&layout_lock);
+    if (found.keycode == UINT16_MAX) {
+        return UINT16_MAX;
+    }
+    if (shift != NULL) {
+        *shift = found.shift;
+    }
+    return found.keycode;
+}
 bool fievel_send_key(uint16_t keycode, int value) {
     if (keycode >= 256) {
         return false;

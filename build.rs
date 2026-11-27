@@ -12,6 +12,7 @@ fn main() {
             .compile("fievel_macos_native");
         for framework in [
             "AppKit",
+            "Carbon",
             "ApplicationServices",
             "CoreGraphics",
             "CoreFoundation",

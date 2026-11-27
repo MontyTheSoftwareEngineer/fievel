@@ -15,6 +15,8 @@ use std::{
 pub struct Config {
     pub mode: Mode,
     pub notify: bool,
+    /// Keyboard layout used on Linux: `auto`, `physical`, or an XKB spec.
+    pub layout: String,
     pub home_end_enabled: bool,
     pub speeds: Speeds,
     pub easing: Easing,
@@ -61,6 +63,7 @@ impl Default for Config {
         Self {
             mode: Mode::default(),
             notify: true,
+            layout: "auto".to_owned(),
             home_end_enabled: true,
             speeds: Speeds::default(),
             easing: Easing::default(),
@@ -611,6 +614,7 @@ fn reset_config_value(config: &mut Config, path: &str) -> bool {
     match path {
         "mode" => config.mode = defaults.mode,
         "notify" => config.notify = defaults.notify,
+        "layout" => config.layout = defaults.layout,
         "home_end_enabled" => config.home_end_enabled = defaults.home_end_enabled,
         "keycast.enabled" => config.keycast.enabled = defaults.keycast.enabled,
         "keycast.hotkey" => config.keycast.hotkey = defaults.keycast.hotkey,
@@ -813,6 +817,21 @@ pub fn validate_speed(speed: f64) -> Result<(), String> {
     }
 }
 
+/// Validate the `layout` value: `auto`, `physical`, or an XKB layout spec.
+pub fn validate_layout(layout: &str) -> Result<(), String> {
+    let trimmed = layout.trim();
+    if trimmed.is_empty() {
+        return Err("layout must be \"auto\", \"physical\", or an XKB layout spec".to_owned());
+    }
+    if trimmed.eq_ignore_ascii_case("auto") || trimmed.eq_ignore_ascii_case("physical") {
+        return Ok(());
+    }
+    if trimmed.chars().any(|character| character.is_whitespace()) {
+        return Err("layout must not contain whitespace".to_owned());
+    }
+    Ok(())
+}
+
 impl Config {
     pub fn mouse_controls(&self) -> Vec<K> {
         let mut controls = self.keys.controls().to_vec();
@@ -837,6 +856,7 @@ impl Config {
             &[
                 "mode",
                 "notify",
+                "layout",
                 "home_end_enabled",
                 "speeds",
                 "easing",
@@ -849,6 +869,7 @@ impl Config {
         );
         apply_value(root, "mode", "mode", &mut config.mode, &mut changed);
         apply_value(root, "notify", "notify", &mut config.notify, &mut changed);
+        apply_value(root, "layout", "layout", &mut config.layout, &mut changed);
         apply_value(
             root,
             "home_end_enabled",
@@ -1506,6 +1527,7 @@ impl Config {
             ),
         );
         root.insert("notify".to_owned(), Value::Boolean(self.notify));
+        root.insert("layout".to_owned(), Value::String(self.layout.clone()));
         root.insert(
             "home_end_enabled".to_owned(),
             Value::Boolean(self.home_end_enabled),
@@ -1724,6 +1746,7 @@ impl Config {
 
     pub fn validate(&self) -> Result<(), String> {
         self.remap.validate()?;
+        validate_layout(&self.layout).map_err(|error| format!("layout: {error}"))?;
         if !(1..=32).contains(&self.keycast.max_keys) {
             return Err("keycast.max_keys: must be between 1 and 32".to_owned());
         }
